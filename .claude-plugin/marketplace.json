@@ -1,0 +1,15 @@
+{
+  "name": "langfuse-observability",
+  "description": "Observability plugins from Langfuse for Claude Code",
+  "owner": {
+    "name": "Langfuse",
+    "url": "https://langfuse.com"
+  },
+  "plugins": [
+    {
+      "name": "langfuse",
+      "source": "./",
+      "description": "Trace Claude Code sessions to Langfuse"
+    }
+  ]
+}
