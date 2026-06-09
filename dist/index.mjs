@@ -46865,7 +46865,7 @@ function emitToolCall(tc, parent, clip, fallbackEnd) {
 /** Emit a single turn as a Langfuse observation tree. */
 function emitTurn(turn, turnNum, transcriptPath, config$1) {
 	const clip = makeClip(config$1.max_chars);
-	const root = startObservation(`Claude Code - Turn ${turnNum}`, {
+	const root = startObservation("Claude Code Turn", {
 		input: {
 			role: "user",
 			content: clip(turn.userText)
@@ -46881,7 +46881,7 @@ function emitTurn(turn, turnNum, transcriptPath, config$1) {
 			"claude.assistant_message_count": turn.steps.length
 		}
 	}, {
-		asType: "span",
+		asType: "agent",
 		startTime: asDate(turn.userTimestamp)
 	});
 	let prevTs = turn.userTimestamp;
@@ -46949,7 +46949,7 @@ async function convertTranscript(transcriptPath, sessionId, config$1) {
 		try {
 			await propagateAttributes({
 				sessionId,
-				traceName: `Claude Code - Turn ${turnNum}`,
+				traceName: "Claude Code Turn",
 				tags: ["claude-code", ...config$1.tags ?? []],
 				...config$1.user_id ? { userId: config$1.user_id } : {},
 				...config$1.metadata ? { metadata: config$1.metadata } : {}

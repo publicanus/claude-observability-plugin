@@ -55,7 +55,7 @@ function emitTurn(turn: Turn, turnNum: number, transcriptPath: string, config: C
   const clip = makeClip(config.max_chars);
 
   const root = startObservation(
-    `Claude Code - Turn ${turnNum}`,
+    "Claude Code Turn",
     {
       input: { role: "user", content: clip(turn.userText) },
       output:
@@ -70,7 +70,7 @@ function emitTurn(turn: Turn, turnNum: number, transcriptPath: string, config: C
       },
     },
     {
-      asType: "span",
+      asType: "agent",
       startTime: asDate(turn.userTimestamp),
     },
   );
@@ -162,7 +162,7 @@ export async function convertTranscript(
       await propagateAttributes(
         {
           sessionId,
-          traceName: `Claude Code - Turn ${turnNum}`,
+          traceName: "Claude Code Turn",
           tags: ["claude-code", ...(config.tags ?? [])],
           ...(config.user_id ? { userId: config.user_id } : {}),
           ...(config.metadata ? { metadata: config.metadata } : {}),
