@@ -1,0 +1,56 @@
+{
+  "name": "@langfuse/claude-observability-plugin",
+  "version": "2.0.0",
+  "description": "Claude Code plugin that traces sessions, turns, generations, and tool calls to Langfuse",
+  "keywords": [
+    "claude-code",
+    "claude",
+    "anthropic",
+    "langfuse",
+    "observability",
+    "tracing",
+    "opentelemetry"
+  ],
+  "homepage": "https://langfuse.com/integrations/other/claude-code",
+  "bugs": {
+    "url": "https://github.com/langfuse/Claude-Observability-Plugin/issues"
+  },
+  "license": "MIT",
+  "author": "Langfuse",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/langfuse/Claude-Observability-Plugin.git"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsdown --config tsdown.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint:tsc": "tsc --noEmit",
+    "lint:dist": "pnpm run build && git diff --exit-code -- dist/index.mjs",
+    "lint": "pnpm run format:check && pnpm run lint:tsc && pnpm run lint:dist"
+  },
+  "dependencies": {
+    "@langfuse/otel": "^5.4.1",
+    "@langfuse/tracing": "^5.4.1",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.0.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.205.0",
+    "@opentelemetry/sdk-trace-base": "^2.0.1",
+    "@opentelemetry/sdk-trace-node": "^2.0.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "prettier": "^3.4.2",
+    "tsdown": "^0.18.0",
+    "typescript": "^5.7.2",
+    "vitest": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
