@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "langfuse>=4.0,<5",
+# ]
+# ///
 """
 Claude Code -> Langfuse hook
 
@@ -35,6 +41,8 @@ def _opt(name: str) -> str:
     return os.environ.get(f"CLAUDE_PLUGIN_OPTION_{name}") or os.environ.get(name) or ""
 
 DEBUG = _opt("CC_LANGFUSE_DEBUG").lower() == "true"
+SKILL_TAGS = (_opt("CC_LANGFUSE_SKILL_TAGS") or "true").lower() == "true"
+CAPTURE_SKILL_CONTENT = _opt("CC_LANGFUSE_CAPTURE_SKILL_CONTENT").lower() == "true"
 try:
     MAX_CHARS = int(_opt("CC_LANGFUSE_MAX_CHARS") or "20000")
 except ValueError:
@@ -403,6 +411,9 @@ class Turn:
     user_msg: Dict[str, Any]
     assistant_msgs: List[Dict[str, Any]]
     tool_results_by_id: Dict[str, Any]
+    # Injected context (e.g. skill instructions) keyed by the tool_use id it
+    # belongs to, taken from isMeta rows carrying sourceToolUseID.
+    injected_by_tool_id: Dict[str, str]
 
 def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
     """
@@ -420,17 +431,37 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
     assistant_latest: Dict[str, Dict[str, Any]] = {}  # id -> latest msg
 
     tool_results_by_id: Dict[str, Any] = {}     # tool_use_id -> content
+    injected_by_tool_id: Dict[str, str] = {}    # tool_use_id -> injected text (skill instructions)
 
     def flush_turn():
-        nonlocal current_user, assistant_order, assistant_latest, tool_results_by_id, turns
+        nonlocal current_user, assistant_order, assistant_latest, tool_results_by_id, injected_by_tool_id, turns
         if current_user is None:
             return
         if not assistant_latest:
             return
         assistants = [assistant_latest[mid] for mid in assistant_order if mid in assistant_latest]
-        turns.append(Turn(user_msg=current_user, assistant_msgs=assistants, tool_results_by_id=dict(tool_results_by_id)))
+        turns.append(Turn(
+            user_msg=current_user,
+            assistant_msgs=assistants,
+            tool_results_by_id=dict(tool_results_by_id),
+            injected_by_tool_id=dict(injected_by_tool_id),
+        ))
 
     for msg in messages:
+        # Injected user rows (slash-command expansions, caveats, skill instructions)
+        # carry isMeta=true. They are not real prompts — treating them as turn starts
+        # creates phantom turns and prematurely flushes the real one.
+        if msg.get("isMeta"):
+            # Skill invocations link their injected instructions to the originating
+            # tool_use via sourceToolUseID; keep the text so emit can optionally
+            # attach it to that tool span.
+            src = msg.get("sourceToolUseID")
+            if src:
+                txt = extract_text(get_content(msg))
+                if txt:
+                    injected_by_tool_id[str(src)] = txt
+            continue
+
         role = get_role(msg)
 
         # tool_result rows show up as role=user with content blocks of type tool_result
@@ -451,6 +482,7 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
             assistant_order = []
             assistant_latest = {}
             tool_results_by_id = {}
+            injected_by_tool_id = {}
             continue
 
         if role == "assistant":
@@ -516,7 +548,22 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
     )
 
 
-def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path) -> None:
+def collect_skill_tags(turn: Turn) -> List[str]:
+    """Return 'skill:<name>' tags for every Skill tool invocation in the turn."""
+    names: List[str] = []
+    for am in turn.assistant_msgs:
+        for tu in iter_tool_uses(get_content(am)):
+            if tu.get("name") != "Skill":
+                continue
+            tu_input = tu.get("input")
+            skill = tu_input.get("skill") if isinstance(tu_input, dict) else None
+            if isinstance(skill, str) and skill and f"skill:{skill}" not in names:
+                names.append(f"skill:{skill}")
+    return names
+
+
+def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
+              user_id: Optional[str] = None) -> None:
     user_text_raw = extract_text(get_content(turn.user_msg))
     user_text, user_text_meta = truncate_text(user_text_raw)
 
@@ -533,10 +580,30 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
             candidate_end_ts.append(t)
     turn_end_ts = max(candidate_end_ts) if candidate_end_ts else None
 
+    trace_metadata: Dict[str, Any] = {
+        "source": "claude-code",
+        "session_id": session_id,
+        "turn_number": turn_num,
+        "transcript_path": str(transcript_path),
+        "user_text": user_text_meta,
+        "assistant_message_count": len(turn.assistant_msgs),
+    }
+    # Transcript rows carry the project dir and git branch — surface them so
+    # traces from different projects/worktrees are distinguishable in Langfuse.
+    for src_key, dst_key in (("cwd", "cwd"), ("gitBranch", "git_branch")):
+        v = turn.user_msg.get(src_key)
+        if isinstance(v, str) and v:
+            trace_metadata[dst_key] = v
+
+    tags = ["claude-code"]
+    if SKILL_TAGS:
+        tags += collect_skill_tags(turn)
+
     with propagate_attributes(
         session_id=session_id,
+        user_id=user_id,
         trace_name=f"Claude Code - Turn {turn_num}",
-        tags=["claude-code"],
+        tags=tags,
     ):
         trace_span = _start_backdated(
             langfuse,
@@ -544,14 +611,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
             as_type="span",
             start_time=user_ts,
             input={"role": "user", "content": user_text},
-            metadata={
-                "source": "claude-code",
-                "session_id": session_id,
-                "turn_number": turn_num,
-                "transcript_path": str(transcript_path),
-                "user_text": user_text_meta,
-                "assistant_message_count": len(turn.assistant_msgs),
-            },
+            metadata=trace_metadata,
         )
         parent_otel_span = trace_span._otel_span
 
@@ -646,6 +706,15 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
                 if tr_ts is not None:
                     batch_result_ts.append(tr_ts)
 
+                # Skill invocations inject their instructions as a separate transcript
+                # row; optionally surface them on the tool span they belong to.
+                tool_output: Any = out_trunc
+                if CAPTURE_SKILL_CONTENT:
+                    injected = turn.injected_by_tool_id.get(tid) if tid else None
+                    if injected:
+                        injected_trunc, _ = truncate_text(injected)
+                        tool_output = {"result": out_trunc, "injected_instructions": injected_trunc}
+
                 tool_span = _start_backdated(
                     langfuse,
                     name=f"Tool: {tname}",
@@ -660,7 +729,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
                         "output_meta": out_meta,
                     },
                 )
-                tool_span.update(output=out_trunc)
+                tool_span.update(output=tool_output)
                 tool_span.end(end_time=_to_ns(tr_ts or am_ts))
 
                 batch_tool_results.append({
@@ -694,6 +763,7 @@ def main() -> int:
     public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
     secret_key = _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY")
     host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com"
+    user_id = _opt("LANGFUSE_USER_ID") or _opt("CC_LANGFUSE_USER_ID") or None
 
     if not public_key or not secret_key:
         return 0
@@ -740,7 +810,7 @@ def main() -> int:
                 emitted += 1
                 turn_num = ss.turn_count + emitted
                 try:
-                    emit_turn(langfuse, session_id, turn_num, t, transcript_path)
+                    emit_turn(langfuse, session_id, turn_num, t, transcript_path, user_id=user_id)
                 except Exception as e:
                     # Log at INFO so SDK incompatibilities (and other emit failures)
                     # are visible without needing CC_LANGFUSE_DEBUG=true.
