@@ -562,6 +562,21 @@ def collect_skill_tags(turn: Turn) -> List[str]:
     return names
 
 
+def short_session_label(session_id: str, max_len: int = 12) -> str:
+    """Return a compact session label for trace names."""
+    sid = session_id.strip()
+    if not sid:
+        return "unknown"
+    parts = sid.split("-")
+    if len(parts) == 5 and len(parts[0]) == 8:
+        return parts[0]
+    return sid if len(sid) <= max_len else sid[:max_len].rstrip("-")
+
+
+def trace_display_name(session_id: str, turn_num: int) -> str:
+    return f"Claude Code - Turn {turn_num} ({short_session_label(session_id)})"
+
+
 def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
               user_id: Optional[str] = None) -> None:
     user_text_raw = extract_text(get_content(turn.user_msg))
@@ -599,15 +614,18 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     if SKILL_TAGS:
         tags += collect_skill_tags(turn)
 
+    trace_name = trace_display_name(session_id, turn_num)
+    root_observation_name = f"Turn {turn_num}"
+
     with propagate_attributes(
         session_id=session_id,
         user_id=user_id,
-        trace_name=f"Claude Code - Turn {turn_num}",
+        trace_name=trace_name,
         tags=tags,
     ):
         trace_span = _start_backdated(
             langfuse,
-            name=f"Claude Code - Turn {turn_num}",
+            name=root_observation_name,
             as_type="span",
             start_time=user_ts,
             input={"role": "user", "content": user_text},
