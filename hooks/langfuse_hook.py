@@ -297,9 +297,9 @@ def get_model(msg: Dict[str, Any]) -> str:
         return m.get("model") or "claude"
     return "claude"
 
-def get_usage(msg: Dict[str, Any]) -> Optional[Dict[str, int]]:
+def get_usage_details_from_row(row: Dict[str, Any]) -> Optional[Dict[str, int]]:
     """Extract Anthropic token usage from an assistant message, if present."""
-    m = msg.get("message")
+    m = row.get("message")
     if not isinstance(m, dict):
         return None
     u = m.get("usage")
@@ -726,7 +726,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
                     "tool_count": len(tool_uses),
                 },
             )
-            usage_details = get_usage(am)
+            usage_details = get_usage_details_from_row(am)
             if usage_details is not None:
                 gen_kwargs["usage_details"] = usage_details
 
