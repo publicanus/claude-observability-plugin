@@ -189,7 +189,7 @@ def get_session_id_and_transcript_path(payload: Dict[str, Any]) -> Optional[Tupl
     return session_id, transcript_path
 
 
-# ----------------- State locking -----------------
+# ----------------- State file concurrency control -----------------
 class FileLock:
     def __init__(self, path: Path, timeout_s: float = 2.0):
         self.path = path
@@ -239,7 +239,7 @@ class FileLock:
             pass
 
 
-# ----------------- State management -----------------
+# ----------------- State file reading and writing -----------------
 def load_hook_state() -> Dict[str, Any]:
     try:
         if not STATE_FILE.exists():
@@ -247,6 +247,39 @@ def load_hook_state() -> Dict[str, Any]:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+def get_session_state_key(session_id: str, transcript_path: str) -> str:
+    # stable key even if session_id collides
+    raw = f"{session_id}::{transcript_path}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+@dataclass
+class SessionState:
+    offset: int = 0       # Last byte read from the transcript file.
+    buffer: str = ""      # Partial JSONL line kept between hook runs.
+    turn_count: int = 0   # Turns already emitted for this session.
+    pending_agent_turns: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+
+def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
+    s = global_state.get(key, {})
+    pending = s.get("pending_agent_turns")
+    if not isinstance(pending, dict):
+        pending = {}
+    return SessionState(
+        offset=int(s.get("offset", 0)),
+        buffer=str(s.get("buffer", "")),
+        turn_count=int(s.get("turn_count", 0)),
+        pending_agent_turns=pending,
+    )
+
+def update_session_state(global_state: Dict[str, Any], key: str, ss: SessionState) -> None:
+    global_state[key] = {
+        "offset": ss.offset,
+        "buffer": ss.buffer,
+        "turn_count": ss.turn_count,
+        "pending_agent_turns": ss.pending_agent_turns or {},
+        "updated": datetime.now(timezone.utc).isoformat(),
+    }
 
 def save_hook_state(state: Dict[str, Any]) -> None:
     try:
@@ -272,13 +305,12 @@ def save_hook_state(state: Dict[str, Any]) -> None:
     except Exception as e:
         debug(f"save_hook_state failed: {e}")
 
-def get_session_state_key(session_id: str, transcript_path: str) -> str:
-    # stable key even if session_id collides
-    raw = f"{session_id}::{transcript_path}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+def save_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
+    update_session_state(global_state, key, session_state)
+    save_hook_state(global_state)
 
 
-# ----------------- Transcript parsing helpers -----------------
+# ----------------- Transcript row parsing -----------------
 def get_content_from_row(row: Dict[str, Any]) -> Any:
     if not isinstance(row, dict):
         return None
@@ -394,39 +426,7 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-# ----------------- Incremental reader -----------------
-@dataclass
-class SessionState:
-    offset: int = 0       # Last byte read from the transcript file.
-    buffer: str = ""      # Partial JSONL line kept between hook runs.
-    turn_count: int = 0   # Turns already emitted for this session.
-    pending_agent_turns: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-
-def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
-    s = global_state.get(key, {})
-    pending = s.get("pending_agent_turns")
-    if not isinstance(pending, dict):
-        pending = {}
-    return SessionState(
-        offset=int(s.get("offset", 0)),
-        buffer=str(s.get("buffer", "")),
-        turn_count=int(s.get("turn_count", 0)),
-        pending_agent_turns=pending,
-    )
-
-def update_session_state(global_state: Dict[str, Any], key: str, ss: SessionState) -> None:
-    global_state[key] = {
-        "offset": ss.offset,
-        "buffer": ss.buffer,
-        "turn_count": ss.turn_count,
-        "pending_agent_turns": ss.pending_agent_turns or {},
-        "updated": datetime.now(timezone.utc).isoformat(),
-    }
-
-def save_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
-    update_session_state(global_state, key, session_state)
-    save_hook_state(global_state)
-
+# ----------------- Incremental transcript reading -----------------
 def read_new_jsonl(transcript_path: Path, ss: SessionState) -> Tuple[List[Dict[str, Any]], SessionState]:
     """
     Reads only new bytes since ss.offset. Keeps ss.buffer for partial last line.
