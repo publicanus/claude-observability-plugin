@@ -127,7 +127,7 @@ def info(msg: str) -> None:
         except Exception:
             pass
 
-# ----------------- State locking (best-effort) -----------------
+# ----------------- State locking -----------------
 class FileLock:
     def __init__(self, path: Path, timeout_s: float = 2.0):
         self.path = path
@@ -256,6 +256,20 @@ def extract_session_id_and_transcript_path(payload: Dict[str, Any]) -> Tuple[Opt
             transcript_path = None
     else:
         transcript_path = None
+
+    return session_id, transcript_path
+
+def get_session_id_and_transcript_path(payload: Dict[str, Any]) -> Optional[Tuple[str, Path]]:
+    session_id, transcript_path = extract_session_id_and_transcript_path(payload)
+
+    if not session_id or not transcript_path:
+        # No structured payload; fail open (do not guess).
+        debug("Missing session_id or transcript_path from hook payload; exiting.")
+        return None
+
+    if not transcript_path.exists():
+        debug(f"Transcript path does not exist: {transcript_path}")
+        return None
 
     return session_id, transcript_path
 
@@ -1139,16 +1153,11 @@ def main() -> int:
         return 0
 
     payload = read_hook_payload()
-    session_id, transcript_path = extract_session_id_and_transcript_path(payload)
-
-    if not session_id or not transcript_path:
-        # No structured payload; fail open (do not guess)
-        debug("Missing session_id or transcript_path from hook payload; exiting.")
+    hook_context = get_session_id_and_transcript_path(payload)
+    if hook_context is None:
         return 0
 
-    if not transcript_path.exists():
-        debug(f"Transcript path does not exist: {transcript_path}")
-        return 0
+    session_id, transcript_path = hook_context
 
     try:
         with FileLock(LOCK_FILE):
