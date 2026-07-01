@@ -23,6 +23,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
 # ----------------- Langfuse import (fail-open) -----------------
 try:
     from langfuse import Langfuse, propagate_attributes
@@ -30,11 +31,13 @@ try:
 except Exception:
     sys.exit(0)
 
+
 # ----------------- Paths -----------------
 STATE_DIR = Path.home() / ".claude" / "state"
 LOG_FILE = STATE_DIR / "langfuse_hook.log"
 STATE_FILE = STATE_DIR / "langfuse_state.json"
 LOCK_FILE = STATE_DIR / "langfuse_state.lock"
+
 
 # ----------------- Configuration -----------------
 def _opt(name: str) -> str:
@@ -49,14 +52,12 @@ try:
 except ValueError:
     MAX_CHARS = 20000
 
-
 @dataclass
 class LangfuseConfig:
     public_key: str
     secret_key: str
     host: str
     user_id: Optional[str]
-
 
 def get_langfuse_config() -> Optional[LangfuseConfig]:
     public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
@@ -73,7 +74,6 @@ def get_langfuse_config() -> Optional[LangfuseConfig]:
         host=host,
         user_id=user_id,
     )
-
 
 def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
     try:
@@ -127,91 +127,6 @@ def info(msg: str) -> None:
         except Exception:
             pass
 
-# ----------------- State locking -----------------
-class FileLock:
-    def __init__(self, path: Path, timeout_s: float = 2.0):
-        self.path = path
-        self.timeout_s = timeout_s
-        self._fh = None
-
-    def __enter__(self):
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+", encoding="utf-8")
-        self.acquired = False
-        try:
-            import fcntl  # Unix only
-        except ImportError:
-            # No fcntl available (e.g. Windows) — proceed without lock.
-            return self
-        deadline = time.time() + self.timeout_s
-        try:
-            while True:
-                try:
-                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self.acquired = True
-                    return self
-                except BlockingIOError:
-                    if time.time() > deadline:
-                        raise TimeoutError(
-                            f"could not acquire {self.path} within {self.timeout_s}s"
-                        )
-                    time.sleep(0.05)
-        except BaseException:
-            # __exit__ is not called when __enter__ raises — close the fh
-            # we just opened so it doesn't leak.
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-            raise
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            import fcntl
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try:
-            self._fh.close()
-        except Exception:
-            pass
-
-def load_state() -> Dict[str, Any]:
-    try:
-        if not STATE_FILE.exists():
-            return {}
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-def save_state(state: Dict[str, Any]) -> None:
-    try:
-        # Drop session entries older than 30 days to keep the file bounded.
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-        for k in list(state.keys()):
-            entry = state.get(k)
-            if not isinstance(entry, dict):
-                continue
-            updated = entry.get("updated")
-            if not isinstance(updated, str):
-                continue
-            try:
-                ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
-            except Exception:
-                continue
-            if ts < cutoff:
-                del state[k]
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        debug(f"save_state failed: {e}")
-
-def state_key(session_id: str, transcript_path: str) -> str:
-    # stable key even if session_id collides
-    raw = f"{session_id}::{transcript_path}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 # ----------------- Hook payload -----------------
 def read_hook_payload() -> Dict[str, Any]:
@@ -272,6 +187,96 @@ def get_session_id_and_transcript_path(payload: Dict[str, Any]) -> Optional[Tupl
         return None
 
     return session_id, transcript_path
+
+
+# ----------------- State locking -----------------
+class FileLock:
+    def __init__(self, path: Path, timeout_s: float = 2.0):
+        self.path = path
+        self.timeout_s = timeout_s
+        self._fh = None
+
+    def __enter__(self):
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+", encoding="utf-8")
+        self.acquired = False
+        try:
+            import fcntl  # Unix only
+        except ImportError:
+            # No fcntl available (e.g. Windows) — proceed without lock.
+            return self
+        deadline = time.time() + self.timeout_s
+        try:
+            while True:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.acquired = True
+                    return self
+                except BlockingIOError:
+                    if time.time() > deadline:
+                        raise TimeoutError(
+                            f"could not acquire {self.path} within {self.timeout_s}s"
+                        )
+                    time.sleep(0.05)
+        except BaseException:
+            # __exit__ is not called when __enter__ raises — close the fh
+            # we just opened so it doesn't leak.
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            raise
+
+def __exit__(self, exc_type, exc, tb):
+        try:
+            import fcntl
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+
+# ----------------- State management -----------------
+def load_state() -> Dict[str, Any]:
+    try:
+        if not STATE_FILE.exists():
+            return {}
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def save_state(state: Dict[str, Any]) -> None:
+    try:
+        # Drop session entries older than 30 days to keep the file bounded.
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        for k in list(state.keys()):
+            entry = state.get(k)
+            if not isinstance(entry, dict):
+                continue
+            updated = entry.get("updated")
+            if not isinstance(updated, str):
+                continue
+            try:
+                ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts < cutoff:
+                del state[k]
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        debug(f"save_state failed: {e}")
+
+def state_key(session_id: str, transcript_path: str) -> str:
+    # stable key even if session_id collides
+    raw = f"{session_id}::{transcript_path}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 
 # ----------------- Transcript parsing helpers -----------------
 def get_content_from_row(row: Dict[str, Any]) -> Any:
@@ -388,6 +393,7 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
     except Exception:
         return None
 
+
 # ----------------- Incremental reader -----------------
 @dataclass
 class SessionState:
@@ -465,6 +471,7 @@ def read_new_jsonl(transcript_path: Path, ss: SessionState) -> Tuple[List[Dict[s
             continue
 
     return msgs, ss
+
 
 # ----------------- Turn assembly -----------------
 @dataclass
@@ -712,13 +719,13 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
     flush_turn()
     return turns
 
+
 # ----------------- Langfuse emit -----------------
 def _to_ns(ts: Optional[datetime]) -> Optional[int]:
     """Convert a datetime to OTel-style nanoseconds since epoch."""
     if ts is None:
         return None
     return int(ts.timestamp() * 1_000_000_000)
-
 
 def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
                      start_time: Optional[datetime],
@@ -757,7 +764,6 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
         **obs_kwargs,
     )
 
-
 def collect_skill_tags(turn: Turn) -> List[str]:
     """Return 'skill:<name>' tags for every Skill tool invocation in the turn."""
     names: List[str] = []
@@ -771,7 +777,6 @@ def collect_skill_tags(turn: Turn) -> List[str]:
                 names.append(f"skill:{skill}")
     return names
 
-
 def short_session_label(session_id: str, max_len: int = 12) -> str:
     """Return a compact session label for trace names."""
     sid = session_id.strip()
@@ -782,15 +787,12 @@ def short_session_label(session_id: str, max_len: int = 12) -> str:
         return parts[0]
     return sid if len(sid) <= max_len else sid[:max_len].rstrip("-")
 
-
 def trace_display_name(session_id: str, turn_num: int) -> str:
     return f"Claude Code - Turn {turn_num} ({short_session_label(session_id)})"
-
 
 def _get_latest_timestamp(*timestamps: Optional[datetime]) -> Optional[datetime]:
     present_timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
     return max(present_timestamps) if present_timestamps else None
-
 
 def emit_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn,
                       start_ts: Optional[datetime],
@@ -1011,7 +1013,6 @@ def emit_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn,
 
     return latest_end
 
-
 def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
                                subagent: Dict[str, Any],
                                start_ts: Optional[datetime]) -> Optional[datetime]:
@@ -1072,7 +1073,6 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
     subagent_span.end(end_time=_to_ns(_get_latest_timestamp(latest_end, subagent_start_ts)))
 
     return latest_end
-
 
 def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
               user_id: Optional[str] = None,
@@ -1138,6 +1138,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
         )
         trace_span.update(output={"role": "assistant", "content": final_assistant_text})
         trace_span.end(end_time=_to_ns(_get_latest_timestamp(turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)))
+
 
 # ----------------- Main -----------------
 def main() -> int:
