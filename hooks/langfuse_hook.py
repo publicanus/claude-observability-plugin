@@ -512,6 +512,17 @@ def get_result_from_task_notification_row(row: Dict[str, Any]) -> str:
     result = _extract_xml_tag_value(notification_text, "result")
     return result if result is not None else notification_text
 
+def prepend_deferred_agent_turn_rows(rows: List[Dict[str, Any]], session_state: SessionState) -> List[Dict[str, Any]]:
+    if not session_state.pending_agent_turns:
+        return rows
+    rows_with_deferred_turns: List[Dict[str, Any]] = []
+    for row in rows:
+        tool_use_id = get_tool_use_id_from_task_notification(row)
+        if tool_use_id and tool_use_id in session_state.pending_agent_turns:
+            rows_with_deferred_turns.extend(session_state.pending_agent_turns.pop(tool_use_id))
+        rows_with_deferred_turns.append(row)
+    return rows_with_deferred_turns
+
 def get_pending_agent_tool_use_ids(turn: Turn) -> List[str]:
     tool_use_ids: List[str] = []
     for assistant_message in turn.assistant_msgs:
@@ -530,44 +541,17 @@ def get_pending_agent_tool_use_ids(turn: Turn) -> List[str]:
                 tool_use_ids.append(tool_use_id)
     return tool_use_ids
 
-def prepend_deferred_agent_turn_rows(messages: List[Dict[str, Any]], ss: SessionState) -> List[Dict[str, Any]]:
-    if not ss.pending_agent_turns:
-        return messages
-    rows: List[Dict[str, Any]] = []
-    for row in messages:
-        tool_use_id = get_tool_use_id_from_task_notification(row)
-        if tool_use_id and tool_use_id in ss.pending_agent_turns:
-            rows.extend(ss.pending_agent_turns.pop(tool_use_id))
-        rows.append(row)
-    return rows
-
-def get_subagent_transcripts_by_tool_use_id(transcript_path: Path) -> Dict[str, Dict[str, Any]]:
-    """Map launching Agent/Task tool_use ids to their subagent transcripts."""
-    subagent_dir = transcript_path.with_suffix("") / "subagents"
-    if not subagent_dir.is_dir():
-        return {}
-
-    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]] = {}
-    for meta_path in subagent_dir.glob("*.meta.json"):
-        try:
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
+def get_turns_to_emit(turns: List[Turn], session_state: SessionState) -> List[Turn]:
+    turns_to_emit: List[Turn] = []
+    for turn in turns:
+        pending_agent_tool_use_ids = get_pending_agent_tool_use_ids(turn)
+        if pending_agent_tool_use_ids:
+            for tool_use_id in pending_agent_tool_use_ids:
+                session_state.pending_agent_turns[tool_use_id] = turn.rows
+            debug(f"Deferred agent turn until task notification: {pending_agent_tool_use_ids}")
             continue
-
-        tool_use_id = metadata.get("toolUseId")
-        if not isinstance(tool_use_id, str) or not tool_use_id:
-            continue
-
-        jsonl_path = meta_path.with_name(meta_path.name[: -len(".meta.json")] + ".jsonl")
-        if not jsonl_path.exists():
-            continue
-
-        subagent_transcripts_by_tool_use_id[tool_use_id] = {
-            "path": jsonl_path,
-            "agent_type": metadata.get("agentType"),
-            "description": metadata.get("description"),
-        }
-    return subagent_transcripts_by_tool_use_id
+        turns_to_emit.append(turn)
+    return turns_to_emit
 
 def merge_assistant_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -733,17 +717,33 @@ def get_new_turns_from_transcript(transcript_path: Path, session_state: SessionS
     return build_turns(rows), session_state
 
 
-def get_turns_to_emit(turns: List[Turn], session_state: SessionState) -> List[Turn]:
-    turns_to_emit: List[Turn] = []
-    for turn in turns:
-        pending_agent_tool_use_ids = get_pending_agent_tool_use_ids(turn)
-        if pending_agent_tool_use_ids:
-            for tool_use_id in pending_agent_tool_use_ids:
-                session_state.pending_agent_turns[tool_use_id] = turn.rows
-            debug(f"Deferred agent turn until task notification: {pending_agent_tool_use_ids}")
+def get_subagent_transcripts_by_tool_use_id(transcript_path: Path) -> Dict[str, Dict[str, Any]]:
+    """Map launching Agent/Task tool_use ids to their subagent transcripts."""
+    subagent_dir = transcript_path.with_suffix("") / "subagents"
+    if not subagent_dir.is_dir():
+        return {}
+
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]] = {}
+    for meta_path in subagent_dir.glob("*.meta.json"):
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        turns_to_emit.append(turn)
-    return turns_to_emit
+
+        tool_use_id = metadata.get("toolUseId")
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            continue
+
+        jsonl_path = meta_path.with_name(meta_path.name[: -len(".meta.json")] + ".jsonl")
+        if not jsonl_path.exists():
+            continue
+
+        subagent_transcripts_by_tool_use_id[tool_use_id] = {
+            "path": jsonl_path,
+            "agent_type": metadata.get("agentType"),
+            "description": metadata.get("description"),
+        }
+    return subagent_transcripts_by_tool_use_id
 
 
 # ----------------- Langfuse emit -----------------
