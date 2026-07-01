@@ -507,7 +507,7 @@ def get_tool_use_id_from_task_notification(row: Dict[str, Any]) -> Optional[str]
     tool_use_id = _extract_xml_tag_value(notification_text, "tool-use-id")
     return tool_use_id.strip() if isinstance(tool_use_id, str) and tool_use_id.strip() else None
 
-def get_result_from_task_notification_row(row: Dict[str, Any]) -> str:
+def get_result_from_task_notification(row: Dict[str, Any]) -> str:
     notification_text = extract_text_from_content(get_content_from_row(row))
     result = _extract_xml_tag_value(notification_text, "result")
     return result if result is not None else notification_text
@@ -657,11 +657,11 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
             if current_turn_user_row is not None:
                 existing_result = tool_results_by_id.get(task_tid)
                 if isinstance(existing_result, dict):
-                    existing_result["final_content"] = get_result_from_task_notification_row(row)
+                    existing_result["final_content"] = get_result_from_task_notification(row)
                     existing_result["final_timestamp"] = row.get("timestamp")
                 else:
                     tool_results_by_id[task_tid] = {
-                        "content": get_result_from_task_notification_row(row),
+                        "content": get_result_from_task_notification(row),
                         "timestamp": row.get("timestamp"),
                     }
                 current_rows.append(row)
