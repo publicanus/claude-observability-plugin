@@ -1198,7 +1198,7 @@ def emit_generation_observation(
 
 def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn,
                            start_timestamp: Optional[datetime],
-                           generation_prefix: str = "Claude Generation",
+                           generation_prefix: str = "LLM Call",
                            subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[datetime]:
     """Emit a turn's generations and tool observations under an existing span."""
     user_text, _ = truncate_text(extract_text_from_content(get_content_from_row(turn.user_msg)))
@@ -1340,7 +1340,7 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
             subagent_span._otel_span,
             turn,
             previous_start_timestamp,
-            generation_prefix="Subagent Generation",
+            generation_prefix="Subagent LLM Call",
             subagent_transcripts_by_tool_use_id=None,
         )
         latest_end_timestamp = _get_latest_timestamp(latest_end_timestamp, latest_turn_timestamp)
@@ -1408,7 +1408,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     tags = get_trace_tags(turn)
 
     trace_name = trace_display_name(session_id, turn_num)
-    root_observation_name = f"Turn {turn_num}"
+    root_observation_name = "Conversational Turn"
 
     with propagate_attributes(
         session_id=session_id,
