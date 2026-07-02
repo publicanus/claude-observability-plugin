@@ -1028,6 +1028,7 @@ def emit_single_tool_observation(
     if subagent:
         if tool_result.final_result_timestamp is not None:
             pending_subagents.append({
+                "tool_use_id": tool_use_id,
                 "subagent": subagent,
                 "start_timestamp": tool_use_timestamp,
                 "ready_timestamp": tool_result.final_result_timestamp,
@@ -1148,6 +1149,30 @@ def get_ready_async_tool_results(
     ])
     return ready_async_tool_results, still_pending_tool_results, latest_ready_timestamp
 
+def update_pending_subagent_display_start_after_launch_response(
+    pending_subagents: List[Dict[str, Any]],
+    tool_results_used_as_generation_input: List[Dict[str, Any]],
+    generation_start_timestamp: Optional[datetime],
+) -> None:
+    if generation_start_timestamp is None:
+        return
+
+    tool_use_ids = {
+        str(tool_result.get("tool_use_id"))
+        for tool_result in tool_results_used_as_generation_input
+        if isinstance(tool_result, dict) and tool_result.get("tool_use_id")
+    }
+    if not tool_use_ids:
+        return
+
+    for pending_subagent in pending_subagents:
+        if pending_subagent.get("display_start_timestamp") is not None:
+            continue
+        if pending_subagent.get("tool_use_id") in tool_use_ids:
+            pending_subagent["display_start_timestamp"] = generation_start_timestamp + timedelta(
+                microseconds=1
+            )
+
 def build_generation_kwargs(
     assistant_index: int,
     assistant_message: Dict[str, Any],
@@ -1220,7 +1245,7 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
                     langfuse,
                     parent_otel_span,
                     ready_subagent["subagent"],
-                    ready_subagent.get("start_timestamp"),
+                    ready_subagent.get("display_start_timestamp") or ready_subagent.get("start_timestamp"),
                 )
                 latest_end_timestamp = _get_latest_timestamp(latest_end_timestamp, subagent_end_timestamp)
 
@@ -1238,13 +1263,19 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
             previous_tool_results,
             ready_async_tool_results,
         )
+        generation_start_timestamp = previous_timestamp or assistant_timestamp
         generation_span = emit_generation_observation(
             langfuse,
             parent_otel_span=parent_otel_span,
             generation_prefix=generation_prefix,
             assistant_index=assistant_index,
-            start_timestamp=previous_timestamp or assistant_timestamp,
+            start_timestamp=generation_start_timestamp,
             generation_kwargs=generation_kwargs,
+        )
+        update_pending_subagent_display_start_after_launch_response(
+            pending_subagents,
+            previous_tool_results,
+            generation_start_timestamp,
         )
 
         emitted_tools = emit_tool_observation_batch(
@@ -1285,7 +1316,7 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
             langfuse,
             parent_otel_span,
             pending_subagent["subagent"],
-            pending_subagent.get("start_timestamp"),
+            pending_subagent.get("display_start_timestamp") or pending_subagent.get("start_timestamp"),
         )
         latest_end_timestamp = _get_latest_timestamp(latest_end_timestamp, subagent_end_timestamp)
 
@@ -1308,7 +1339,7 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
         return start_timestamp
 
     first_turn = turns[0]
-    subagent_start_timestamp = parse_timestamp(first_turn.user_msg) or start_timestamp
+    subagent_start_timestamp = start_timestamp or parse_timestamp(first_turn.user_msg)
     subagent_input_text, subagent_input_meta = truncate_text(extract_text_from_content(get_content_from_row(first_turn.user_msg)))
 
     last_turn = turns[-1]
