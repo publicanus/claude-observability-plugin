@@ -526,17 +526,39 @@ def get_tool_use_id_from_task_notification(row: Dict[str, Any]) -> Optional[str]
     tool_use_id = _extract_xml_tag_value(notification_text, "tool-use-id")
     return tool_use_id.strip() if isinstance(tool_use_id, str) and tool_use_id.strip() else None
 
+def get_task_id_from_task_notification(row: Dict[str, Any]) -> Optional[str]:
+    notification_text = extract_text_from_content(get_content_from_row(row))
+    task_id = _extract_xml_tag_value(notification_text, "task-id")
+    return task_id.strip() if isinstance(task_id, str) and task_id.strip() else None
+
+def get_tool_use_id_for_task_notification(
+    row: Dict[str, Any],
+    task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    tool_use_id = get_tool_use_id_from_task_notification(row)
+    if tool_use_id:
+        return tool_use_id
+
+    task_id = get_task_id_from_task_notification(row)
+    if task_id and task_id_to_tool_use_id:
+        return task_id_to_tool_use_id.get(task_id)
+    return None
+
 def get_result_from_task_notification(row: Dict[str, Any]) -> str:
     notification_text = extract_text_from_content(get_content_from_row(row))
     result = _extract_xml_tag_value(notification_text, "result")
     return result if result is not None else notification_text
 
-def prepend_deferred_agent_turn_rows(rows: List[Dict[str, Any]], session_state: SessionState) -> List[Dict[str, Any]]:
+def prepend_deferred_agent_turn_rows(
+    rows: List[Dict[str, Any]],
+    session_state: SessionState,
+    task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     if not session_state.pending_agent_turns:
         return rows
     rows_with_deferred_turns: List[Dict[str, Any]] = []
     for row in rows:
-        tool_use_id = get_tool_use_id_from_task_notification(row)
+        tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
         if tool_use_id and tool_use_id in session_state.pending_agent_turns:
             rows_with_deferred_turns.extend(session_state.pending_agent_turns.pop(tool_use_id))
         rows_with_deferred_turns.append(row)
@@ -606,14 +628,18 @@ def add_tool_result_row(row: Dict[str, Any], state: TurnAssemblyState) -> bool:
             }
     return True
 
-def add_task_notification_row(row: Dict[str, Any], state: TurnAssemblyState) -> bool:
+def add_task_notification_row(
+    row: Dict[str, Any],
+    state: TurnAssemblyState,
+    task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
+) -> bool:
     if not is_task_notification_row(row):
         return False
 
     if state.current_turn_user_row is None:
         return True
 
-    tool_use_id = get_tool_use_id_from_task_notification(row)
+    tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
     if not tool_use_id:
         state.current_rows.append(row)
         return True
@@ -710,7 +736,10 @@ def add_assistant_row(row: Dict[str, Any], state: TurnAssemblyState) -> None:
     state.current_rows.append(row)
 
 
-def build_turns(rows: List[Dict[str, Any]]) -> List[Turn]:
+def build_turns(
+    rows: List[Dict[str, Any]],
+    task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
+) -> List[Turn]:
     """
     Groups incremental transcript rows into turns:
     user (non-tool-result) -> assistant messages -> (tool_result rows, possibly interleaved)
@@ -728,7 +757,7 @@ def build_turns(rows: List[Dict[str, Any]]) -> List[Turn]:
         if add_tool_result_row(row, state):
             continue
 
-        if add_task_notification_row(row, state):
+        if add_task_notification_row(row, state, task_id_to_tool_use_id):
             continue
 
         role = get_user_or_assistant_role_from_row(row)
@@ -753,13 +782,18 @@ def build_turns(rows: List[Dict[str, Any]]) -> List[Turn]:
     return turns
 
 
-def get_new_turns_from_transcript(transcript_path: Path, session_state: SessionState) -> Tuple[List[Turn], SessionState]:
+def get_new_turns_from_transcript(
+    transcript_path: Path,
+    session_state: SessionState,
+    subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[List[Turn], SessionState]:
     rows, session_state = read_new_jsonl(transcript_path, session_state)
     if not rows:
         return [], session_state
 
-    rows = prepend_deferred_agent_turn_rows(rows, session_state)
-    return build_turns(rows), session_state
+    task_id_to_tool_use_id = get_task_id_to_tool_use_id(subagent_transcripts_by_tool_use_id)
+    rows = prepend_deferred_agent_turn_rows(rows, session_state, task_id_to_tool_use_id)
+    return build_turns(rows, task_id_to_tool_use_id), session_state
 
 def get_subagent_transcripts_by_tool_use_id(transcript_path: Path) -> Dict[str, Dict[str, Any]]:
     """Map launching Agent/Task tool_use ids to their subagent transcripts."""
@@ -782,12 +816,30 @@ def get_subagent_transcripts_by_tool_use_id(transcript_path: Path) -> Dict[str, 
         if not jsonl_path.exists():
             continue
 
+        agent_id = meta_path.name[: -len(".meta.json")]
+        if agent_id.startswith("agent-"):
+            agent_id = agent_id[len("agent-"):]
+
         subagent_transcripts_by_tool_use_id[tool_use_id] = {
             "path": jsonl_path,
+            "agent_id": agent_id,
             "agent_type": metadata.get("agentType"),
             "description": metadata.get("description"),
         }
     return subagent_transcripts_by_tool_use_id
+
+def get_task_id_to_tool_use_id(
+    subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, str]:
+    task_id_to_tool_use_id: Dict[str, str] = {}
+    if not subagent_transcripts_by_tool_use_id:
+        return task_id_to_tool_use_id
+
+    for tool_use_id, subagent in subagent_transcripts_by_tool_use_id.items():
+        agent_id = subagent.get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            task_id_to_tool_use_id[agent_id] = tool_use_id
+    return task_id_to_tool_use_id
 
 
 # ----------------- Langfuse emit -----------------
@@ -1523,14 +1575,18 @@ def emit_new_turns_from_transcript(
         key = get_session_state_key(session_id, str(transcript_path))
         session_state = get_session_state(state, key)
 
-        turns, session_state = get_new_turns_from_transcript(transcript_path, session_state)
-        if not turns:
-            save_session_state(state, key, session_state)
-            return 0
-
         subagent_transcripts_by_tool_use_id = get_subagent_transcripts_by_tool_use_id(transcript_path)
         if subagent_transcripts_by_tool_use_id:
             debug(f"Discovered {len(subagent_transcripts_by_tool_use_id)} subagent transcript(s)")
+
+        turns, session_state = get_new_turns_from_transcript(
+            transcript_path,
+            session_state,
+            subagent_transcripts_by_tool_use_id,
+        )
+        if not turns:
+            save_session_state(state, key, session_state)
+            return 0
 
         turns_to_emit = get_turns_to_emit(turns, session_state)
         emitted = emit_ready_turns(
