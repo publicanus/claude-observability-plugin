@@ -960,6 +960,13 @@ def get_tool_result_for_observation(tool_result_entry: Any) -> ToolResultForObse
         final_result_timestamp=final_result_timestamp,
     )
 
+def get_short_transcript_path_for_metadata(path: Any) -> Optional[str]:
+    if isinstance(path, Path):
+        return path.name
+    if isinstance(path, str) and path:
+        return Path(path).name
+    return None
+
 def build_tool_metadata(
     tool_name: str,
     tool_use_id: str,
@@ -977,7 +984,7 @@ def build_tool_metadata(
         tool_metadata.update({
             "subagent_type": subagent.get("agent_type"),
             "subagent_description": subagent.get("description"),
-            "subagent_transcript_path": str(subagent.get("path")),
+            "subagent_transcript_path": get_short_transcript_path_for_metadata(subagent.get("path")),
         })
     return tool_metadata
 
@@ -1358,7 +1365,7 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
         metadata={
             "agent_type": subagent.get("agent_type"),
             "description": description,
-            "transcript_path": str(path),
+            "transcript_path": get_short_transcript_path_for_metadata(path),
             "user_text": subagent_input_meta,
         },
     )
@@ -1411,7 +1418,7 @@ def build_trace_metadata(
         "source": "claude-code",
         "session_id": session_id,
         "turn_number": turn_num,
-        "transcript_path": str(transcript_path),
+        "transcript_path": get_short_transcript_path_for_metadata(transcript_path),
         "user_text": user_text_meta,
         "assistant_message_count": len(turn.assistant_msgs),
     }
