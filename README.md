@@ -47,8 +47,8 @@ Get keys from your Langfuse project settings → API Keys.
 
 One of:
 
-- [uv](https://docs.astral.sh/uv/) (recommended) — installs the langfuse SDK automatically, no setup needed.
-- Python 3.10+ as `python3` with `pip install "langfuse>=4.0,<5"` (fallback when uv is not on PATH).
+- [uv](https://docs.astral.sh/uv/) (recommended) on `PATH`. The hook uses `uv run --script` and installs the Langfuse SDK from the script metadata automatically.
+- Python 3.10+ as `python3` with `langfuse>=4.0,<5` installed in that Python environment. This is only used as a fallback when `uv` is not on `PATH`.
 
 If neither is set up, the hook exits silently — no impact on Claude Code.
 
@@ -123,7 +123,7 @@ claude plugin uninstall langfuse-observability
 - Nothing in Langfuse: check `~/.claude/state/langfuse_hook.log` (enable `CC_LANGFUSE_DEBUG`).
 - Desktop chat has no traces: regular Claude Desktop Chat mode is not hook-backed. Use the `claude` CLI or Claude Code GUI Code mode.
 - Hook not firing: confirm with `claude plugin list` that langfuse-observability is enabled; restart Claude Code.
-- langfuse import errors (no uv): ensure the `python3` on your PATH has the SDK installed, or install uv.
+- langfuse import errors (no uv): install uv, or ensure the `python3` on your PATH is Python 3.10+ and has `langfuse>=4.0,<5` installed.
 
 ## License
 
