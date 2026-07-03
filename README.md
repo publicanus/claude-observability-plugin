@@ -11,7 +11,22 @@ claude plugin install langfuse-observability@langfuse-observability
 
 Restart Claude Code after install.
 
-On enable, you'll be prompted for:
+Then configure the plugin from within Claude Code:
+
+```text
+/plugin configure langfuse-observability@langfuse-observability
+```
+
+Alternatively, pass configuration values during install:
+
+```bash
+claude plugin install langfuse-observability@langfuse-observability \
+  --config LANGFUSE_PUBLIC_KEY=pk-lf-... \
+  --config LANGFUSE_SECRET_KEY=sk-lf-... \
+  --config LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+The plugin requires or accepts:
 
 | Field                 | Description                                                                                          |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -57,9 +72,10 @@ stays within your own infrastructure.
 
 ## Reconfigure
 
-```bash
-claude plugin disable langfuse-observability
-claude plugin enable langfuse-observability
+In Claude Code, run:
+
+```text
+/plugin configure langfuse-observability@langfuse-observability
 ```
 
 ## Uninstall
