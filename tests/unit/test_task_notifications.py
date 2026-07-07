@@ -34,6 +34,43 @@ def test_task_notification_extracts_tool_use_id_task_id_and_result(hook_module):
     assert hook_module.get_result_from_task_notification(row) == "Agent result"
 
 
+def test_origin_task_notification_extracts_tool_use_id_after_system_prefix(hook_module):
+    row = {
+        "type": "user",
+        "origin": {"kind": "task-notification"},
+        "message": {
+            "role": "user",
+            "content": (
+                "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+                "This is an automated background-task event.\n\n"
+                "<task-notification><task-id>agent-1</task-id>"
+                "<tool-use-id>toolu_agent</tool-use-id>"
+                "<result>Agent result</result></task-notification>"
+            ),
+        },
+    }
+
+    assert hook_module.is_task_notification_row(row)
+    assert hook_module.get_tool_use_id_for_task_notification(row) == "toolu_agent"
+
+
+def test_non_task_notification_does_not_extract_tool_use_id(hook_module):
+    row = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": (
+                "The transcript included: <task-notification>"
+                "<tool-use-id>toolu_agent</tool-use-id>"
+                "</task-notification>"
+            ),
+        },
+    }
+
+    assert not hook_module.is_task_notification_row(row)
+    assert hook_module.get_tool_use_id_for_task_notification(row) is None
+
+
 def test_task_id_fallback_maps_notification_to_tool_use_id(
     hook_module,
     fixture_transcript_path,

@@ -68,6 +68,41 @@ def test_popping_deferred_rows_removes_whole_turn_waiting_on_multiple_agents(hoo
     assert state.pending_agent_turns == []
 
 
+def test_prepend_deferred_rows_ignores_non_notification_tool_use_xml(hook_module):
+    deferred_rows = [{"uuid": "deferred-row"}]
+    current_rows = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": (
+                    "Quoted notification: <task-notification>"
+                    "<tool-use-id>toolu_agent_a</tool-use-id>"
+                    "</task-notification>"
+                ),
+            },
+        },
+    ]
+    state = hook_module.SessionState(
+        pending_agent_turns=[
+            {
+                "pending_tool_use_ids": ["toolu_agent_a"],
+                "rows": deferred_rows,
+            },
+        ],
+    )
+
+    rows = hook_module.prepend_deferred_agent_turn_rows(current_rows, state)
+
+    assert rows == current_rows
+    assert state.pending_agent_turns == [
+        {
+            "pending_tool_use_ids": ["toolu_agent_a"],
+            "rows": deferred_rows,
+        },
+    ]
+
+
 def test_multi_agent_turn_is_stored_once_with_all_waiting_tool_ids(hook_module):
     rows = [{"uuid": "user-row"}, {"uuid": "assistant-row"}]
     turn = hook_module.Turn(

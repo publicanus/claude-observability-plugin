@@ -539,6 +539,9 @@ def get_tool_use_id_for_task_notification(
     row: Dict[str, Any],
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
+    if not is_task_notification_row(row):
+        return None
+
     tool_use_id = get_tool_use_id_from_task_notification(row)
     if tool_use_id:
         return tool_use_id
