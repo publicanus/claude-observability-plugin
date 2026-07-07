@@ -1742,10 +1742,6 @@ def main() -> int:
     if config is None:
         return 0
 
-    langfuse = create_langfuse_client(config)
-    if langfuse is None:
-        return 0
-
     payload = read_hook_payload()
     hook_context = get_session_id_and_transcript_path(payload)
     if hook_context is None:
@@ -1753,6 +1749,10 @@ def main() -> int:
 
     session_id, transcript_path = hook_context
     flush_deferred_agent_turns = is_session_end_hook_payload(payload)
+
+    langfuse = create_langfuse_client(config)
+    if langfuse is None:
+        return 0
 
     try:
         emitted = emit_new_turns_from_transcript(
