@@ -264,18 +264,18 @@ class SessionState:
     offset: int = 0       # Last byte read from the transcript file.
     buffer: str = ""      # Partial JSONL line kept between hook runs.
     turn_count: int = 0   # Turns already emitted for this session.
-    pending_agent_turns: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    pending_agent_turns: List[Dict[str, Any]] = field(default_factory=list)
 
 def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     s = global_state.get(key, {})
-    pending = s.get("pending_agent_turns")
-    if not isinstance(pending, dict):
-        pending = {}
+    pending_agent_turns = s.get("pending_agent_turns")
+    if not isinstance(pending_agent_turns, list):
+        pending_agent_turns = []
     return SessionState(
         offset=int(s.get("offset", 0)),
         buffer=str(s.get("buffer", "")),
         turn_count=int(s.get("turn_count", 0)),
-        pending_agent_turns=pending,
+        pending_agent_turns=pending_agent_turns,
     )
 
 def update_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
@@ -283,7 +283,7 @@ def update_session_state(global_state: Dict[str, Any], key: str, session_state: 
         "offset": session_state.offset,
         "buffer": session_state.buffer,
         "turn_count": session_state.turn_count,
-        "pending_agent_turns": session_state.pending_agent_turns or {},
+        "pending_agent_turns": session_state.pending_agent_turns or [],
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -553,55 +553,31 @@ def get_result_from_task_notification(row: Dict[str, Any]) -> str:
     result = _extract_xml_tag_value(notification_text, "result")
     return result if result is not None else notification_text
 
-def get_deferred_agent_turn_rows_key(rows: List[Dict[str, Any]]) -> str:
-    stable_row_ids: List[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        row_id = row.get("uuid") or row.get("requestId") or row.get("timestamp")
-        if row_id is not None:
-            stable_row_ids.append(str(row_id))
-    if stable_row_ids:
-        return "|".join(stable_row_ids)
-
-    try:
-        serialized_rows = json.dumps(rows, sort_keys=True, ensure_ascii=False)
-    except Exception:
-        serialized_rows = repr(rows)
-    return hashlib.sha256(serialized_rows.encode("utf-8")).hexdigest()
-
 def pop_deferred_agent_turn_rows(
     session_state: SessionState,
     tool_use_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    selected_tool_use_ids = (
-        tool_use_ids
-        if tool_use_ids is not None
-        else list(session_state.pending_agent_turns.keys())
-    )
+    selected_tool_use_ids = set(tool_use_ids) if tool_use_ids is not None else None
     rows_to_prepend: List[Dict[str, Any]] = []
-    popped_row_keys = set()
+    remaining_pending_agent_turns: List[Dict[str, Any]] = []
 
-    for tool_use_id in selected_tool_use_ids:
-        deferred_rows = session_state.pending_agent_turns.pop(tool_use_id, None)
-        if not isinstance(deferred_rows, list):
+    for pending_turn in session_state.pending_agent_turns:
+        if not isinstance(pending_turn, dict):
             continue
-
-        row_key = get_deferred_agent_turn_rows_key(deferred_rows)
-        if row_key in popped_row_keys:
+        pending_tool_use_ids = pending_turn.get("pending_tool_use_ids")
+        rows = pending_turn.get("rows")
+        if not isinstance(pending_tool_use_ids, list) or not isinstance(rows, list):
             continue
+        should_pop = (
+            selected_tool_use_ids is None
+            or any(tool_use_id in selected_tool_use_ids for tool_use_id in pending_tool_use_ids)
+        )
+        if should_pop:
+            rows_to_prepend.extend(rows)
+            continue
+        remaining_pending_agent_turns.append(pending_turn)
 
-        popped_row_keys.add(row_key)
-        rows_to_prepend.extend(deferred_rows)
-
-    if popped_row_keys:
-        # One deferred turn can wait on multiple async Agent/Task tool calls.
-        # Drop sibling entries that point at the same stored turn rows.
-        for tool_use_id, deferred_rows in list(session_state.pending_agent_turns.items()):
-            if not isinstance(deferred_rows, list):
-                continue
-            if get_deferred_agent_turn_rows_key(deferred_rows) in popped_row_keys:
-                session_state.pending_agent_turns.pop(tool_use_id, None)
+    session_state.pending_agent_turns = remaining_pending_agent_turns
 
     return rows_to_prepend
 
@@ -615,7 +591,7 @@ def prepend_deferred_agent_turn_rows(
     rows_with_deferred_turns: List[Dict[str, Any]] = []
     for row in rows:
         tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
-        if tool_use_id and tool_use_id in session_state.pending_agent_turns:
+        if tool_use_id:
             rows_with_deferred_turns.extend(pop_deferred_agent_turn_rows(session_state, [tool_use_id]))
         rows_with_deferred_turns.append(row)
     return rows_with_deferred_turns
@@ -677,8 +653,10 @@ def get_turns_to_emit(
                 debug(f"Emitting async agent turn without task notification: {pending_agent_tool_use_ids}")
                 turns_to_emit.append(turn)
                 continue
-            for tool_use_id in pending_agent_tool_use_ids:
-                session_state.pending_agent_turns[tool_use_id] = turn.rows
+            session_state.pending_agent_turns.append({
+                "pending_tool_use_ids": pending_agent_tool_use_ids,
+                "rows": turn.rows,
+            })
             debug(f"Deferred agent turn until task notification: {pending_agent_tool_use_ids}")
             continue
         turns_to_emit.append(turn)
