@@ -52,6 +52,9 @@ try:
 except ValueError:
     MAX_CHARS = 20000
 
+# Bound for unresolved task notifications kept in the state file between runs.
+MAX_PENDING_TASK_NOTIFICATIONS = 50
+
 @dataclass
 class LangfuseConfig:
     public_key: str
@@ -265,17 +268,24 @@ class SessionState:
     buffer: str = ""      # Partial JSONL line kept between hook runs.
     turn_count: int = 0   # Turns already emitted for this session.
     pending_agent_turns: List[Dict[str, Any]] = field(default_factory=list)
+    # Task-notification rows whose tool_use_id could not be resolved yet
+    # (task-id-only and the subagent meta.json not on disk); retried each run.
+    pending_task_notifications: List[Dict[str, Any]] = field(default_factory=list)
 
 def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     s = global_state.get(key, {})
     pending_agent_turns = s.get("pending_agent_turns")
     if not isinstance(pending_agent_turns, list):
         pending_agent_turns = []
+    pending_task_notifications = s.get("pending_task_notifications")
+    if not isinstance(pending_task_notifications, list):
+        pending_task_notifications = []
     return SessionState(
         offset=int(s.get("offset", 0)),
         buffer=str(s.get("buffer", "")),
         turn_count=int(s.get("turn_count", 0)),
         pending_agent_turns=pending_agent_turns,
+        pending_task_notifications=pending_task_notifications,
     )
 
 def update_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
@@ -284,6 +294,7 @@ def update_session_state(global_state: Dict[str, Any], key: str, session_state: 
         "buffer": session_state.buffer,
         "turn_count": session_state.turn_count,
         "pending_agent_turns": session_state.pending_agent_turns or [],
+        "pending_task_notifications": session_state.pending_task_notifications or [],
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -584,23 +595,49 @@ def resolve_deferred_agent_turns(
 
     Deferred rows are never spliced into the batch (a user row mid-batch would
     cut the current turn in half); resolved turns are returned for isolated
-    assembly, unmatched notifications stay in the batch.
+    assembly. Notifications matching a tool_use in the batch stay there, and
+    ones that cannot be attributed yet (task-id-only, subagent meta.json not
+    on disk) are stashed in the session state and retried on later runs
+    instead of being swallowed by the turn assembly.
     """
-    if not session_state.pending_agent_turns:
-        return [], rows
-
     remaining_rows: List[Dict[str, Any]] = []
-    for row in rows:
-        tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
-        pending_turn = _find_pending_agent_turn(session_state, tool_use_id) if tool_use_id else None
-        if pending_turn is None:
-            remaining_rows.append(row)
-            continue
+    stashed_notifications: List[Dict[str, Any]] = []
+
+    def route_to_pending_turn(pending_turn: Dict[str, Any], row: Dict[str, Any], tool_use_id: str) -> None:
         pending_turn["rows"].append(row)
         pending_tool_use_ids = pending_turn.get("pending_tool_use_ids")
         if isinstance(pending_tool_use_ids, list) and tool_use_id in pending_tool_use_ids:
             pending_tool_use_ids.remove(tool_use_id)
             pending_turn.setdefault("resolved_tool_use_ids", []).append(tool_use_id)
+
+    # Retry stashed notifications from earlier runs first (they are older than
+    # anything in the batch); their task-id may resolve now.
+    for row in session_state.pending_task_notifications:
+        tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
+        if tool_use_id is None:
+            stashed_notifications.append(row)
+            continue
+        pending_turn = _find_pending_agent_turn(session_state, tool_use_id)
+        if pending_turn is None:
+            debug(f"Dropping stashed task notification for {tool_use_id}: no deferred turn waits for it")
+            continue
+        route_to_pending_turn(pending_turn, row, tool_use_id)
+
+    for row in rows:
+        if not is_task_notification_row(row):
+            remaining_rows.append(row)
+            continue
+        tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
+        if tool_use_id is None:
+            stashed_notifications.append(row)
+            continue
+        pending_turn = _find_pending_agent_turn(session_state, tool_use_id)
+        if pending_turn is None:
+            remaining_rows.append(row)
+            continue
+        route_to_pending_turn(pending_turn, row, tool_use_id)
+
+    session_state.pending_task_notifications = stashed_notifications[-MAX_PENDING_TASK_NOTIFICATIONS:]
 
     # Pop fully resolved turns in deferral (i.e. chronological) order.
     resolved_turn_row_lists: List[List[Dict[str, Any]]] = []
@@ -917,6 +954,10 @@ def get_new_turns_from_transcript(
         if flushed_row_lists:
             debug(f"Flushing {len(flushed_row_lists)} deferred agent turn(s) without task notification")
             deferred_turn_row_lists = deferred_turn_row_lists + flushed_row_lists
+
+    if flush_deferred_agent_turns and session_state.pending_task_notifications:
+        debug(f"Dropping {len(session_state.pending_task_notifications)} unresolved task notification(s) at session end")
+        session_state.pending_task_notifications = []
 
     # Each deferred row list is a complete turn from an earlier hook run, so
     # it is rebuilt in isolation and emitted before the current batch (its

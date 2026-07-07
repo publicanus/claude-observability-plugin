@@ -468,3 +468,131 @@ def test_launch_text_fallback_defers_rows_without_tool_use_result(hook_module):
 
     assert turns_to_emit == []
     assert len(state.pending_agent_turns) == 1
+
+
+def make_task_id_notification_row(uuid: str, task_id: str, result: str, timestamp: str) -> dict[str, Any]:
+    return {
+        "type": "user",
+        "timestamp": timestamp,
+        "uuid": uuid,
+        "origin": {"kind": "task-notification"},
+        "message": {
+            "role": "user",
+            "content": (
+                f"<task-notification><task-id>{task_id}</task-id>"
+                f"<result>{result}</result></task-notification>"
+            ),
+        },
+    }
+
+
+def write_subagent_meta(transcript: Path, agent_id: str, tool_use_id: str) -> None:
+    subagent_dir = transcript.with_suffix("") / "subagents"
+    subagent_dir.mkdir(parents=True, exist_ok=True)
+    (subagent_dir / f"agent-{agent_id}.meta.json").write_text(
+        json.dumps({"toolUseId": tool_use_id, "agentType": "general-purpose", "description": "bg"}),
+        encoding="utf-8",
+    )
+    (subagent_dir / f"agent-{agent_id}.jsonl").write_text("", encoding="utf-8")
+
+
+def test_unresolvable_notification_is_stashed_and_resolved_when_meta_appears(hook_module, tmp_path):
+    """Regression: a task-id-only notification arriving before the subagent's
+    meta.json exists (and with no open turn) was consumed and its result
+    permanently lost; the deferred turn was flushed without its final output."""
+    transcript = tmp_path / "transcript.jsonl"
+    state = hook_module.SessionState()
+
+    def run(flush=False):
+        sub_map = hook_module.get_subagent_transcripts_by_tool_use_id(transcript)
+        turns, new_state = hook_module.get_new_turns_from_transcript(
+            transcript, state, sub_map, flush_deferred_agent_turns=flush)
+        return hook_module.get_turns_to_emit(turns, new_state, flush_deferred_agent_turns=flush)
+
+    append_jsonl(transcript, launch_turn_rows("toolu_bg"))
+    assert run() == []
+    assert len(state.pending_agent_turns) == 1
+
+    # Notification lands alone in the next batch; no meta.json on disk yet.
+    append_jsonl(transcript, [
+        make_task_id_notification_row("n1", "agent-late", "Late result.", "2026-01-01T00:01:00.000Z"),
+    ])
+    assert run() == []
+    assert len(state.pending_task_notifications) == 1
+
+    # meta.json appears late; the stashed notification resolves on this run.
+    write_subagent_meta(transcript, "agent-late", "toolu_bg")
+    append_jsonl(transcript, [
+        make_user_row("user-2", "Next question.", "2026-01-01T00:02:00.000Z"),
+        make_assistant_row("assistant-3", "msg-3",
+                           [{"type": "text", "text": "Answer."}], "2026-01-01T00:02:01.000Z"),
+    ])
+    emitted = run()
+
+    assert [t.user_msg["uuid"] for t in emitted] == ["user-1", "user-2"]
+    assert emitted[0].tool_results_by_id["toolu_bg"]["final_content"] == "Late result."
+    assert state.pending_agent_turns == []
+    assert state.pending_task_notifications == []
+
+
+def test_stashed_notification_without_matching_deferred_turn_is_dropped(hook_module):
+    state = hook_module.SessionState(
+        pending_task_notifications=[
+            make_notification_row("n1", "toolu_gone", "Result", "2026-01-01T00:01:00.000Z"),
+        ],
+    )
+
+    resolved, remaining = hook_module.resolve_deferred_agent_turns([], state)
+
+    # Resolvable but nothing waits for it (turn already emitted): drop it
+    # instead of re-stashing forever.
+    assert resolved == []
+    assert remaining == []
+    assert state.pending_task_notifications == []
+
+
+def test_unresolved_notifications_are_dropped_at_session_end_flush(hook_module, tmp_path):
+    transcript = tmp_path / "transcript.jsonl"
+    state = hook_module.SessionState()
+    append_jsonl(transcript, launch_turn_rows("toolu_bg"))
+    append_jsonl(transcript, [
+        make_task_id_notification_row("n1", "agent-unknown", "Result.", "2026-01-01T00:01:00.000Z"),
+    ])
+    turns, state = hook_module.get_new_turns_from_transcript(transcript, state)
+    assert hook_module.get_turns_to_emit(turns, state) == []
+    assert len(state.pending_task_notifications) == 1
+
+    flushed_turns, state = hook_module.get_new_turns_from_transcript(
+        transcript, state, flush_deferred_agent_turns=True)
+    flushed = hook_module.get_turns_to_emit(flushed_turns, state, flush_deferred_agent_turns=True)
+
+    # The deferred turn is still flushed (without its final output) and the
+    # unresolvable notification does not linger in the state file.
+    assert len(flushed) == 1
+    assert state.pending_task_notifications == []
+    assert state.pending_agent_turns == []
+
+
+def test_stashed_notifications_are_bounded(hook_module):
+    state = hook_module.SessionState()
+    rows = [
+        make_task_id_notification_row(f"n{i}", f"agent-{i}", "r", "2026-01-01T00:01:00.000Z")
+        for i in range(hook_module.MAX_PENDING_TASK_NOTIFICATIONS + 10)
+    ]
+
+    hook_module.resolve_deferred_agent_turns(rows, state)
+
+    assert len(state.pending_task_notifications) == hook_module.MAX_PENDING_TASK_NOTIFICATIONS
+    # the newest notifications win
+    assert state.pending_task_notifications[-1]["uuid"] == rows[-1]["uuid"]
+
+
+def test_session_state_round_trips_stashed_notifications(hook_module):
+    notification = make_notification_row("n1", "toolu_bg", "Result", "2026-01-01T00:01:00.000Z")
+    state = hook_module.SessionState(pending_task_notifications=[notification])
+    global_state: dict[str, Any] = {}
+
+    hook_module.update_session_state(global_state, "key", state)
+    restored = hook_module.get_session_state(global_state, "key")
+
+    assert restored.pending_task_notifications == [notification]
