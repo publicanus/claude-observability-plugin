@@ -1069,16 +1069,26 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
 
 # ---- Trace naming and tags ----
 def collect_skill_tags(turn: Turn) -> List[str]:
-    """Return 'skill:<name>' tags for every Skill tool invocation in the turn."""
+    """Return 'skill:<name>' tags for every skill used in the turn.
+
+    Skills leave two different transcript trails: a tool_use block named
+    "Skill" when Claude invokes the skill itself, and a top-level
+    attributionSkill field on assistant rows when the user invokes it as a
+    slash command (which never produces a Skill tool_use block).
+    """
     names: List[str] = []
+
+    def add_skill(skill: Any) -> None:
+        if isinstance(skill, str) and skill and f"skill:{skill}" not in names:
+            names.append(f"skill:{skill}")
+
     for assistant_message in turn.assistant_msgs:
+        add_skill(assistant_message.get("attributionSkill"))
         for tool_use in get_tool_use_blocks(get_content_from_row(assistant_message)):
             if tool_use.get("name") != "Skill":
                 continue
             tool_input = tool_use.get("input")
-            skill = tool_input.get("skill") if isinstance(tool_input, dict) else None
-            if isinstance(skill, str) and skill and f"skill:{skill}" not in names:
-                names.append(f"skill:{skill}")
+            add_skill(tool_input.get("skill") if isinstance(tool_input, dict) else None)
     return names
 
 def short_session_label(session_id: str, max_len: int = 12) -> str:
