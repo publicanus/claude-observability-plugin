@@ -1142,17 +1142,61 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
     )
 
 # ---- Trace naming and tags ----
-def collect_skill_tags(turn: Turn) -> List[str]:
-    """Return 'skill:<name>' tags for every Skill tool invocation in the turn."""
-    names: List[str] = []
-    for assistant_message in turn.assistant_msgs:
-        for tool_use in get_tool_use_blocks(get_content_from_row(assistant_message)):
+def add_skill_tags_from_rows(rows: List[Dict[str, Any]], names: List[str], prefix: str) -> None:
+    """Collect '<prefix><name>' tags for every skill trail in the rows.
+
+    Skills leave two different transcript trails: a tool_use block named
+    "Skill" when Claude invokes the skill itself, and a top-level
+    attributionSkill field on assistant rows when the user invokes it as a
+    slash command (which never produces a Skill tool_use block).
+    """
+    def add_skill(skill: Any) -> None:
+        if isinstance(skill, str) and skill and f"{prefix}{skill}" not in names:
+            names.append(f"{prefix}{skill}")
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        add_skill(row.get("attributionSkill"))
+        for tool_use in get_tool_use_blocks(get_content_from_row(row)):
             if tool_use.get("name") != "Skill":
                 continue
             tool_input = tool_use.get("input")
-            skill = tool_input.get("skill") if isinstance(tool_input, dict) else None
-            if isinstance(skill, str) and skill and f"skill:{skill}" not in names:
-                names.append(f"skill:{skill}")
+            add_skill(tool_input.get("skill") if isinstance(tool_input, dict) else None)
+
+
+def collect_skill_tags(turn: Turn) -> List[str]:
+    """Return 'skill:<name>' tags for every skill used in the turn itself."""
+    names: List[str] = []
+    add_skill_tags_from_rows(turn.assistant_msgs, names, "skill:")
+    return names
+
+
+def collect_subagent_skill_tags(
+    turn: Turn,
+    subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
+    """Return 'subagent-skill:<name>' tags for skills used inside the
+    subagent transcripts launched by this turn.
+
+    Kept in a separate tag namespace so 'skill:' keeps meaning "ran in the
+    main conversation" and both dimensions stay filterable independently.
+    """
+    if not subagent_transcripts_by_tool_use_id:
+        return []
+    names: List[str] = []
+    for assistant_message in turn.assistant_msgs:
+        for tool_use in get_tool_use_blocks(get_content_from_row(assistant_message)):
+            tool_use_id = str(tool_use.get("id") or "")
+            subagent = subagent_transcripts_by_tool_use_id.get(tool_use_id) if tool_use_id else None
+            if not isinstance(subagent, dict):
+                continue
+            path = subagent.get("path")
+            if not isinstance(path, Path):
+                continue
+            rows = read_subagent_jsonl(path)
+            if rows:
+                add_skill_tags_from_rows(rows, names, "subagent-skill:")
     return names
 
 def short_session_label(session_id: str, max_len: int = 12) -> str:
@@ -1168,10 +1212,14 @@ def short_session_label(session_id: str, max_len: int = 12) -> str:
 def trace_display_name(session_id: str, turn_num: int) -> str:
     return f"Claude Code - Turn {turn_num} ({short_session_label(session_id)})"
 
-def get_trace_tags(turn: Turn) -> List[str]:
+def get_trace_tags(
+    turn: Turn,
+    subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
     tags = ["claude-code"]
     if SKILL_TAGS:
         tags += collect_skill_tags(turn)
+        tags += collect_subagent_skill_tags(turn, subagent_transcripts_by_tool_use_id)
     return tags
 
 # ---- Generation payloads ----
@@ -1773,7 +1821,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     last_assistant_ts = parse_timestamp(last_assistant)
     turn_end_ts = get_turn_end_timestamp(turn)
     trace_metadata = build_trace_metadata(session_id, turn_num, turn, transcript_path, user_text_meta)
-    tags = get_trace_tags(turn)
+    tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id)
 
     trace_name = trace_display_name(session_id, turn_num)
     root_observation_name = "Conversational Turn"
