@@ -1,5 +1,7 @@
 # Langfuse Observability Plugin for Claude Code
 
+> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `langfuse-observability` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). The one behavioral difference: this fork captures named teammate agents (subagents spawned with a `name:`, Claude Code's agent-teams feature) — upstream drops them silently, so a teammate-heavy session can do most of its work invisibly to Langfuse. Documented upstream as [langfuse/claude-observability-plugin#28](https://github.com/langfuse/claude-observability-plugin/issues/28). The upstream README follows unchanged below.
+
 Trace hook-backed Claude Code sessions to [Langfuse](https://langfuse.com) — turns, generations, tool calls, and token usage — with zero code changes.
 
 ## Install
