@@ -302,6 +302,37 @@ def update_session_state(global_state: Dict[str, Any], key: str, session_state: 
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
+
+@dataclass
+class TeammateProgress:
+    """Per-teammate-transcript emission progress, stored in the same global state
+    dict as SessionState (a separate entry keyed by the teammate's transcript
+    path — same store, same lock, same 30-day pruning, not a parallel store)."""
+    emitted_turns: int = 0        # Teammate turns already emitted.
+    last_size: int = 0            # Transcript byte size seen at the previous firing.
+    last_emitted_rowcount: int = 0  # Row count of the most-recently emitted turn.
+    settled: bool = False         # Previous firing emitted every turn incl. the tail.
+
+def get_teammate_progress(global_state: Dict[str, Any], key: str) -> TeammateProgress:
+    s = global_state.get(key, {})
+    if not isinstance(s, dict):
+        s = {}
+    return TeammateProgress(
+        emitted_turns=int(s.get("emitted_turns", 0)),
+        last_size=int(s.get("last_size", 0)),
+        last_emitted_rowcount=int(s.get("last_emitted_rowcount", 0)),
+        settled=bool(s.get("settled", False)),
+    )
+
+def update_teammate_progress(global_state: Dict[str, Any], key: str, progress: TeammateProgress) -> None:
+    global_state[key] = {
+        "emitted_turns": progress.emitted_turns,
+        "last_size": progress.last_size,
+        "last_emitted_rowcount": progress.last_emitted_rowcount,
+        "settled": progress.settled,
+        "updated": datetime.now(timezone.utc).isoformat(),
+    }
+
 def save_hook_state(state: Dict[str, Any]) -> None:
     try:
         # Drop session entries older than 30 days to keep the file bounded.
@@ -1034,9 +1065,11 @@ def get_task_id_to_tool_use_id(
 # machinery (is_task_notification_row / pending_agent_turns). Deferral exists to
 # hold a launching turn open until its single subagent result can be nested into
 # the launching tool span. Teammates are a parallel, long-lived conversation
-# captured directly from their own transcript here, so their launching turn emits
-# normally and their work is emitted as independent traces — there is no deferral
-# to resolve, and teammate messages need not be treated as task notifications.
+# captured directly from their own transcript here, so whatever the parent's
+# launching turn does — emit immediately or defer to SessionEnd, depending on
+# whether its tool result matches is_async_agent_launch_result — is orthogonal:
+# the teammate's work is emitted as independent traces either way, and teammate
+# messages need not be treated as task notifications.
 TEAMMATE_TASK_KIND = "in_process_teammate"
 
 
@@ -1116,6 +1149,12 @@ def discover_teammate_transcripts(transcript_path: Path) -> List[Dict[str, Any]]
             isinstance(name, str) and name
         )
         if not is_teammate:
+            # A meta with no toolUseId and no teammate shape fits neither
+            # discovery path; surface it loudly rather than dropping it silently.
+            info(
+                f"Subagent meta with no toolUseId and no teammate shape "
+                f"(name/taskKind): {meta_path.name}; not emitted"
+            )
             continue
 
         jsonl_path = meta_path.with_name(meta_path.name[: -len(".meta.json")] + ".jsonl")
@@ -1981,13 +2020,39 @@ def teammate_trace_display_name(name: str, teammate_turn_num: int, session_id: s
     return f"Teammate {name} - Turn {teammate_turn_num} ({short_session_label(session_id)})"
 
 
-def derive_teammate_trace_id(trace_seed: str, name: str, teammate_turn_num: int) -> Optional[str]:
+def derive_teammate_trace_id(trace_seed: str, agent_id: str, teammate_turn_num: int) -> Optional[str]:
     """Deterministic trace id for a teammate turn.
 
-    Namespaced by teammate name so a teammate turn never collides with a main
-    conversation turn that shares the same number.
+    Namespaced by the per-meta agent_id (unique per teammate transcript, hash
+    included), NOT the display name: two teammates can share a name, and keying
+    on the name would derive identical ids so the second teammate's turns would
+    upsert over — silently clobber — the first's token stream. It is also
+    namespaced away from main-conversation turns that share a number.
     """
-    return derive_turn_trace_id(f"{trace_seed}:teammate:{name}", teammate_turn_num)
+    return derive_turn_trace_id(f"{trace_seed}:teammate:{agent_id}", teammate_turn_num)
+
+
+def is_teammate_turn_complete(turn: Turn) -> bool:
+    """Whether a teammate turn can no longer grow: its final assistant message
+    ended the turn rather than awaiting a tool result.
+
+    Used only together with a "transcript unchanged since the previous firing"
+    check, so a momentary lull mid-tool-loop never counts as complete.
+    """
+    if not turn.assistant_msgs:
+        return False
+    last = turn.assistant_msgs[-1]
+    message = last.get("message")
+    stop_reason = message.get("stop_reason") if isinstance(message, dict) else None
+    if stop_reason == "tool_use":
+        return False
+    # Even without a stop_reason, a tool_use whose result has not landed means
+    # the turn is still in flight.
+    for tool_use in get_tool_use_blocks(get_content_from_row(last)):
+        tool_use_id = str(tool_use.get("id") or "")
+        if tool_use_id and tool_use_id not in turn.tool_results_by_id:
+            return False
+    return True
 
 
 def emit_teammate_turn(
@@ -2013,6 +2078,7 @@ def emit_teammate_turn(
     filterable, cross-process-safe form of "linking".
     """
     name = teammate.get("name") or "teammate"
+    agent_id = teammate.get("agent_id") or name
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
     user_text, user_text_meta = truncate_text(user_text_raw)
 
@@ -2045,9 +2111,9 @@ def emit_teammate_turn(
     forced_trace_id: Optional[str] = None
     if trace_seed:
         try:
-            forced_trace_id = derive_teammate_trace_id(trace_seed, name, teammate_turn_num)
+            forced_trace_id = derive_teammate_trace_id(trace_seed, agent_id, teammate_turn_num)
         except Exception as e:
-            debug(f"teammate trace id derivation failed for {name} turn {teammate_turn_num}: {e}")
+            debug(f"teammate trace id derivation failed for {agent_id} turn {teammate_turn_num}: {e}")
 
     with propagate_attributes(
         session_id=session_id,
@@ -2090,15 +2156,9 @@ def emit_teammate_transcripts(
     """Emit newly-closed turns for every named teammate under this session.
 
     Runs on every hook firing (Stop and SessionEnd), independent of whether the
-    parent produced new turns. Growth and idempotency reuse the existing session
-    state: each teammate transcript gets its own state entry keyed by its path,
-    and turn_count records how many of its turns have already been emitted.
-
-    A teammate is almost always mid-turn when a parent Stop fires, so the still-
-    growing final turn is held back until a newer turn closes it (or SessionEnd
-    flushes). This keeps emission idempotent — turn_count only advances, and a
-    turn is never emitted until it can no longer grow — at the cost of the final
-    turn landing at SessionEnd.
+    parent produced new turns. Each teammate is processed in isolation so one
+    teammate's failure never aborts the others (and never propagates to the
+    classic path, whose progress is already persisted before this runs).
     """
     teammates = discover_teammate_transcripts(transcript_path)
     if not teammates:
@@ -2108,61 +2168,146 @@ def emit_teammate_transcripts(
 
     emitted_total = 0
     for teammate in teammates:
-        path = teammate.get("path")
-        if not isinstance(path, Path):
-            continue
-        name = teammate.get("name")
-        launching_tool_use_id = (
-            name_to_tool_use_id.get(name) if isinstance(name, str) else None
-        )
-        ambiguous = isinstance(name, str) and name in ambiguous_names
-        if launching_tool_use_id is None:
-            info(
-                f"Teammate transcript without a matched launching Agent tool_use: "
-                f"{name} ({path.name}); emitting as unattributed"
+        try:
+            emitted_total += _emit_one_teammate(
+                langfuse,
+                config,
+                session_id,
+                transcript_path,
+                state,
+                teammate,
+                name_to_tool_use_id,
+                ambiguous_names,
+                flush=flush_deferred_agent_turns,
             )
-
-        key = get_session_state_key(session_id, str(path))
-        teammate_state = get_session_state(state, key)
-        already_emitted = teammate_state.turn_count
-
-        rows = read_subagent_jsonl(path)
-        if not rows:
-            continue
-        turns = build_turns(rows)
-
-        # Emit every turn that can no longer grow: all but the trailing turn on a
-        # normal firing, and the trailing turn too when flushing at session end.
-        closable = len(turns) if flush_deferred_agent_turns else max(len(turns) - 1, 0)
-        if already_emitted >= closable:
-            if already_emitted:
-                # Keep the entry's "updated" fresh so it is not pruned mid-session.
-                update_session_state(state, key, teammate_state)
-            continue
-
-        for index in range(already_emitted, closable):
-            teammate_turn_num = index + 1
-            try:
-                emit_teammate_turn(
-                    langfuse,
-                    session_id,
-                    teammate,
-                    teammate_turn_num,
-                    turns[index],
-                    transcript_path,
-                    user_id=config.user_id,
-                    launching_tool_use_id=launching_tool_use_id,
-                    ambiguous_name=ambiguous,
-                    trace_seed=config.trace_seed,
-                )
-                emitted_total += 1
-            except Exception as e:
-                info(f"emit_teammate_turn failed ({name} turn {teammate_turn_num}): {type(e).__name__}: {e}")
-
-        teammate_state.turn_count = closable
-        update_session_state(state, key, teammate_state)
-
+        except Exception as e:
+            info(f"teammate capture failed ({teammate.get('name')}): {type(e).__name__}: {e}")
     return emitted_total
+
+
+def _emit_one_teammate(
+    langfuse: Langfuse,
+    config: LangfuseConfig,
+    session_id: str,
+    transcript_path: Path,
+    state: Dict[str, Any],
+    teammate: Dict[str, Any],
+    name_to_tool_use_id: Dict[str, str],
+    ambiguous_names: set,
+    *,
+    flush: bool,
+) -> int:
+    """Emit one teammate's newly-closed turns and persist its progress.
+
+    Growth and idempotency reuse the shared state store (a TeammateProgress entry
+    keyed by the teammate's transcript path): emitted_turns only ever advances.
+
+    A teammate is usually mid-turn when a parent Stop fires, so the still-growing
+    final turn is held back until (a) a newer turn closes it, (b) the transcript
+    is unchanged since the previous firing and the final turn has ended — a
+    one-shot background teammate that finished and is never resumed, which would
+    otherwise wait for SessionEnd — or (c) SessionEnd flushes. A turn is never
+    emitted while it can still grow, so nothing is ever double-counted.
+    """
+    path = teammate.get("path")
+    if not isinstance(path, Path):
+        return 0
+
+    name = teammate.get("name")
+    launching_tool_use_id = name_to_tool_use_id.get(name) if isinstance(name, str) else None
+    ambiguous = isinstance(name, str) and name in ambiguous_names
+    if launching_tool_use_id is None:
+        info(
+            f"Teammate transcript without a matched launching Agent tool_use: "
+            f"{name} ({path.name}); emitting as unattributed"
+        )
+
+    key = get_session_state_key(session_id, str(path))
+    progress = get_teammate_progress(state, key)
+
+    try:
+        current_size = path.stat().st_size
+    except Exception:
+        current_size = 0
+
+    # Perf guard: once we have caught up to the whole transcript (settled) and it
+    # has not changed since the previous firing, there is nothing to do — skip the
+    # whole-file reread so the global state lock is not held reparsing idle
+    # teammates on every Stop of a long session.
+    if not flush and progress.settled and current_size > 0 and current_size == progress.last_size:
+        update_teammate_progress(state, key, progress)  # keep "updated" fresh
+        return 0
+
+    rows = read_subagent_jsonl(path)
+    if not rows:
+        return 0
+    turns = build_turns(rows)
+
+    stable = current_size > 0 and current_size == progress.last_size
+    already = progress.emitted_turns
+
+    # In-place growth of the most-recently emitted turn. Transcripts are
+    # append-only, so only the last emitted turn can grow after emission (a resume
+    # starts a new turn). Re-emitting is a safe corrective upsert only under a
+    # trace seed (identical deterministic id); without one it would duplicate, so
+    # log the undercount loudly instead.
+    start = already
+    if 0 < already <= len(turns):
+        grown_rowcount = len(turns[already - 1].rows)
+        if grown_rowcount > progress.last_emitted_rowcount:
+            if config.trace_seed:
+                start = already - 1  # re-emit the grown turn as an upsert
+            else:
+                info(
+                    f"Teammate {name} turn {already} grew after emission "
+                    f"({progress.last_emitted_rowcount} -> {grown_rowcount} rows); "
+                    f"undercount — set CC_LANGFUSE_TRACE_SEED to enable corrective re-emit"
+                )
+                progress.last_emitted_rowcount = grown_rowcount
+
+    if flush:
+        closable = len(turns)
+    elif stable and turns and is_teammate_turn_complete(turns[-1]):
+        closable = len(turns)
+    else:
+        closable = max(len(turns) - 1, 0)
+
+    last_emitted_rowcount = progress.last_emitted_rowcount
+    emitted = 0
+    for index in range(start, closable):
+        teammate_turn_num = index + 1
+        try:
+            emit_teammate_turn(
+                langfuse,
+                session_id,
+                teammate,
+                teammate_turn_num,
+                turns[index],
+                transcript_path,
+                user_id=config.user_id,
+                launching_tool_use_id=launching_tool_use_id,
+                ambiguous_name=ambiguous,
+                trace_seed=config.trace_seed,
+            )
+            emitted += 1
+            last_emitted_rowcount = len(turns[index].rows)
+        except Exception as e:
+            info(f"emit_teammate_turn failed ({name} turn {teammate_turn_num}): {type(e).__name__}: {e}")
+
+    progress.emitted_turns = max(already, closable)
+    if emitted:
+        progress.last_emitted_rowcount = last_emitted_rowcount
+    progress.last_size = current_size
+    # "Settled" means the perf guard may skip the next reread. It requires every
+    # turn emitted AND no un-re-emitted in-place growth on the last emitted turn,
+    # so a pending corrective upsert is never skipped over.
+    tail_grew = (
+        0 < progress.emitted_turns <= len(turns)
+        and len(turns[progress.emitted_turns - 1].rows) > progress.last_emitted_rowcount
+    )
+    progress.settled = progress.emitted_turns >= len(turns) and not tail_grew
+    update_teammate_progress(state, key, progress)
+    return emitted
 
 
 # ---- New turn emission orchestration ----
@@ -2241,24 +2386,29 @@ def emit_new_turns_from_transcript(
             )
             session_state.turn_count += emitted
 
-        # Persist parent progress into the shared state dict before the teammate
-        # pass, which adds its own per-transcript entries to the same dict; a
-        # single save_hook_state below writes them all.
+        # Persist classic progress immediately: the teammate pass below shares the
+        # same state dict, and a failure there must never discard the classic
+        # offsets already emitted this run (which would re-emit classic turns).
         update_session_state(state, key, session_state)
+        save_hook_state(state)
 
         # Named teammates (agent teams) grow their own transcripts independently
         # of the parent, so capture them on every firing — even when the parent
-        # produced no new turns this run.
-        emitted += emit_teammate_transcripts(
-            langfuse,
-            config,
-            session_id,
-            transcript_path,
-            state,
-            flush_deferred_agent_turns=flush_deferred_agent_turns,
-        )
-
-        save_hook_state(state)
+        # produced no new turns this run. Guarded so teammate capture can never
+        # break classic capture; a second save persists teammate progress.
+        try:
+            emitted += emit_teammate_transcripts(
+                langfuse,
+                config,
+                session_id,
+                transcript_path,
+                state,
+                flush_deferred_agent_turns=flush_deferred_agent_turns,
+            )
+        except Exception as e:
+            info(f"teammate capture pass failed: {type(e).__name__}: {e}")
+        finally:
+            save_hook_state(state)
         return emitted
 
 
