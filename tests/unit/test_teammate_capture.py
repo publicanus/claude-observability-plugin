@@ -152,6 +152,62 @@ def write_teammate(
     return jsonl_path
 
 
+def teammate_inprogress_tail_rows(session_id: str, agent_id: str, index: int, minute: int) -> List[Dict[str, Any]]:
+    """A turn whose final assistant message ends on a tool_use with no result yet
+    (stop_reason 'tool_use') — i.e. still in flight, must never be closed early."""
+    ts = f"2026-01-01T00:{minute:02d}:00.000Z"
+    ts2 = f"2026-01-01T00:{minute:02d}:02.000Z"
+    return [
+        {
+            "type": "user",
+            "timestamp": ts,
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "uuid": f"{agent_id}-user-{index}",
+            "message": {"role": "user", "content": f"Instruction {index}"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": ts2,
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "uuid": f"{agent_id}-assistant-{index}",
+            "requestId": f"req-{agent_id}-{index}",
+            "message": {
+                "id": f"msg-{agent_id}-{index}",
+                "role": "assistant",
+                "model": "claude-sonnet-5",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "id": f"toolu-{agent_id}-{index}", "name": "Bash", "input": {"command": "ls"}}
+                ],
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        },
+    ]
+
+
+def teammate_extra_assistant_row(session_id: str, agent_id: str, index: int, minute: int) -> Dict[str, Any]:
+    """An additional assistant row appended to an existing turn (in-place growth,
+    no new user row)."""
+    return {
+        "type": "assistant",
+        "timestamp": f"2026-01-01T00:{minute:02d}:30.000Z",
+        "sessionId": session_id,
+        "agentId": agent_id,
+        "uuid": f"{agent_id}-assistant-{index}-more",
+        "requestId": f"req-{agent_id}-{index}-more",
+        "message": {
+            "id": f"msg-{agent_id}-{index}-more",
+            "role": "assistant",
+            "model": "claude-sonnet-5",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": f"More work {index}"}],
+            "usage": {"input_tokens": 30, "output_tokens": 20},
+        },
+    }
+
+
 def make_config(hook_module: Any, trace_seed: Optional[str] = None) -> Any:
     return hook_module.LangfuseConfig(
         "public", "secret", "https://example.test", "user-1", trace_seed
@@ -286,24 +342,142 @@ def test_delta_emission_across_two_firings(hook_module, fake_langfuse, isolated_
     # Persisted per-teammate progress marker reflects all three emitted turns.
     state = json.loads((isolated_hook_state / "langfuse_state.json").read_text(encoding="utf-8"))
     key = hook_module.get_session_state_key(session_id, str(teammate_jsonl))
-    assert state[key]["turn_count"] == 3
+    assert state[key]["emitted_turns"] == 3
 
 
-def test_idempotent_repeated_firings_emit_nothing_new(hook_module, fake_langfuse, isolated_hook_state):
+def test_completion_heuristic_emits_stable_finished_tail_then_is_idempotent(
+    hook_module, fake_langfuse, isolated_hook_state
+):
+    # A one-shot background teammate: a single finished turn, never resumed.
+    session_id = "session-test"
+    transcript = isolated_hook_state / "transcript.jsonl"
+    make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
+    write_teammate(transcript, session_id, "abuilder-4", "builder-issue-4", turn_count=1)
+    config = make_config(hook_module)
+
+    # Firing 1 (Stop): the trailing turn is held back — first sighting, not yet
+    # known stable.
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
+    assert len(teammate_turn_observations(fake_langfuse)) == 0
+
+    # Firing 2 (Stop): transcript unchanged since firing 1 and the turn has ended,
+    # so the completion heuristic closes it now instead of waiting for SessionEnd.
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
+
+    # Firing 3 (Stop): settled and unchanged — nothing new (idempotent).
+    third = hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
+    # Only the (unchanged) parent turn could be counted; the teammate adds nothing.
+    assert third == 0
+
+
+def test_inprogress_tail_not_emitted_prematurely(hook_module, fake_langfuse, isolated_hook_state):
+    session_id = "session-test"
+    transcript = isolated_hook_state / "transcript.jsonl"
+    make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
+    # Turn 1 complete; turn 2's final assistant message ends on an unresolved
+    # tool_use, so it is genuinely still in flight.
+    subagent_dir = transcript.with_suffix("") / "subagents"
+    subagent_dir.mkdir(parents=True, exist_ok=True)
+    (subagent_dir / "agent-abuilder-4.meta.json").write_text(
+        json.dumps(teammate_meta("abuilder-4", "builder-issue-4")), encoding="utf-8"
+    )
+    jsonl = subagent_dir / "agent-abuilder-4.jsonl"
+    rows = teammate_turn_rows(session_id, "abuilder-4", 1, minute=1)
+    rows += teammate_inprogress_tail_rows(session_id, "abuilder-4", 2, minute=2)
+    _write_jsonl(jsonl, rows)
+    config = make_config(hook_module)
+
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
+
+    # Even though the transcript is now stable, the in-flight tail must NOT close.
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
+
+
+def test_same_name_teammates_get_distinct_trace_ids_under_seed(hook_module):
+    # The collision fix: two teammates that share a display name but have distinct
+    # per-meta agent_ids must derive distinct deterministic trace ids, or the
+    # second would upsert over the first's token stream.
+    seed = "seed-abc"
+    id_a = hook_module.derive_teammate_trace_id(seed, "adup-hash-a", 1)
+    id_b = hook_module.derive_teammate_trace_id(seed, "adup-hash-b", 1)
+    assert id_a and id_b and id_a != id_b
+    # Stable across turns and namespaced away from main-conversation turn ids.
+    assert hook_module.derive_teammate_trace_id(seed, "adup-hash-a", 1) == id_a
+    assert hook_module.derive_turn_trace_id(seed, 1) != id_a
+
+
+def test_classic_state_persisted_when_teammate_pass_raises(
+    hook_module, fake_langfuse, isolated_hook_state, monkeypatch
+):
     session_id = "session-test"
     transcript = isolated_hook_state / "transcript.jsonl"
     make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
     write_teammate(transcript, session_id, "abuilder-4", "builder-issue-4", turn_count=2)
-    config = make_config(hook_module)
 
-    first = hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
-    count_after_first = len(teammate_turn_observations(fake_langfuse))
-    assert count_after_first == 1
+    def _boom(*_a, **_k):
+        raise RuntimeError("teammate pass exploded")
 
-    # No transcript growth between firings: nothing new for parent or teammate.
-    second = hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
-    assert second == 0
-    assert len(teammate_turn_observations(fake_langfuse)) == count_after_first
+    monkeypatch.setattr(hook_module, "emit_teammate_transcripts", _boom)
+
+    # The classic turn is emitted and its progress must survive the teammate crash.
+    emitted = hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, make_config(hook_module), session_id, transcript
+    )
+    assert emitted == 1  # the parent turn
+
+    state = json.loads((isolated_hook_state / "langfuse_state.json").read_text(encoding="utf-8"))
+    parent_key = hook_module.get_session_state_key(session_id, str(transcript))
+    assert state[parent_key]["turn_count"] == 1
+
+
+def test_seed_mode_corrective_reemit_on_inplace_growth(hook_module, fake_langfuse, isolated_hook_state):
+    session_id = "session-test"
+    transcript = isolated_hook_state / "transcript.jsonl"
+    make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
+    jsonl = write_teammate(transcript, session_id, "abuilder-4", "builder-issue-4", turn_count=1)
+    config = make_config(hook_module, trace_seed="seed-xyz")
+
+    # Flush emits the single turn.
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, config, session_id, transcript, flush_deferred_agent_turns=True
+    )
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
+
+    # The already-emitted turn grows in place (extra assistant row, no new user row).
+    _append_jsonl(jsonl, [teammate_extra_assistant_row(session_id, "abuilder-4", 1, minute=1)])
+
+    # Under a trace seed, re-emitting is a safe upsert (identical id): the grown
+    # turn is emitted again to correct the token count.
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, config, session_id, transcript, flush_deferred_agent_turns=True
+    )
+    assert len(teammate_turn_observations(fake_langfuse)) == 2
+
+
+def test_no_seed_inplace_growth_does_not_duplicate(hook_module, fake_langfuse, isolated_hook_state):
+    session_id = "session-test"
+    transcript = isolated_hook_state / "transcript.jsonl"
+    make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
+    jsonl = write_teammate(transcript, session_id, "abuilder-4", "builder-issue-4", turn_count=1)
+    config = make_config(hook_module)  # no trace seed
+
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, config, session_id, transcript, flush_deferred_agent_turns=True
+    )
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
+
+    _append_jsonl(jsonl, [teammate_extra_assistant_row(session_id, "abuilder-4", 1, minute=1)])
+
+    # Without a seed, re-emitting would duplicate; the undercount is logged and the
+    # turn is NOT re-emitted.
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, config, session_id, transcript, flush_deferred_agent_turns=True
+    )
+    assert len(teammate_turn_observations(fake_langfuse)) == 1
 
 
 def test_unattributed_teammate_emitted_with_tag(
