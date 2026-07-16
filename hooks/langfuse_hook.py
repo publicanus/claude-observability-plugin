@@ -326,10 +326,6 @@ def save_hook_state(state: Dict[str, Any]) -> None:
     except Exception as e:
         debug(f"save_hook_state failed: {e}")
 
-def save_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
-    update_session_state(global_state, key, session_state)
-    save_hook_state(global_state)
-
 
 # ----------------- Transcript row parsing -----------------
 def get_content_from_row(row: Dict[str, Any]) -> Any:
@@ -989,6 +985,10 @@ def get_subagent_transcripts_by_tool_use_id(transcript_path: Path) -> Dict[str, 
 
         tool_use_id = metadata.get("toolUseId")
         if not isinstance(tool_use_id, str) or not tool_use_id:
+            # Named-teammate metas (agent teams) carry no toolUseId and cannot be
+            # keyed here; they are discovered and emitted by
+            # discover_teammate_transcripts / emit_teammate_transcripts instead,
+            # so this skip drops nothing — it is not a silent data loss.
             continue
 
         jsonl_path = meta_path.with_name(meta_path.name[: -len(".meta.json")] + ".jsonl")
@@ -1019,6 +1019,122 @@ def get_task_id_to_tool_use_id(
         if isinstance(agent_id, str) and agent_id:
             task_id_to_tool_use_id[agent_id] = tool_use_id
     return task_id_to_tool_use_id
+
+
+# ----------------- Named teammate (agent-team) discovery -----------------
+# Claude Code's agent-teams feature spawns long-lived "teammate" subagents whose
+# meta.json carries taskKind "in_process_teammate" and a `name`, but NO toolUseId.
+# The classic toolUseId->transcript map therefore never sees them, and their
+# transcripts — which grow across many parent turns as SendMessage resumes them —
+# would be emitted nowhere. We discover them by name, link them back to their
+# launching Agent tool_use, and emit their turns as their own top-level traces.
+#
+# Note on deferral: we deliberately do NOT route teammate completion rows
+# (<teammate-message> / <agent-message>) through the async-launch deferral
+# machinery (is_task_notification_row / pending_agent_turns). Deferral exists to
+# hold a launching turn open until its single subagent result can be nested into
+# the launching tool span. Teammates are a parallel, long-lived conversation
+# captured directly from their own transcript here, so their launching turn emits
+# normally and their work is emitted as independent traces — there is no deferral
+# to resolve, and teammate messages need not be treated as task notifications.
+TEAMMATE_TASK_KIND = "in_process_teammate"
+
+
+def get_teammate_name_to_tool_use_id(transcript_path: Path) -> Tuple[Dict[str, str], set]:
+    """Map a teammate `name` to the Agent tool_use id that launched it.
+
+    Named teammates are spawned by an Agent tool_use whose input.name equals the
+    teammate meta's `name` (the tool result corroborates via toolUseResult.name /
+    an "agent_id: <name>@..." line). Scans the parent transcript in file order and
+    keeps the first launch per name; names launched more than once are returned as
+    ambiguous so the caller can flag the linkage deterministically.
+    """
+    name_to_tool_use_id: Dict[str, str] = {}
+    ambiguous_names: set = set()
+    try:
+        lines = transcript_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return name_to_tool_use_id, ambiguous_names
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        for tool_use in get_tool_use_blocks(get_content_from_row(row)):
+            if tool_use.get("name") not in ("Agent", "Task"):
+                continue
+            tool_input = tool_use.get("input")
+            name = tool_input.get("name") if isinstance(tool_input, dict) else None
+            tool_use_id = tool_use.get("id")
+            if not isinstance(name, str) or not name:
+                continue
+            if not isinstance(tool_use_id, str) or not tool_use_id:
+                continue
+            if name in name_to_tool_use_id:
+                # Same name launched more than once: linkage is ambiguous. Keep
+                # the first (earliest) launch deterministically and flag it.
+                ambiguous_names.add(name)
+                continue
+            name_to_tool_use_id[name] = tool_use_id
+    return name_to_tool_use_id, ambiguous_names
+
+
+def discover_teammate_transcripts(transcript_path: Path) -> List[Dict[str, Any]]:
+    """Discover named-teammate subagent transcripts (metas without a toolUseId).
+
+    Mirrors get_subagent_transcripts_by_tool_use_id but for the teammate meta
+    shape: no toolUseId, taskKind == "in_process_teammate" (or at least a `name`).
+    Returns one entry per teammate with its transcript path and identifying
+    metadata, in a stable (filename-sorted) order.
+    """
+    subagent_dir = transcript_path.with_suffix("") / "subagents"
+    if not subagent_dir.is_dir():
+        return []
+
+    teammates: List[Dict[str, Any]] = []
+    for meta_path in sorted(subagent_dir.glob("*.meta.json")):
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+
+        # Classic subagents are keyed by toolUseId elsewhere; only metas WITHOUT
+        # one and shaped like a teammate are handled here.
+        tool_use_id = metadata.get("toolUseId")
+        if isinstance(tool_use_id, str) and tool_use_id:
+            continue
+        name = metadata.get("name")
+        is_teammate = metadata.get("taskKind") == TEAMMATE_TASK_KIND or (
+            isinstance(name, str) and name
+        )
+        if not is_teammate:
+            continue
+
+        jsonl_path = meta_path.with_name(meta_path.name[: -len(".meta.json")] + ".jsonl")
+        if not jsonl_path.exists():
+            continue
+
+        agent_id = meta_path.name[: -len(".meta.json")]
+        if agent_id.startswith("agent-"):
+            agent_id = agent_id[len("agent-"):]
+
+        teammates.append({
+            "path": jsonl_path,
+            "name": name if isinstance(name, str) and name else agent_id,
+            "agent_id": agent_id,
+            "agent_type": metadata.get("agentType"),
+            "description": metadata.get("description"),
+            "team_name": metadata.get("teamName"),
+        })
+    return teammates
 
 
 # ----------------- Langfuse emit -----------------
@@ -1860,6 +1976,195 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
         trace_span.end(end_time=to_otel_nanoseconds(_get_latest_timestamp(turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)))
 
 
+# ---- Named teammate (agent-team) emission ----
+def teammate_trace_display_name(name: str, teammate_turn_num: int, session_id: str) -> str:
+    return f"Teammate {name} - Turn {teammate_turn_num} ({short_session_label(session_id)})"
+
+
+def derive_teammate_trace_id(trace_seed: str, name: str, teammate_turn_num: int) -> Optional[str]:
+    """Deterministic trace id for a teammate turn.
+
+    Namespaced by teammate name so a teammate turn never collides with a main
+    conversation turn that shares the same number.
+    """
+    return derive_turn_trace_id(f"{trace_seed}:teammate:{name}", teammate_turn_num)
+
+
+def emit_teammate_turn(
+    langfuse: Langfuse,
+    session_id: str,
+    teammate: Dict[str, Any],
+    teammate_turn_num: int,
+    turn: Turn,
+    transcript_path: Path,
+    *,
+    user_id: Optional[str] = None,
+    launching_tool_use_id: Optional[str] = None,
+    ambiguous_name: bool = False,
+    trace_seed: Optional[str] = None,
+) -> None:
+    """Emit one teammate turn as its own top-level trace.
+
+    A teammate is a parallel, long-lived conversation, so its turns become their
+    own traces (like main-conversation turns) rather than nesting under the
+    launching turn — the launch happened many parent turns earlier and its trace
+    is long closed. Linkage to the launching Agent tool_use is carried as trace
+    metadata/tags (launching_tool_use_id, teammate:<name>), which is the
+    filterable, cross-process-safe form of "linking".
+    """
+    name = teammate.get("name") or "teammate"
+    user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
+    user_text, user_text_meta = truncate_text(user_text_raw)
+
+    last_assistant = turn.assistant_msgs[-1]
+    final_assistant_text, _ = truncate_text(extract_text_from_content(get_content_from_row(last_assistant)))
+
+    user_ts = parse_timestamp(turn.user_msg)
+    last_assistant_ts = parse_timestamp(last_assistant)
+    turn_end_ts = get_turn_end_timestamp(turn)
+
+    trace_metadata = build_trace_metadata(session_id, teammate_turn_num, turn, transcript_path, user_text_meta)
+    trace_metadata.update({
+        "teammate_name": name,
+        "teammate_turn_number": teammate_turn_num,
+        "team_name": teammate.get("team_name"),
+        "agent_type": teammate.get("agent_type"),
+        "launching_tool_use_id": launching_tool_use_id,
+    })
+
+    tags = ["claude-code", f"teammate:{name}"]
+    if launching_tool_use_id is None:
+        tags.append("teammate-unattributed")
+    if ambiguous_name:
+        tags.append("teammate-ambiguous-name")
+    if SKILL_TAGS:
+        tags += collect_skill_tags(turn)
+
+    trace_name = teammate_trace_display_name(name, teammate_turn_num, session_id)
+
+    forced_trace_id: Optional[str] = None
+    if trace_seed:
+        try:
+            forced_trace_id = derive_teammate_trace_id(trace_seed, name, teammate_turn_num)
+        except Exception as e:
+            debug(f"teammate trace id derivation failed for {name} turn {teammate_turn_num}: {e}")
+
+    with propagate_attributes(
+        session_id=session_id,
+        user_id=user_id,
+        trace_name=trace_name,
+        tags=tags,
+    ):
+        trace_span = _start_backdated(
+            langfuse,
+            name="Teammate Turn",
+            as_type="span",
+            start_time=user_ts,
+            forced_trace_id=forced_trace_id,
+            input={"role": "user", "content": user_text},
+            metadata=trace_metadata,
+        )
+        obs_end_ts = emit_turn_observations(
+            langfuse,
+            trace_span._otel_span,
+            turn,
+            user_ts,
+            generation_prefix="Teammate LLM Call",
+            # Nested subagents launched by a teammate live under the teammate's
+            # own transcript stem, not the parent's; they are out of scope here.
+            subagent_transcripts_by_tool_use_id=None,
+        )
+        trace_span.update(output={"role": "assistant", "content": final_assistant_text})
+        trace_span.end(end_time=to_otel_nanoseconds(_get_latest_timestamp(turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)))
+
+
+def emit_teammate_transcripts(
+    langfuse: Langfuse,
+    config: LangfuseConfig,
+    session_id: str,
+    transcript_path: Path,
+    state: Dict[str, Any],
+    *,
+    flush_deferred_agent_turns: bool = False,
+) -> int:
+    """Emit newly-closed turns for every named teammate under this session.
+
+    Runs on every hook firing (Stop and SessionEnd), independent of whether the
+    parent produced new turns. Growth and idempotency reuse the existing session
+    state: each teammate transcript gets its own state entry keyed by its path,
+    and turn_count records how many of its turns have already been emitted.
+
+    A teammate is almost always mid-turn when a parent Stop fires, so the still-
+    growing final turn is held back until a newer turn closes it (or SessionEnd
+    flushes). This keeps emission idempotent — turn_count only advances, and a
+    turn is never emitted until it can no longer grow — at the cost of the final
+    turn landing at SessionEnd.
+    """
+    teammates = discover_teammate_transcripts(transcript_path)
+    if not teammates:
+        return 0
+
+    name_to_tool_use_id, ambiguous_names = get_teammate_name_to_tool_use_id(transcript_path)
+
+    emitted_total = 0
+    for teammate in teammates:
+        path = teammate.get("path")
+        if not isinstance(path, Path):
+            continue
+        name = teammate.get("name")
+        launching_tool_use_id = (
+            name_to_tool_use_id.get(name) if isinstance(name, str) else None
+        )
+        ambiguous = isinstance(name, str) and name in ambiguous_names
+        if launching_tool_use_id is None:
+            info(
+                f"Teammate transcript without a matched launching Agent tool_use: "
+                f"{name} ({path.name}); emitting as unattributed"
+            )
+
+        key = get_session_state_key(session_id, str(path))
+        teammate_state = get_session_state(state, key)
+        already_emitted = teammate_state.turn_count
+
+        rows = read_subagent_jsonl(path)
+        if not rows:
+            continue
+        turns = build_turns(rows)
+
+        # Emit every turn that can no longer grow: all but the trailing turn on a
+        # normal firing, and the trailing turn too when flushing at session end.
+        closable = len(turns) if flush_deferred_agent_turns else max(len(turns) - 1, 0)
+        if already_emitted >= closable:
+            if already_emitted:
+                # Keep the entry's "updated" fresh so it is not pruned mid-session.
+                update_session_state(state, key, teammate_state)
+            continue
+
+        for index in range(already_emitted, closable):
+            teammate_turn_num = index + 1
+            try:
+                emit_teammate_turn(
+                    langfuse,
+                    session_id,
+                    teammate,
+                    teammate_turn_num,
+                    turns[index],
+                    transcript_path,
+                    user_id=config.user_id,
+                    launching_tool_use_id=launching_tool_use_id,
+                    ambiguous_name=ambiguous,
+                    trace_seed=config.trace_seed,
+                )
+                emitted_total += 1
+            except Exception as e:
+                info(f"emit_teammate_turn failed ({name} turn {teammate_turn_num}): {type(e).__name__}: {e}")
+
+        teammate_state.turn_count = closable
+        update_session_state(state, key, teammate_state)
+
+    return emitted_total
+
+
 # ---- New turn emission orchestration ----
 def emit_ready_turns(
     langfuse: Langfuse,
@@ -1916,28 +2221,44 @@ def emit_new_turns_from_transcript(
             subagent_transcripts_by_tool_use_id,
             flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
-        if not turns:
-            save_session_state(state, key, session_state)
-            return 0
 
-        turns_to_emit = get_turns_to_emit(
-            turns,
-            session_state,
-            flush_deferred_agent_turns=flush_deferred_agent_turns,
-        )
-        emitted = emit_ready_turns(
+        emitted = 0
+        if turns:
+            turns_to_emit = get_turns_to_emit(
+                turns,
+                session_state,
+                flush_deferred_agent_turns=flush_deferred_agent_turns,
+            )
+            emitted = emit_ready_turns(
+                langfuse,
+                session_id,
+                transcript_path,
+                turns_to_emit,
+                session_state,
+                user_id=config.user_id,
+                subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
+                trace_seed=config.trace_seed,
+            )
+            session_state.turn_count += emitted
+
+        # Persist parent progress into the shared state dict before the teammate
+        # pass, which adds its own per-transcript entries to the same dict; a
+        # single save_hook_state below writes them all.
+        update_session_state(state, key, session_state)
+
+        # Named teammates (agent teams) grow their own transcripts independently
+        # of the parent, so capture them on every firing — even when the parent
+        # produced no new turns this run.
+        emitted += emit_teammate_transcripts(
             langfuse,
+            config,
             session_id,
             transcript_path,
-            turns_to_emit,
-            session_state,
-            user_id=config.user_id,
-            subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
-            trace_seed=config.trace_seed,
+            state,
+            flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
 
-        session_state.turn_count += emitted
-        save_session_state(state, key, session_state)
+        save_hook_state(state)
         return emitted
 
 
