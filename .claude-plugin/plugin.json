@@ -1,11 +1,11 @@
 {
   "name": "langfuse-observability",
-  "description": "The Langfuse x Claude Code Observability Plugin",
-  "version": "1.0.0",
+  "description": "The Langfuse x Claude Code Observability Plugin (Spire fork: captures named teammate agents)",
+  "version": "1.0.1",
   "author": {
     "name": "Langfuse"
   },
-  "repository": "https://github.com/langfuse/Claude-Observability-Plugin",
+  "repository": "https://github.com/publicanus/claude-observability-plugin",
   "license": "MIT",
   "homepage": "https://langfuse.com/integrations/other/claude-code",
   "userConfig": {
