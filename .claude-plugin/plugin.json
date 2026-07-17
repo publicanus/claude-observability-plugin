@@ -1,7 +1,7 @@
 {
   "name": "langfuse-observability",
   "description": "The Langfuse x Claude Code Observability Plugin (Spire fork: captures named teammate agents)",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": {
     "name": "Langfuse"
   },

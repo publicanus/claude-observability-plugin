@@ -1736,13 +1736,25 @@ def emit_generation_observation(
     start_timestamp: Optional[datetime],
     generation_kwargs: Dict[str, Any],
 ) -> Any:
+    # An assistant message without a usage record is not a billable LLM call;
+    # emitting it as a generation would poison downstream token metering, which
+    # treats every generation as meterable. It is emitted as a span instead,
+    # with the model kept in metadata.
+    kwargs = dict(generation_kwargs)
+    as_type = "generation"
+    if "usage_details" not in kwargs:
+        as_type = "span"
+        metadata = dict(kwargs.get("metadata") or {})
+        metadata["model"] = kwargs.pop("model", None)
+        metadata["usage_missing"] = True
+        kwargs["metadata"] = metadata
     return _start_backdated(
         langfuse,
         name=f"{generation_prefix} {assistant_index + 1}",
-        as_type="generation",
+        as_type=as_type,
         start_time=start_timestamp,
         parent_otel_span=parent_otel_span,
-        **generation_kwargs,
+        **kwargs,
     )
 
 def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn,

@@ -126,7 +126,7 @@ def test_async_final_result_reaches_generation_input_despite_tool_batch(
         {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "uuid": "u1",
          "message": {"role": "user", "content": "Start agent then run a command."}},
         {"type": "assistant", "timestamp": "2026-01-01T00:00:01.000Z", "uuid": "a1",
-         "message": {"id": "msg-1", "role": "assistant", "model": "claude-test",
+         "message": {"id": "msg-1", "role": "assistant", "model": "claude-test", "usage": {"input_tokens": 1, "output_tokens": 1},
                      "content": [{"type": "tool_use", "id": "toolu_bg", "name": "Agent", "input": {}}]}},
         {"type": "user", "timestamp": "2026-01-01T00:00:02.000Z", "uuid": "tr1",
          "toolUseResult": {"status": "async_launched", "isAsync": True},
@@ -134,7 +134,7 @@ def test_async_final_result_reaches_generation_input_despite_tool_batch(
              {"type": "tool_result", "tool_use_id": "toolu_bg",
               "content": [{"type": "text", "text": "Async agent launched successfully."}]}]}},
         {"type": "assistant", "timestamp": "2026-01-01T00:00:03.000Z", "uuid": "a2",
-         "message": {"id": "msg-2", "role": "assistant", "model": "claude-test",
+         "message": {"id": "msg-2", "role": "assistant", "model": "claude-test", "usage": {"input_tokens": 1, "output_tokens": 1},
                      "content": [{"type": "tool_use", "id": "toolu_bash", "name": "Bash",
                                   "input": {"command": "ls"}}]}},
         {"type": "user", "timestamp": "2026-01-01T00:00:05.000Z", "uuid": "tr2",
@@ -147,7 +147,7 @@ def test_async_final_result_reaches_generation_input_despite_tool_batch(
              "<task-notification><tool-use-id>toolu_bg</tool-use-id>"
              "<result>Async final result.</result></task-notification>")}},
         {"type": "assistant", "timestamp": "2026-01-01T00:00:07.000Z", "uuid": "a3",
-         "message": {"id": "msg-3", "role": "assistant", "model": "claude-test",
+         "message": {"id": "msg-3", "role": "assistant", "model": "claude-test", "usage": {"input_tokens": 1, "output_tokens": 1},
                      "content": [{"type": "text", "text": "All done."}]}},
     ]
     turn = hook_module.build_turns(rows)[0]
@@ -166,3 +166,25 @@ def test_async_final_result_reaches_generation_input_despite_tool_batch(
         "toolu_bg",
     ]
     assert final_generation_results[1]["output"] == "Async final result."
+
+
+def test_assistant_message_without_usage_emits_a_span_not_a_generation(hook_module, fake_langfuse):
+    # A usage-less assistant message is not a billable LLM call: downstream token
+    # metering treats every generation as meterable, so it must emit as a span.
+    rows = [
+        {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "uuid": "u1",
+         "message": {"role": "user", "content": "hello"}},
+        {"type": "assistant", "timestamp": "2026-01-01T00:00:01.000Z", "uuid": "a1",
+         "message": {"id": "msg-1", "role": "assistant", "model": "claude-test",
+                     "content": [{"type": "text", "text": "no api usage recorded"}]}},
+    ]
+    turn = hook_module.build_turns(rows)[0]
+
+    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+
+    llm_calls = [o for o in fake_langfuse.observations if o.kwargs.get("metadata", {}).get("assistant_index") == 0]
+    assert len(llm_calls) == 1
+    assert llm_calls[0].as_type == "span"
+    assert llm_calls[0].kwargs["metadata"]["usage_missing"] is True
+    assert llm_calls[0].kwargs["metadata"]["model"] == "claude-test"
+    assert "usage_details" not in llm_calls[0].kwargs
