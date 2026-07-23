@@ -277,6 +277,7 @@ class SessionState:
     offset: int = 0       # Last byte read from the transcript file.
     buffer: str = ""      # Partial JSONL line kept between hook runs.
     turn_count: int = 0   # Turns already emitted for this session.
+    latest_trace_id: Optional[str] = None  # Trace id emitted for the most recent turn.
     pending_agent_turns: List[Dict[str, Any]] = field(default_factory=list)
     # Task-notification rows whose tool_use_id could not be resolved yet
     # (task-id-only and the subagent meta.json not on disk); retried each run.
@@ -290,10 +291,12 @@ def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     pending_task_notifications = s.get("pending_task_notifications")
     if not isinstance(pending_task_notifications, list):
         pending_task_notifications = []
+    latest_trace_id = s.get("latest_trace_id")
     return SessionState(
         offset=int(s.get("offset", 0)),
         buffer=str(s.get("buffer", "")),
         turn_count=int(s.get("turn_count", 0)),
+        latest_trace_id=latest_trace_id if isinstance(latest_trace_id, str) else None,
         pending_agent_turns=pending_agent_turns,
         pending_task_notifications=pending_task_notifications,
     )
@@ -303,6 +306,7 @@ def update_session_state(global_state: Dict[str, Any], key: str, session_state: 
         "offset": session_state.offset,
         "buffer": session_state.buffer,
         "turn_count": session_state.turn_count,
+        "latest_trace_id": session_state.latest_trace_id,
         "pending_agent_turns": session_state.pending_agent_turns or [],
         "pending_task_notifications": session_state.pending_task_notifications or [],
         "updated": datetime.now(timezone.utc).isoformat(),
@@ -1983,7 +1987,7 @@ def build_trace_metadata(
 def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
               user_id: Optional[str] = None,
               subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
-              trace_seed: Optional[str] = None) -> None:
+              trace_seed: Optional[str] = None) -> Optional[str]:
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
     user_text, user_text_meta = truncate_text(user_text_raw)
 
@@ -2031,6 +2035,10 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
         )
         trace_span.update(output={"role": "assistant", "content": final_assistant_text})
         trace_span.end(end_time=to_otel_nanoseconds(_get_latest_timestamp(turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)))
+        # trace_span.trace_id reads the id actually attached to the root span's
+        # otel context — the forced id when trace_seed produced one, otherwise
+        # whatever the SDK auto-generated. Same attribute, either path.
+        return trace_span.trace_id
 
 
 # ---- Named teammate (agent-team) emission ----
@@ -2345,7 +2353,7 @@ def emit_ready_turns(
         emitted += 1
         turn_num = session_state.turn_count + emitted
         try:
-            emit_turn(
+            trace_id = emit_turn(
                 langfuse,
                 session_id,
                 turn_num,
@@ -2359,6 +2367,9 @@ def emit_ready_turns(
             # Log at INFO so SDK incompatibilities (and other emit failures)
             # are visible without needing CC_LANGFUSE_DEBUG=true.
             info(f"emit_turn failed: {type(e).__name__}: {e}")
+        else:
+            if trace_id:
+                session_state.latest_trace_id = trace_id
     return emitted
 
 def emit_new_turns_from_transcript(

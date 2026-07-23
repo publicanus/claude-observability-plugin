@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import random
 import sys
 import types
 from pathlib import Path
@@ -102,11 +103,25 @@ def read_fixture_jsonl() -> Any:
     return read_jsonl
 
 
+class FakeSpanContext:
+    def __init__(self, trace_id: int) -> None:
+        self.trace_id = trace_id
+
+
 class FakeOtelSpan:
     def __init__(self, name: str, start_time: int | None, context: Any = None) -> None:
         self.name = name
         self.start_time = start_time
         self.context = context
+        # Simulates what a real (unforced) OTel span gets from its provider:
+        # a random 128-bit trace id, only used when no remote parent context
+        # carries a forced one.
+        self._auto_span_context = FakeSpanContext(random.getrandbits(128))
+
+    def get_span_context(self) -> FakeSpanContext:
+        if self.context is not None:
+            return self.context["current_span"].get_span_context()
+        return self._auto_span_context
 
 
 class FakeTracer:
@@ -122,6 +137,8 @@ class FakeObservation:
         self.kwargs = kwargs
         self.output: Any = None
         self.end_time: int | None = None
+        # Mirrors Langfuse._get_otel_trace_id: format(trace_id_int, "032x").
+        self.trace_id = format(otel_span.get_span_context().trace_id, "032x")
 
     def update(self, **kwargs: Any) -> None:
         if "output" in kwargs:
