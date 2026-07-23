@@ -59,6 +59,8 @@ If neither is set up, the hook exits silently — no impact on Claude Code.
 
 A hook reads the session transcript incrementally on every turn (Stop) and at session end (SessionEnd), and emits a Langfuse trace with one span per turn, nested generations per assistant message, and child tool spans for every tool call. Token usage is captured when present.
 
+A tool span whose call failed carries `level: ERROR` and a `statusMessage` naming the failure class (`Tool call failed`, or `Permission denied` for a denied tool call), so errors and denials are queryable via the Langfuse API without fetching the span's output. Permission denials additionally carry a `denial_kind` metadata field (`user-rejected` or `permission-rule`) distinguishing a user's explicit rejection from an automatic permission-rule block. Successful calls keep the default level.
+
 The plugin observes only data that Claude Code exposes through hooks and transcript files.
 
 Captured:

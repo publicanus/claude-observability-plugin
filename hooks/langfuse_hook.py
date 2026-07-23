@@ -812,6 +812,9 @@ def add_tool_result_row(row: Dict[str, Any], state: TurnAssemblyState) -> bool:
     state.current_rows.append(row)
     row_timestamp = row.get("timestamp")
     is_async_launch = get_async_launch_flag_from_row(row)
+    # Permission denials (user-rejected or blocked by a permission rule) carry
+    # a row-level toolDenialKind alongside the content block's is_error flag.
+    tool_denial_kind = row.get("toolDenialKind")
     for tool_result_block in get_tool_result_blocks(get_content_from_row(row)):
         tool_use_id = tool_result_block.get("tool_use_id")
         if tool_use_id:
@@ -819,6 +822,10 @@ def add_tool_result_row(row: Dict[str, Any], state: TurnAssemblyState) -> bool:
                 "content": tool_result_block.get("content"),
                 "timestamp": row_timestamp,
             }
+            if tool_result_block.get("is_error"):
+                tool_result_entry["is_error"] = True
+            if tool_denial_kind:
+                tool_result_entry["tool_denial_kind"] = tool_denial_kind
             if is_async_launch is not None:
                 tool_result_entry["is_async_launch"] = is_async_launch
             state.tool_results_by_id[str(tool_use_id)] = tool_result_entry
@@ -1426,6 +1433,8 @@ class ToolResultForObservation:
     result_timestamp: Optional[datetime] = None
     final_output: Any = None
     final_result_timestamp: Optional[datetime] = None
+    is_error: bool = False
+    tool_denial_kind: Optional[str] = None
 
 @dataclass
 class EmittedSingleToolObservation:
@@ -1457,6 +1466,8 @@ def get_tool_result_for_observation(tool_result_entry: Any) -> ToolResultForObse
     output_str = output_raw if isinstance(output_raw, str) else json.dumps(output_raw, ensure_ascii=False)
     output, output_meta = truncate_text(output_str)
     result_timestamp = parse_timestamp(tool_result_entry.get("timestamp"))
+    is_error = bool(tool_result_entry.get("is_error"))
+    tool_denial_kind = tool_result_entry.get("tool_denial_kind")
 
     final_output_raw = tool_result_entry.get("final_content")
     if final_output_raw is None:
@@ -1464,6 +1475,8 @@ def get_tool_result_for_observation(tool_result_entry: Any) -> ToolResultForObse
             output=output,
             output_meta=output_meta,
             result_timestamp=result_timestamp,
+            is_error=is_error,
+            tool_denial_kind=tool_denial_kind,
         )
 
     final_output_str = (
@@ -1479,6 +1492,8 @@ def get_tool_result_for_observation(tool_result_entry: Any) -> ToolResultForObse
         result_timestamp=result_timestamp,
         final_output=final_output,
         final_result_timestamp=final_result_timestamp,
+        is_error=is_error,
+        tool_denial_kind=tool_denial_kind,
     )
 
 def get_short_transcript_path_for_metadata(path: Any) -> Optional[str]:
@@ -1501,6 +1516,11 @@ def build_tool_metadata(
         "input_meta": tool_input_meta,
         "output_meta": tool_result.output_meta,
     }
+    if tool_result.tool_denial_kind:
+        # Distinguishes permission denials from other tool failures without
+        # requiring callers to parse statusMessage; queryable via the
+        # Langfuse API without fetching output.
+        tool_metadata["denial_kind"] = tool_result.tool_denial_kind
     if subagent:
         tool_metadata.update({
             "subagent_type": subagent.get("agent_type"),
@@ -1508,6 +1528,20 @@ def build_tool_metadata(
             "subagent_transcript_path": get_short_transcript_path_for_metadata(subagent.get("path")),
         })
     return tool_metadata
+
+def get_tool_observation_status(tool_result: ToolResultForObservation) -> Tuple[Optional[str], Optional[str]]:
+    """Map a tool result's error/denial state to a Langfuse (level, statusMessage) pair.
+
+    Successful calls return (None, None) so the observation keeps the
+    platform default level. Permission denials get their own statusMessage;
+    the specific denial kind (user-rejected vs. permission-rule) lives in
+    tool_metadata['denial_kind'] rather than being encoded here.
+    """
+    if not tool_result.is_error:
+        return None, None
+    if tool_result.tool_denial_kind:
+        return "ERROR", "Permission denied"
+    return "ERROR", "Tool call failed"
 
 def emit_single_tool_observation(
     langfuse: Langfuse,
@@ -1539,6 +1573,7 @@ def emit_single_tool_observation(
         else None
     )
     tool_metadata = build_tool_metadata(tool_name, tool_use_id, tool_input_meta, tool_result, subagent)
+    tool_level, tool_status_message = get_tool_observation_status(tool_result)
 
     tool_use_timestamp = parse_timestamp(turn.tool_use_timestamps_by_id.get(tool_use_id)) or assistant_timestamp
     tool_span = _start_backdated(
@@ -1549,6 +1584,7 @@ def emit_single_tool_observation(
         parent_otel_span=parent_otel_span,
         input=tool_input,
         metadata=tool_metadata,
+        **({"level": tool_level, "status_message": tool_status_message} if tool_level else {}),
     )
     tool_span.update(output=tool_output)
 

@@ -68,6 +68,61 @@ def test_tool_result_payload_preserves_initial_and_final_async_outputs(hook_modu
     assert result.final_result_timestamp.isoformat() == "2026-01-01T00:00:05+00:00"
 
 
+def test_tool_result_payload_carries_error_and_denial_kind(hook_module):
+    failed = hook_module.get_tool_result_for_observation(
+        {"content": "boom", "is_error": True}
+    )
+    assert failed.is_error is True
+    assert failed.tool_denial_kind is None
+
+    denied = hook_module.get_tool_result_for_observation(
+        {"content": "Permission denied.", "is_error": True, "tool_denial_kind": "permission-rule"}
+    )
+    assert denied.is_error is True
+    assert denied.tool_denial_kind == "permission-rule"
+
+    ok = hook_module.get_tool_result_for_observation({"content": "fine"})
+    assert ok.is_error is False
+    assert ok.tool_denial_kind is None
+
+
+def test_tool_observation_status_names_failure_class_and_denial(hook_module):
+    ok_level, ok_message = hook_module.get_tool_observation_status(
+        hook_module.ToolResultForObservation()
+    )
+    assert (ok_level, ok_message) == (None, None)
+
+    error_level, error_message = hook_module.get_tool_observation_status(
+        hook_module.ToolResultForObservation(is_error=True)
+    )
+    assert (error_level, error_message) == ("ERROR", "Tool call failed")
+
+    denial_level, denial_message = hook_module.get_tool_observation_status(
+        hook_module.ToolResultForObservation(is_error=True, tool_denial_kind="user-rejected")
+    )
+    assert (denial_level, denial_message) == ("ERROR", "Permission denied")
+
+
+def test_tool_metadata_carries_denial_kind_only_when_denied(hook_module):
+    metadata = hook_module.build_tool_metadata(
+        "Bash",
+        "toolu_bash",
+        None,
+        hook_module.ToolResultForObservation(is_error=True, tool_denial_kind="user-rejected"),
+        None,
+    )
+    assert metadata["denial_kind"] == "user-rejected"
+
+    ok_metadata = hook_module.build_tool_metadata(
+        "Bash",
+        "toolu_bash",
+        None,
+        hook_module.ToolResultForObservation(),
+        None,
+    )
+    assert "denial_kind" not in ok_metadata
+
+
 def test_tool_metadata_uses_short_subagent_transcript_paths(hook_module, tmp_path):
     metadata = hook_module.build_tool_metadata(
         "Agent",
@@ -188,3 +243,71 @@ def test_assistant_message_without_usage_emits_a_span_not_a_generation(hook_modu
     assert llm_calls[0].kwargs["metadata"]["usage_missing"] is True
     assert llm_calls[0].kwargs["metadata"]["model"] == "claude-test"
     assert "usage_details" not in llm_calls[0].kwargs
+
+
+def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_module, fake_langfuse):
+    # One assistant turn firing four tool calls: a success, a plain failure,
+    # a user-rejected denial, and a permission-rule denial — pinning all four
+    # outcomes side by side so a regression in one can't hide behind the others.
+    rows = [
+        {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "uuid": "u1",
+         "message": {"role": "user", "content": "Run four tools."}},
+        {"type": "assistant", "timestamp": "2026-01-01T00:00:01.000Z", "uuid": "a1",
+         "message": {"id": "msg-1", "role": "assistant", "model": "claude-test",
+                     "usage": {"input_tokens": 1, "output_tokens": 1},
+                     "content": [
+                         {"type": "tool_use", "id": "toolu_ok", "name": "Read", "input": {"file_path": "a"}},
+                         {"type": "tool_use", "id": "toolu_fail", "name": "Bash", "input": {"command": "false"}},
+                         {"type": "tool_use", "id": "toolu_user_denied", "name": "Bash", "input": {"command": "rm -rf /"}},
+                         {"type": "tool_use", "id": "toolu_rule_denied", "name": "Bash", "input": {"command": "sf org delete"}},
+                     ]}},
+        {"type": "user", "timestamp": "2026-01-01T00:00:02.000Z", "uuid": "tr1",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_ok", "content": "ok"}]}},
+        {"type": "user", "timestamp": "2026-01-01T00:00:03.000Z", "uuid": "tr2",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_fail", "content": "boom", "is_error": True}]}},
+        {"type": "user", "timestamp": "2026-01-01T00:00:04.000Z", "uuid": "tr3",
+         "toolDenialKind": "user-rejected",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_user_denied", "is_error": True,
+              "content": "The user doesn't want to proceed with this tool use."}]}},
+        {"type": "user", "timestamp": "2026-01-01T00:00:05.000Z", "uuid": "tr4",
+         "toolDenialKind": "permission-rule",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_rule_denied", "is_error": True,
+              "content": "Permission to use Bash has been denied."}]}},
+        {"type": "assistant", "timestamp": "2026-01-01T00:00:06.000Z", "uuid": "a2",
+         "message": {"id": "msg-2", "role": "assistant", "model": "claude-test",
+                     "usage": {"input_tokens": 1, "output_tokens": 1},
+                     "content": [{"type": "text", "text": "Done."}]}},
+    ]
+    turn = hook_module.build_turns(rows)[0]
+
+    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+
+    tools_by_id = {
+        observation.kwargs["metadata"]["tool_id"]: observation
+        for observation in fake_langfuse.observations
+        if observation.as_type == "tool"
+    }
+
+    ok = tools_by_id["toolu_ok"]
+    assert "level" not in ok.kwargs
+    assert "status_message" not in ok.kwargs
+    assert "denial_kind" not in ok.kwargs["metadata"]
+
+    failed = tools_by_id["toolu_fail"]
+    assert failed.kwargs["level"] == "ERROR"
+    assert failed.kwargs["status_message"] == "Tool call failed"
+    assert "denial_kind" not in failed.kwargs["metadata"]
+
+    user_denied = tools_by_id["toolu_user_denied"]
+    assert user_denied.kwargs["level"] == "ERROR"
+    assert user_denied.kwargs["status_message"] == "Permission denied"
+    assert user_denied.kwargs["metadata"]["denial_kind"] == "user-rejected"
+
+    rule_denied = tools_by_id["toolu_rule_denied"]
+    assert rule_denied.kwargs["level"] == "ERROR"
+    assert rule_denied.kwargs["status_message"] == "Permission denied"
+    assert rule_denied.kwargs["metadata"]["denial_kind"] == "permission-rule"
