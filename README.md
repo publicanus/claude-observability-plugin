@@ -144,6 +144,11 @@ def latest_trace_id(session_id: str, transcript_path: str) -> str | None:
     return state.get(key, {}).get("latest_trace_id")
 ```
 
+`latest_trace_id` tracks the main session's conversational turns only. Teammate
+(agent-team) turns are recorded under their own state entries and never set
+this field, so a teammate-only entry has it null or absent — do not expect
+teammate sub-traces to move it.
+
 ## Privacy
 
 This plugin transmits your Claude Code session data — conversation turns, assistant
