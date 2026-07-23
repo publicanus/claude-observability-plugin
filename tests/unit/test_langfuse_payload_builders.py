@@ -86,6 +86,22 @@ def test_tool_result_payload_carries_error_and_denial_kind(hook_module):
     assert ok.tool_denial_kind is None
 
 
+def test_tool_denial_kind_falls_back_to_legacy_rejection_string(hook_module):
+    # Claude Code <=2.1.198 wrote no toolDenialKind field; the only signal was
+    # a plain toolUseResult string. Newer rows carry both — toolDenialKind wins.
+    legacy_denial_row = {"toolUseResult": "User rejected tool use"}
+    assert hook_module.get_tool_denial_kind_from_row(legacy_denial_row) == "user-rejected"
+
+    current_denial_row = {"toolUseResult": "User rejected tool use", "toolDenialKind": "permission-rule"}
+    assert hook_module.get_tool_denial_kind_from_row(current_denial_row) == "permission-rule"
+
+    non_denial_row = {"toolUseResult": "Error: something else failed"}
+    assert hook_module.get_tool_denial_kind_from_row(non_denial_row) is None
+
+    no_result_row: dict = {}
+    assert hook_module.get_tool_denial_kind_from_row(no_result_row) is None
+
+
 def test_tool_observation_status_names_failure_class_and_denial(hook_module):
     ok_level, ok_message = hook_module.get_tool_observation_status(
         hook_module.ToolResultForObservation()
@@ -246,12 +262,13 @@ def test_assistant_message_without_usage_emits_a_span_not_a_generation(hook_modu
 
 
 def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_module, fake_langfuse):
-    # One assistant turn firing four tool calls: a success, a plain failure,
-    # a user-rejected denial, and a permission-rule denial — pinning all four
-    # outcomes side by side so a regression in one can't hide behind the others.
+    # One assistant turn firing five tool calls: a success, a plain failure, a
+    # user-rejected denial, a permission-rule denial, and a legacy-shaped
+    # (pre-toolDenialKind, Claude Code <=2.1.198) user rejection — pinning all
+    # five outcomes side by side so a regression in one can't hide behind the others.
     rows = [
         {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "uuid": "u1",
-         "message": {"role": "user", "content": "Run four tools."}},
+         "message": {"role": "user", "content": "Run five tools."}},
         {"type": "assistant", "timestamp": "2026-01-01T00:00:01.000Z", "uuid": "a1",
          "message": {"id": "msg-1", "role": "assistant", "model": "claude-test",
                      "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -260,6 +277,7 @@ def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_
                          {"type": "tool_use", "id": "toolu_fail", "name": "Bash", "input": {"command": "false"}},
                          {"type": "tool_use", "id": "toolu_user_denied", "name": "Bash", "input": {"command": "rm -rf /"}},
                          {"type": "tool_use", "id": "toolu_rule_denied", "name": "Bash", "input": {"command": "sf org delete"}},
+                         {"type": "tool_use", "id": "toolu_legacy_denied", "name": "Bash", "input": {"command": "rm important"}},
                      ]}},
         {"type": "user", "timestamp": "2026-01-01T00:00:02.000Z", "uuid": "tr1",
          "message": {"role": "user", "content": [
@@ -277,7 +295,14 @@ def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_
          "message": {"role": "user", "content": [
              {"type": "tool_result", "tool_use_id": "toolu_rule_denied", "is_error": True,
               "content": "Permission to use Bash has been denied."}]}},
-        {"type": "assistant", "timestamp": "2026-01-01T00:00:06.000Z", "uuid": "a2",
+        {"type": "user", "timestamp": "2026-01-01T00:00:06.000Z", "uuid": "tr5",
+         # Legacy shape (Claude Code <=2.1.198): no toolDenialKind field at all,
+         # only the plain toolUseResult string.
+         "toolUseResult": "User rejected tool use",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_legacy_denied", "is_error": True,
+              "content": "The user doesn't want to proceed with this tool use."}]}},
+        {"type": "assistant", "timestamp": "2026-01-01T00:00:07.000Z", "uuid": "a2",
          "message": {"id": "msg-2", "role": "assistant", "model": "claude-test",
                      "usage": {"input_tokens": 1, "output_tokens": 1},
                      "content": [{"type": "text", "text": "Done."}]}},
@@ -311,3 +336,8 @@ def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_
     assert rule_denied.kwargs["level"] == "ERROR"
     assert rule_denied.kwargs["status_message"] == "Permission denied"
     assert rule_denied.kwargs["metadata"]["denial_kind"] == "permission-rule"
+
+    legacy_denied = tools_by_id["toolu_legacy_denied"]
+    assert legacy_denied.kwargs["level"] == "ERROR"
+    assert legacy_denied.kwargs["status_message"] == "Permission denied"
+    assert legacy_denied.kwargs["metadata"]["denial_kind"] == "user-rejected"

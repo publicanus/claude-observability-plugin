@@ -726,6 +726,24 @@ def get_async_launch_flag_from_row(row: Dict[str, Any]) -> Optional[bool]:
         return None
     return tool_use_result.get("status") == "async_launched" or tool_use_result.get("isAsync") is True
 
+LEGACY_USER_REJECTED_TOOL_USE_RESULT = "User rejected tool use"
+
+def get_tool_denial_kind_from_row(row: Dict[str, Any]) -> Optional[str]:
+    """Read the row-level toolDenialKind Claude Code writes for a denied tool call.
+
+    Falls back to the legacy pre-toolDenialKind shape (Claude Code <=2.1.198):
+    a plain toolUseResult string of "User rejected tool use" with no dedicated
+    field. That legacy string only ever represents a user rejection — there is
+    no legacy equivalent for a permission-rule block, so the fallback can only
+    ever resolve to "user-rejected".
+    """
+    denial_kind = row.get("toolDenialKind")
+    if denial_kind:
+        return denial_kind
+    if row.get("toolUseResult") == LEGACY_USER_REJECTED_TOOL_USE_RESULT:
+        return "user-rejected"
+    return None
+
 def is_async_agent_launch_result(tool_result_entry: Any) -> bool:
     if not isinstance(tool_result_entry, dict):
         return False
@@ -814,7 +832,7 @@ def add_tool_result_row(row: Dict[str, Any], state: TurnAssemblyState) -> bool:
     is_async_launch = get_async_launch_flag_from_row(row)
     # Permission denials (user-rejected or blocked by a permission rule) carry
     # a row-level toolDenialKind alongside the content block's is_error flag.
-    tool_denial_kind = row.get("toolDenialKind")
+    tool_denial_kind = get_tool_denial_kind_from_row(row)
     for tool_result_block in get_tool_result_blocks(get_content_from_row(row)):
         tool_use_id = tool_result_block.get("tool_use_id")
         if tool_use_id:
