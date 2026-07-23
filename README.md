@@ -126,6 +126,24 @@ subprocess.run(
 If derivation or wiring fails for any reason, the hook falls back to an auto-generated
 trace ID (fail-open, like the rest of the hook). Unset or empty seed = unchanged behavior.
 
+### Reading the latest trace ID without polling
+
+Whether or not a seed is set, each session's entry in
+`~/.claude/state/langfuse_state.json` carries `latest_trace_id`: the trace ID
+actually emitted for that session's most recent turn. A same-machine consumer
+that knows the session ID and transcript path can read it directly instead of
+polling the Langfuse API:
+
+```python
+import hashlib, json
+from pathlib import Path
+
+def latest_trace_id(session_id: str, transcript_path: str) -> str | None:
+    key = hashlib.sha256(f"{session_id}::{transcript_path}".encode()).hexdigest()
+    state = json.loads(Path.home().joinpath(".claude/state/langfuse_state.json").read_text())
+    return state.get(key, {}).get("latest_trace_id")
+```
+
 ## Privacy
 
 This plugin transmits your Claude Code session data — conversation turns, assistant
