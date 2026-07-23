@@ -159,8 +159,37 @@ class FakeLangfuse:
         *,
         otel_span: FakeOtelSpan,
         as_type: str,
-        **kwargs: Any,
+        # Named params mirror langfuse-python 4.14's fixed signature (no
+        # **kwargs catch-all there) so a misspelled or renamed kwarg fails
+        # the test the same way it would fail against the real SDK.
+        input: Any = None,
+        output: Any = None,
+        metadata: Any = None,
+        version: str | None = None,
+        level: str | None = None,
+        status_message: str | None = None,
+        completion_start_time: Any = None,
+        model: str | None = None,
+        model_parameters: Any = None,
+        usage_details: Any = None,
+        cost_details: Any = None,
+        prompt: Any = None,
     ) -> FakeObservation:
+        kwargs = {
+            "input": input,
+            "output": output,
+            "metadata": metadata,
+            "version": version,
+            "level": level,
+            "status_message": status_message,
+            "completion_start_time": completion_start_time,
+            "model": model,
+            "model_parameters": model_parameters,
+            "usage_details": usage_details,
+            "cost_details": cost_details,
+            "prompt": prompt,
+        }
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
         observation = FakeObservation(otel_span, as_type, kwargs)
         self.observations.append(observation)
         return observation
