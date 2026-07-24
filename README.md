@@ -15,6 +15,8 @@ The marketplace command registers the plugin marketplace and refreshes its local
 
 Restart Claude Code after install so the hook configuration is loaded.
 
+Installing without configuration is fine: no field is required at install time, and the hook stays inactive (fail-open, zero impact on Claude Code) until both API keys are set. Configure whenever you have the keys at hand.
+
 Then configure the plugin from within a Claude Code session. This is a Claude Code slash command, not a shell command:
 
 ```text
