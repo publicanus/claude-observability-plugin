@@ -1,6 +1,11 @@
 # Langfuse Observability Plugin for Claude Code
 
-> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `langfuse-observability` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). The one behavioral difference: this fork captures named teammate agents (subagents spawned with a `name:`, Claude Code's agent-teams feature) — upstream drops them silently, so a teammate-heavy session can do most of its work invisibly to Langfuse. Documented upstream as [langfuse/claude-observability-plugin#28](https://github.com/langfuse/claude-observability-plugin/issues/28). The upstream README follows unchanged below.
+> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `langfuse-observability` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). Two behavioral differences from upstream:
+>
+> 1. This fork captures named teammate agents (subagents spawned with a `name:`, Claude Code's agent-teams feature) — upstream drops them silently, so a teammate-heavy session can do most of its work invisibly to Langfuse. Documented upstream as [langfuse/claude-observability-plugin#28](https://github.com/langfuse/claude-observability-plugin/issues/28).
+> 2. This fork attaches pending `/hurt` annotations (from the companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin) onto their target traces — see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt) below. This is mate-ecosystem-specific and not expected to be upstreamed.
+>
+> The upstream README follows unchanged below.
 
 Trace hook-backed Claude Code sessions to [Langfuse](https://langfuse.com) — turns, generations, tool calls, and token usage — with zero code changes.
 
@@ -153,6 +158,23 @@ def latest_trace_id(session_id: str, transcript_path: str) -> str | None:
 this field, so a teammate-only entry has it null or absent — do not expect
 teammate sub-traces to move it.
 
+## Attaching /hurt annotations (mate-hurt)
+
+The companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin lets an operator flag something that went wrong in the current session (`/hurt <what happened>`). mate-hurt holds no Langfuse credentials and never contacts Langfuse itself — it resolves the target trace id from `latest_trace_id` (see above) and queues the annotation locally at `~/.claude/state/hurt_pending.json`, a JSON array of:
+
+| Field        | Meaning                                                          |
+| ------------ | ----------------------------------------------------------------- |
+| `id`         | uuid4, unique per queued hurt.                                    |
+| `trace_id`   | The target trace, resolved once by mate-hurt.                     |
+| `category`   | One of a fixed six-value taxonomy (`correction-repeated`, `redone-work`, `stalled-loop`, `missed-trigger`, `ci-escape`, `other`). |
+| `comment`    | The operator's own words.                                         |
+| `created`    | ISO 8601 UTC timestamp.                                            |
+| `session_id` | For log correlation only.                                         |
+
+This hook is the sole consumer (`hooks/hurt_annotations.py`): on every `Stop`/`SessionEnd` firing, before anything else, it attempts every queued entry using its own already-configured Langfuse credentials — the same ones writing this machine's traces, so a hurt can never be misrouted to the wrong project. For each entry it confirms the trace exists, provisions a `hurt` categorical score config idempotently, then writes a `hurt` tag, the categorical score, and a comment carrying the operator's text.
+
+An entry is removed only once all of that succeeds. One that can't yet be attached — Langfuse unreachable, the trace not yet uploaded, credentials misconfigured — stays queued and is retried the next time *any* Claude Code session's hook fires on this machine (the queue is not scoped to the session that created it, so a healthy project's hook can drain hurts left behind by one whose hook never runs again). Entries older than 30 days that are still unresolvable are dropped rather than retried forever.
+
 ## Privacy
 
 This plugin transmits your Claude Code session data — conversation turns, assistant
@@ -161,7 +183,9 @@ configure (`LANGFUSE_BASE_URL`, default `https://us.cloud.langfuse.com`; EU and
 self-hosted endpoints are supported). Data is sent at the end of each turn (the
 `Stop` hook) and at session end (`SessionEnd`) using the Langfuse API keys you
 provide, which are stored in your OS keychain. No data is sent anywhere other than
-the endpoint you configure.
+the endpoint you configure. If the companion mate-hurt plugin is installed, this
+also includes any queued `/hurt` annotation's category and operator-written
+comment, sent to the same endpoint (see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt)).
 
 For how Langfuse Cloud handles data it receives, see the Langfuse privacy policy:
 https://langfuse.com/privacy . When using a self-hosted Langfuse instance, your data

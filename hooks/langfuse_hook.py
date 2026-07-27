@@ -39,6 +39,17 @@ LOG_FILE = STATE_DIR / "langfuse_hook.log"
 STATE_FILE = STATE_DIR / "langfuse_state.json"
 LOCK_FILE = STATE_DIR / "langfuse_state.lock"
 
+# mate-hurt's local queue of /hurt annotations pending attachment — see
+# hurt_annotations.py for the consumer side of this contract.
+HURT_PENDING_FILE = STATE_DIR / "hurt_pending.json"
+HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
+
+# Importable as a sibling of this file regardless of how it was invoked
+# (uv run --script puts the script's own directory on sys.path[0] already,
+# but the test harness loads this file via importlib without doing so).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hurt_annotations import process_pending_hurts  # noqa: E402
+
 
 # ----------------- Configuration -----------------
 def _opt(name: str) -> str:
@@ -2523,6 +2534,21 @@ def main() -> int:
     config = get_langfuse_config()
     if config is None:
         return 0
+
+    # Runs on every firing, independent of this run's hook_context/payload —
+    # the pending queue is global to the machine, not scoped to this session,
+    # so a healthy hook run in any project can drain hurts left behind by a
+    # session whose hook never runs again (see mate-hurt's known Windows
+    # silent-failure mode). Never allowed to block turn emission below.
+    try:
+        with FileLock(HURT_PENDING_LOCK_FILE):
+            attached = process_pending_hurts(config, HURT_PENDING_FILE, log=info)
+        if attached:
+            info(f"Attached {attached} pending /hurt annotation(s)")
+    except TimeoutError as e:
+        debug(f"hurt pending lock timeout, skipping: {e}")
+    except Exception as e:
+        debug(f"pending hurt processing failed: {e}")
 
     payload = read_hook_payload()
     hook_context = get_session_id_and_transcript_path(payload)

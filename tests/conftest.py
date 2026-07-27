@@ -207,4 +207,18 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "STATE_FILE", state_dir / "langfuse_state.json")
     monkeypatch.setattr(hook_module, "LOCK_FILE", state_dir / "langfuse_state.lock")
     monkeypatch.setattr(hook_module, "LOG_FILE", state_dir / "langfuse_hook.log")
+    monkeypatch.setattr(hook_module, "HURT_PENDING_FILE", state_dir / "hurt_pending.json")
+    monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
     return state_dir
+
+
+@pytest.fixture
+def hurt_annotations_module() -> Any:
+    module_path = REPO_ROOT / "hooks" / "hurt_annotations.py"
+    spec = importlib.util.spec_from_file_location("hurt_annotations_under_test", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
