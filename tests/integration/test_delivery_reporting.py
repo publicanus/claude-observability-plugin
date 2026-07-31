@@ -232,22 +232,34 @@ def test_warning_is_silent_with_no_verdict_yet(hook_module):
     assert hook_module.format_delivery_warning("ok", "") is None
 
 
-def test_warning_on_authentication_rejection_is_unambiguous_and_names_the_fix(hook_module):
+def test_warning_on_authentication_rejection_is_a_repair_recipe(hook_module):
     warning = hook_module.format_delivery_warning("rejected", "HTTP 401 from https://example.test")
 
+    # Names the state and the likely cause.
     assert "no traces are being recorded" in warning
     assert "HTTP 401 from https://example.test" in warning
     assert "rotated key" in warning
+    # Says explicitly that a fix in the secrets file won't take effect
+    # without a restart — the exact circle the operator got stuck in.
+    assert "frozen at launch" in warning
+    assert "restart Claude Code" in warning
+    # Gives the actual command to compare against, not just the env var names.
+    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
     assert "LANGFUSE_PUBLIC_KEY" in warning and "LANGFUSE_SECRET_KEY" in warning
-    assert "new terminal session" in warning
 
 
-def test_warning_on_unreachable_host_is_unambiguous_and_names_the_fix(hook_module):
+def test_warning_on_unreachable_host_is_a_repair_recipe(hook_module):
     warning = hook_module.format_delivery_warning("unreachable", "https://example.test did not respond")
 
     assert "no traces are being recorded" in warning
+    # Names the host actually tried, not just "unreachable".
     assert "https://example.test did not respond" in warning
     assert "LANGFUSE_BASE_URL" in warning
+    # Names the region trap: default host vs. an EU project's host.
+    assert "us.cloud.langfuse.com" in warning
+    assert "cloud.langfuse.com" in warning
+    assert "restart Claude Code" in warning
+    assert "frozen" in warning
 
 
 # ----------------- end-to-end through main(): the actual log line written -----------------
@@ -350,6 +362,8 @@ def test_main_logs_rejection_instead_of_processed_on_bad_credentials(
     assert "no traces are being recorded" in warning
     assert "LANGFUSE_PUBLIC_KEY" in warning and "LANGFUSE_SECRET_KEY" in warning
     assert "rotated key" in warning
+    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
+    assert "restart Claude Code" in warning
 
 
 def test_main_logs_unreachable_instead_of_processed_on_dead_host(
@@ -369,6 +383,8 @@ def test_main_logs_unreachable_instead_of_processed_on_dead_host(
     warning = system_message["systemMessage"]
     assert "no traces are being recorded" in warning
     assert "LANGFUSE_BASE_URL" in warning
+    assert "us.cloud.langfuse.com" in warning
+    assert "restart Claude Code" in warning
 
 
 def test_main_warns_on_session_end_too(hook_module, isolated_hook_state, fake_langfuse, monkeypatch, capsys, tmp_path):
@@ -383,7 +399,10 @@ def test_main_warns_on_session_end_too(hook_module, isolated_hook_state, fake_la
     )
 
     assert system_message is not None
-    assert "no traces are being recorded" in system_message["systemMessage"]
+    warning = system_message["systemMessage"]
+    assert "no traces are being recorded" in warning
+    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
+    assert "restart Claude Code" in warning
 
 
 def test_main_warns_every_firing_even_with_nothing_new_to_send(
@@ -404,7 +423,10 @@ def test_main_warns_every_firing_even_with_nothing_new_to_send(
 
     assert len(FakeDeliveryClient.calls) == 1
     assert system_message is not None
-    assert "no traces are being recorded" in system_message["systemMessage"]
+    warning = system_message["systemMessage"]
+    assert "no traces are being recorded" in warning
+    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
+    assert "restart Claude Code" in warning
 
 
 def test_main_stays_silent_with_nothing_new_and_no_verdict_yet(

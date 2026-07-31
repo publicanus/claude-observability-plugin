@@ -2662,6 +2662,12 @@ def format_delivery_warning(status: str, detail: str) -> Optional[str]:
     """The user-visible warning for a known-bad delivery status, surfaced via
     the hook's JSON `systemMessage` field — not the log file nobody opens.
 
+    A repair recipe, not just a diagnosis: this process's environment is
+    frozen at launch, so editing credentials or the base URL now does
+    nothing until the session restarts — the single most common way this
+    warning gets misread. Each branch ends on the concrete command to run
+    and the restart it can't skip.
+
     Returns None for "ok" or any status this session has no verdict on yet;
     a working (or unverified) session must stay completely silent, or the
     warning gets ignored within a day. A bad status gets a message every
@@ -2671,17 +2677,24 @@ def format_delivery_warning(status: str, detail: str) -> Optional[str]:
     """
     if status == "rejected":
         return (
-            "Langfuse tracing is broken: credentials were rejected "
-            f"({detail}) — no traces are being recorded. This is usually a "
-            "rotated key: check LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY and "
-            "start a new terminal session with the current values — this "
-            "one will keep failing silently on the old ones otherwise."
+            f"Langfuse tracing is broken: credentials rejected ({detail}) — "
+            "no traces are being recorded. Likely a rotated key, and this "
+            "session is stuck on the old one (its env vars are frozen at "
+            "launch — editing the secrets file now won't fix it).\n"
+            "Fix: run `echo $LANGFUSE_PUBLIC_KEY`, compare it to the current "
+            "keypair, then exit and restart Claude Code from a shell that "
+            "already has the corrected LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY."
         )
     if status == "unreachable":
         return (
             f"Langfuse tracing is broken: {detail} — no traces are being "
-            "recorded. Check LANGFUSE_BASE_URL and that this machine can "
-            "reach that host."
+            "recorded. Check LANGFUSE_BASE_URL: unset defaults to "
+            "https://us.cloud.langfuse.com, EU projects need "
+            "https://cloud.langfuse.com — a region mismatch fails exactly "
+            "like this.\n"
+            "Fix the value or your network/VPN access to that host, then "
+            "restart Claude Code — this session's env vars are frozen and "
+            "won't pick up the change on their own."
         )
     return None
 
