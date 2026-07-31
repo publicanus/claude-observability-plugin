@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+
+class FakeResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.body = None
+
+
+class FakeDeliveryClient:
+    """Stand-in for hurt_annotations.LangfuseClient: returns a canned
+    response to every GET instead of making a real request."""
+
+    calls: list[str] = []
+
+    def __init__(self, response: FakeResponse) -> None:
+        self._response = response
+
+    def get(self, path: str) -> FakeResponse:
+        FakeDeliveryClient.calls.append(path)
+        return self._response
+
+
+def install_fake_delivery_client(hook_module: Any, monkeypatch: Any, response: FakeResponse) -> None:
+    FakeDeliveryClient.calls = []
+    monkeypatch.setattr(
+        hook_module,
+        "LangfuseClient",
+        lambda config, timeout=30: FakeDeliveryClient(response),
+    )
+
+
+def make_config(hook_module: Any) -> Any:
+    return hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+
+
+# ----------------- classify_delivery_health -----------------
+
+def test_classify_delivery_health_ok_on_200(hook_module, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+
+    status, detail = hook_module.classify_delivery_health(make_config(hook_module))
+
+    assert status == "ok"
+    assert detail == ""
+    assert FakeDeliveryClient.calls == ["/api/public/projects"]
+
+
+def test_classify_delivery_health_rejected_on_401(hook_module, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
+
+    status, detail = hook_module.classify_delivery_health(make_config(hook_module))
+
+    assert status == "rejected"
+    assert "401" in detail
+    assert "example.test" in detail
+
+
+def test_classify_delivery_health_rejected_on_403(hook_module, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(403))
+
+    status, detail = hook_module.classify_delivery_health(make_config(hook_module))
+
+    assert status == "rejected"
+    assert "403" in detail
+
+
+def test_classify_delivery_health_unreachable_on_no_response(hook_module, monkeypatch):
+    # LangfuseClient._request reports every network-level failure (DNS,
+    # connection refused, timeout) as status 0 — it never raises.
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(0))
+
+    status, detail = hook_module.classify_delivery_health(make_config(hook_module))
+
+    assert status == "unreachable"
+    assert "did not respond" in detail
+
+
+def test_classify_delivery_health_unreachable_on_other_status(hook_module, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(500))
+
+    status, detail = hook_module.classify_delivery_health(make_config(hook_module))
+
+    assert status == "unreachable"
+    assert "500" in detail
+
+
+# ----------------- get_delivery_status caching -----------------
+
+def test_get_delivery_status_caches_within_the_interval(hook_module, isolated_hook_state, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+    config = make_config(hook_module)
+
+    first = hook_module.get_delivery_status(config)
+    second = hook_module.get_delivery_status(config)
+
+    assert first == ("ok", "")
+    assert second == ("ok", "")
+    assert len(FakeDeliveryClient.calls) == 1
+
+
+def test_get_delivery_status_rechecks_when_credentials_change(hook_module, isolated_hook_state, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+    config_a = hook_module.LangfuseConfig("public-a", "secret-a", "https://example.test", "user-1")
+    config_b = hook_module.LangfuseConfig("public-b", "secret-b", "https://example.test", "user-1")
+
+    hook_module.get_delivery_status(config_a)
+    hook_module.get_delivery_status(config_b)
+
+    # A different keypair is a different fingerprint: cached "ok" for the
+    # old key must never vouch for a rotated one.
+    assert len(FakeDeliveryClient.calls) == 2
+
+
+def test_get_delivery_status_rechecks_once_the_interval_has_elapsed(hook_module, isolated_hook_state, monkeypatch):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+    config = make_config(hook_module)
+
+    hook_module.get_delivery_status(config)
+
+    # Backdate the cached check past the re-verification interval, as if a
+    # long-lived session's last probe happened well over 15 minutes ago.
+    state_file = isolated_hook_state / "langfuse_state.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    stale = datetime.now(timezone.utc) - hook_module.DELIVERY_HEALTH_CHECK_INTERVAL - timedelta(seconds=1)
+    state[hook_module.DELIVERY_HEALTH_STATE_KEY]["updated"] = stale.isoformat()
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    hook_module.get_delivery_status(config)
+
+    assert len(FakeDeliveryClient.calls) == 2
+
+
+# ----------------- format_processed_log: what the log says -----------------
+
+def test_log_when_nothing_was_emitted(hook_module):
+    line = hook_module.format_processed_log(0, 0.01, "sess-1", "rejected", "HTTP 401 from https://example.test")
+
+    # Nothing was even attempted, so no delivery claim either way is made.
+    assert line == "Processed 0 turns in 0.01s (session=sess-1)"
+
+
+def test_log_on_confirmed_delivery(hook_module):
+    line = hook_module.format_processed_log(2, 0.05, "sess-1", "ok", "")
+
+    assert line == "Processed 2 turns in 0.05s (session=sess-1)"
+
+
+def test_log_on_authentication_rejection(hook_module):
+    line = hook_module.format_processed_log(1, 0.05, "sess-1", "rejected", "HTTP 401 from https://example.test")
+
+    assert line.startswith("Delivery rejected:")
+    assert "not delivered" in line
+    assert "1 turn(s)" in line
+    assert "session=sess-1" in line
+    assert "LANGFUSE_PUBLIC_KEY" in line and "LANGFUSE_SECRET_KEY" in line
+    # Never claims turns were processed when nothing was delivered.
+    assert "Processed" not in line
+
+
+def test_log_on_unreachable_host(hook_module):
+    line = hook_module.format_processed_log(3, 0.05, "sess-1", "unreachable", "https://example.test did not respond")
+
+    assert line.startswith("Delivery failed:")
+    assert "did not respond" in line
+    assert "3 turn(s)" in line
+    assert "session=sess-1" in line
+    assert "Processed" not in line
+
+
+# ----------------- end-to-end through main(): the actual log line written -----------------
+
+def write_one_turn_transcript(tmp_path: Path, session_id: str) -> Path:
+    rows = [
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "sessionId": session_id,
+            "uuid": "user-1",
+            "message": {"role": "user", "content": "A question."},
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "sessionId": session_id,
+            "uuid": "assistant-1",
+            "message": {
+                "id": "msg-1",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "An answer."}],
+            },
+        },
+    ]
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    return transcript
+
+
+def run_main(hook_module: Any, monkeypatch: Any, fake_langfuse: Any, session_id: str, transcript: Path) -> str:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://example.test")
+    monkeypatch.setattr(
+        hook_module,
+        "read_hook_payload",
+        lambda: {
+            "hook_event_name": "Stop",
+            "sessionId": session_id,
+            "transcriptPath": str(transcript),
+        },
+    )
+    monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: fake_langfuse)
+
+    rc = hook_module.main()
+
+    assert rc == 0
+    return (hook_module.LOG_FILE).read_text(encoding="utf-8")
+
+
+def test_main_logs_processed_when_delivery_is_confirmed_healthy(
+    hook_module, isolated_hook_state, fake_langfuse, monkeypatch, tmp_path
+):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+    transcript = write_one_turn_transcript(tmp_path, "sess-healthy")
+
+    log_contents = run_main(hook_module, monkeypatch, fake_langfuse, "sess-healthy", transcript)
+
+    assert "Processed 1 turns" in log_contents
+    assert "Delivery rejected" not in log_contents
+    assert "Delivery failed" not in log_contents
+
+
+def test_main_logs_rejection_instead_of_processed_on_bad_credentials(
+    hook_module, isolated_hook_state, fake_langfuse, monkeypatch, tmp_path
+):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
+    transcript = write_one_turn_transcript(tmp_path, "sess-rejected")
+
+    log_contents = run_main(hook_module, monkeypatch, fake_langfuse, "sess-rejected", transcript)
+
+    assert "Delivery rejected" in log_contents
+    assert "1 turn(s) were not delivered" in log_contents
+    assert "Processed 1 turns" not in log_contents
+
+
+def test_main_logs_unreachable_instead_of_processed_on_dead_host(
+    hook_module, isolated_hook_state, fake_langfuse, monkeypatch, tmp_path
+):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(0))
+    transcript = write_one_turn_transcript(tmp_path, "sess-unreachable")
+
+    log_contents = run_main(hook_module, monkeypatch, fake_langfuse, "sess-unreachable", transcript)
+
+    assert "Delivery failed" in log_contents
+    assert "did not respond" in log_contents
+    assert "1 turn(s) were not delivered" in log_contents
+    assert "Processed 1 turns" not in log_contents

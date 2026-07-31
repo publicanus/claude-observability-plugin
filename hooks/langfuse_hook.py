@@ -48,7 +48,7 @@ HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
 # (uv run --script puts the script's own directory on sys.path[0] already,
 # but the test harness loads this file via importlib without doing so).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hurt_annotations import process_pending_hurts  # noqa: E402
+from hurt_annotations import LangfuseClient, process_pending_hurts  # noqa: E402
 
 
 # ----------------- Configuration -----------------
@@ -2506,6 +2506,131 @@ def emit_new_turns_from_transcript(
         return emitted
 
 
+# ----------------- Delivery health -----------------
+# langfuse.flush() (below) cannot tell a rejected keypair from a genuinely
+# successful send: the OTel BatchSpanProcessor swallows the exporter's
+# per-batch SpanExportResult and force_flush() returns True regardless of
+# outcome. The only cheap, reliable signal is hitting the REST endpoint the
+# SDK itself authenticates against — reusing hurt_annotations.LangfuseClient
+# (already a dependency-free REST client keyed on this hook's own resolved
+# credentials) rather than the SDK's blocking, retrying auth_check().
+
+DELIVERY_HEALTH_STATE_KEY = "_delivery_health"
+# Re-verified at most this often: a blocking round trip on every
+# Stop/SessionEnd firing is not acceptable, but a rejected or revoked
+# keypair must not go undetected for long either.
+DELIVERY_HEALTH_CHECK_INTERVAL = timedelta(minutes=15)
+
+
+def _credential_fingerprint(config: LangfuseConfig) -> str:
+    raw = f"{config.public_key}:{config.secret_key}:{config.host}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
+    """Probes whether traces can currently reach Langfuse under these
+    credentials. Returns (status, detail):
+
+    - "ok": credentials accepted.
+    - "rejected": the host answered but refused the keypair (401/403) —
+      diagnosable and worth naming the credential as the cause.
+    - "unreachable": no answer (network/DNS/timeout) or any other non-2xx
+      response — the host or route is the more likely cause.
+
+    Never raises: LangfuseClient._request() catches every exception itself
+    and reports it as status 0.
+    """
+    response = LangfuseClient(config, timeout=5).get("/api/public/projects")
+    if response.status == 200:
+        return "ok", ""
+    if response.status in (401, 403):
+        return "rejected", f"HTTP {response.status} from {config.host}"
+    if response.status == 0:
+        return "unreachable", f"{config.host} did not respond"
+    return "unreachable", f"HTTP {response.status} from {config.host}"
+
+
+def _cached_delivery_status(state: Dict[str, Any], fingerprint: str) -> Optional[Tuple[str, str]]:
+    cached = state.get(DELIVERY_HEALTH_STATE_KEY)
+    if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+        return None
+    checked_at = parse_timestamp(cached.get("updated"))
+    status = cached.get("status")
+    if (
+        checked_at is None
+        or not isinstance(status, str)
+        or datetime.now(timezone.utc) - checked_at >= DELIVERY_HEALTH_CHECK_INTERVAL
+    ):
+        return None
+    detail = cached.get("detail")
+    return status, detail if isinstance(detail, str) else ""
+
+
+def get_delivery_status(config: LangfuseConfig) -> Tuple[str, str]:
+    """Cached, rate-limited wrapper around classify_delivery_health.
+
+    Cached under the same state file and lock as everything else, keyed by
+    a fingerprint of the credentials in use so a key rotation is picked up
+    on the very next firing instead of waiting out the interval. Fails open
+    on lock contention: assume healthy rather than block or misreport.
+
+    The network probe itself deliberately runs outside the lock: holding
+    LOCK_FILE for the probe's (bounded but non-trivial) duration would stall
+    every other session's turn emission, which shares the same lock, for as
+    long as the probe takes. Losing the race and probing twice in the rare
+    case of two firings both finding a stale cache is a fine trade for that.
+    """
+    fingerprint = _credential_fingerprint(config)
+    try:
+        with FileLock(LOCK_FILE):
+            cached = _cached_delivery_status(load_hook_state(), fingerprint)
+        if cached is not None:
+            return cached
+    except TimeoutError as e:
+        debug(f"delivery health lock timeout, assuming healthy: {e}")
+        return "ok", ""
+
+    status, detail = classify_delivery_health(config)
+
+    try:
+        with FileLock(LOCK_FILE):
+            state = load_hook_state()
+            state[DELIVERY_HEALTH_STATE_KEY] = {
+                "fingerprint": fingerprint,
+                "status": status,
+                "detail": detail,
+                "updated": datetime.now(timezone.utc).isoformat(),
+            }
+            save_hook_state(state)
+    except TimeoutError as e:
+        debug(f"delivery health lock timeout while caching result: {e}")
+
+    return status, detail
+
+
+def format_processed_log(emitted: int, dur: float, session_id: str, status: str, detail: str) -> str:
+    """Renders the one line main() logs after each firing.
+
+    A run that delivered nothing never claims "Processed N turns" — that
+    phrasing is reserved for a run confirmed (or, when emitted is 0,
+    trivially) not to have lost anything. Rejection and unreachability get
+    their own wording naming the likely cause, since collapsing them back
+    into one generic failure message would recreate the bug this reports.
+    """
+    if emitted > 0 and status == "rejected":
+        return (
+            f"Delivery rejected: Langfuse did not accept these credentials "
+            f"({detail}); {emitted} turn(s) were not delivered (session={session_id}). "
+            f"Check LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY."
+        )
+    if emitted > 0 and status == "unreachable":
+        return (
+            f"Delivery failed: {detail}; {emitted} turn(s) were not delivered "
+            f"(session={session_id})."
+        )
+    return f"Processed {emitted} turns in {dur:.2f}s (session={session_id})"
+
+
 def flush_and_shutdown_langfuse_client(langfuse: Optional[Langfuse]) -> None:
     if langfuse is None:
         return
@@ -2572,7 +2697,11 @@ def main() -> int:
         )
 
         dur = time.time() - start
-        info(f"Processed {emitted} turns in {dur:.2f}s (session={session_id})")
+        # Nothing was even attempted to be sent, so "Processed 0" needs no
+        # delivery probe — skipping it here also keeps the probe off the
+        # (common) firings that had nothing new to emit.
+        status, detail = ("ok", "") if emitted == 0 else get_delivery_status(config)
+        info(format_processed_log(emitted, dur, session_id, status, detail))
         return 0
 
     except TimeoutError as e:

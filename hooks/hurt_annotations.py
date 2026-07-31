@@ -68,8 +68,9 @@ class LangfuseClient:
     this hook's own resolved LangfuseConfig (public_key/secret_key/host) —
     never a second, independently-resolved credential source."""
 
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, *, timeout: float = 30) -> None:
         self._config = config
+        self._timeout = timeout
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> HttpResponse:
         url = self._config.host.rstrip("/") + path
@@ -79,7 +80,7 @@ class LangfuseClient:
         credentials = f"{self._config.public_key}:{self._config.secret_key}".encode("utf-8")
         req.add_header("Authorization", "Basic " + base64.b64encode(credentials).decode("ascii"))
         try:
-            with urlrequest.urlopen(req, timeout=30) as resp:
+            with urlrequest.urlopen(req, timeout=self._timeout) as resp:
                 raw = resp.read()
                 parsed = json.loads(raw) if raw else None
                 return HttpResponse(status=resp.status, body=parsed)

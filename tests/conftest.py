@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import logging
 import random
 import sys
 import types
@@ -154,6 +155,14 @@ class FakeLangfuse:
         self._otel_tracer = FakeTracer()
         self.observations: list[FakeObservation] = []
 
+    def flush(self) -> None:
+        # No-op: real flush()'s (lack of a) return signal is exactly what
+        # the delivery-health tests exist to route around, not exercise here.
+        pass
+
+    def shutdown(self) -> None:
+        pass
+
     def _create_observation_from_otel_span(
         self,
         *,
@@ -209,6 +218,14 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "LOG_FILE", state_dir / "langfuse_hook.log")
     monkeypatch.setattr(hook_module, "HURT_PENDING_FILE", state_dir / "hurt_pending.json")
     monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
+    # _get_logger() caches its handler in this module-level global on first
+    # use, and logging.getLogger("langfuse_hook") is itself a process-wide
+    # singleton keyed by name — resetting only the module global still
+    # leaves the old RotatingFileHandler (pointed at a previous test's, by
+    # then deleted, LOG_FILE) attached. hook_module is session-scoped, so
+    # both must be cleared for every test to log to its own LOG_FILE.
+    monkeypatch.setattr(hook_module, "_logger", None)
+    logging.getLogger("langfuse_hook").handlers.clear()
     return state_dir
 
 
