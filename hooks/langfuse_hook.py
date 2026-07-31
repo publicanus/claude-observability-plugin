@@ -73,6 +73,43 @@ except ValueError:
 # Bound for unresolved task notifications kept in the state file between runs.
 MAX_PENDING_TASK_NOTIFICATIONS = 50
 
+
+# ----------------- Data residency -----------------
+# Langfuse Cloud runs one deployment per region with fully separate data and
+# accounts; the region is the hostname. Verified against
+# https://langfuse.com/security/data-regions (checked 2026-07-31).
+EU_CLOUD_HOST = "https://cloud.langfuse.com"
+NON_EU_CLOUD_HOSTS = {
+    "us.cloud.langfuse.com": "US (AWS us-west-2)",
+    "hipaa.cloud.langfuse.com": "US HIPAA (AWS us-west-2)",
+    "jp.cloud.langfuse.com": "Japan (AWS ap-northeast-1)",
+}
+
+
+def _hostname(host: str) -> str:
+    """The bare hostname of a configured base URL, lowercased, without scheme,
+    userinfo, port or path — so a host is recognised however it was written."""
+    value = host.strip().lower()
+    value = value.split("://", 1)[-1]
+    value = value.split("/", 1)[0]
+    value = value.split("@")[-1]
+    return value.split(":", 1)[0]
+
+
+def non_eu_cloud_region(host: str) -> Optional[str]:
+    """Names the Langfuse Cloud region behind this host when that region sits
+    outside the EU; None when it does not.
+
+    None covers two very different cases on purpose: Langfuse Cloud EU, and
+    any self-hosted host. A self-hosted instance's location cannot be derived
+    from its URL, so this can only refuse what it can positively identify —
+    the plugin restricts where it sends, it does not certify where data ends
+    up. Matching is on the exact hostname: an unrelated instance that merely
+    reads like a cloud host (us.cloud.langfuse.com.example.com) is not one.
+    """
+    return NON_EU_CLOUD_HOSTS.get(_hostname(host))
+
+
 @dataclass
 class LangfuseConfig:
     public_key: str
@@ -81,14 +118,46 @@ class LangfuseConfig:
     user_id: Optional[str]
     trace_seed: Optional[str] = None
 
+
+def _credentials() -> Tuple[str, str]:
+    return (
+        _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY"),
+        _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY"),
+    )
+
+
+def resolve_host() -> str:
+    """The Langfuse host this process would send to, before the residency gate.
+
+    Defaults to Langfuse Cloud EU. A default decides where every unconfigured
+    install's session data lands, and a default pointing at another
+    jurisdiction has no symptom: traces simply arrive somewhere the operator
+    is not looking.
+    """
+    return _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
+
+
 def get_langfuse_config() -> Optional[LangfuseConfig]:
-    public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
-    secret_key = _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY")
-    host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com"
+    """Resolves the one config every send path in this process is built from —
+    trace emission, the delivery probe, and /hurt attachment all take it — which
+    is why the residency gate lives here rather than at each send site. An EU
+    default alone would not be a gate: a default only steers, and an explicitly
+    set US host would still ship every turn, tool call and /hurt comment.
+    """
+    public_key, secret_key = _credentials()
+    host = resolve_host()
     user_id = _opt("LANGFUSE_USER_ID") or _opt("CC_LANGFUSE_USER_ID") or None
     trace_seed = _opt("CC_LANGFUSE_TRACE_SEED") or None
 
     if not public_key or not secret_key:
+        return None
+
+    region = non_eu_cloud_region(host)
+    if region is not None:
+        info(
+            f"Refusing to send: LANGFUSE_BASE_URL is {host}, Langfuse Cloud's "
+            f"{region} region. This plugin sends to EU endpoints only."
+        )
         return None
 
     return LangfuseConfig(
@@ -98,6 +167,44 @@ def get_langfuse_config() -> Optional[LangfuseConfig]:
         user_id=user_id,
         trace_seed=trace_seed,
     )
+
+
+def format_residency_refusal(host: str) -> Optional[str]:
+    """The user-visible refusal for a non-EU Langfuse Cloud host, in the same
+    shape as this hook's other failure messages: what is happening, why, and
+    the exact way out including the restart it cannot skip.
+
+    Loud rather than fatal — the hook still exits 0 and leaves the session
+    alone. Silence is what made the old US default a trap in the first place.
+    """
+    region = non_eu_cloud_region(host)
+    if region is None:
+        return None
+    return (
+        f"Langfuse tracing is off: LANGFUSE_BASE_URL is {host} — Langfuse "
+        f"Cloud's {region} region. This plugin sends session data to EU "
+        "endpoints only, so no traces are being sent — nothing was "
+        "transmitted to that host.\n"
+        f"Fix: use {EU_CLOUD_HOST} (Langfuse Cloud EU) with keys from an EU "
+        "project — regions have separate accounts, so a project in another "
+        "region has no EU keys — or point LANGFUSE_BASE_URL at your "
+        "self-hosted Langfuse. Then restart Claude Code: this session's env "
+        "vars are frozen at launch and won't pick up the change on their own."
+    )
+
+
+def residency_refusal() -> Optional[str]:
+    """Why the hook went quiet, when the reason was the residency gate rather
+    than an install that simply has no keys yet.
+
+    An install without credentials sends nothing regardless and is documented
+    to have zero impact, so it stays completely silent — a warning there would
+    be noise about a value that changes nothing.
+    """
+    public_key, secret_key = _credentials()
+    if not public_key or not secret_key:
+        return None
+    return format_residency_refusal(resolve_host())
 
 def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
     try:
@@ -2689,9 +2796,9 @@ def format_delivery_warning(status: str, detail: str) -> Optional[str]:
         return (
             f"Langfuse tracing is broken: {detail} — no traces are being "
             "recorded. Check LANGFUSE_BASE_URL: unset defaults to "
-            "https://us.cloud.langfuse.com, EU projects need "
-            "https://cloud.langfuse.com — a region mismatch fails exactly "
-            "like this.\n"
+            f"{EU_CLOUD_HOST} (Langfuse Cloud EU), and a self-hosted "
+            "instance needs its own URL — pointing at the wrong host fails "
+            "exactly like this.\n"
             "Fix the value or your network/VPN access to that host, then "
             "restart Claude Code — this session's env vars are frozen and "
             "won't pick up the change on their own."
@@ -2726,6 +2833,13 @@ def main() -> int:
 
     config = get_langfuse_config()
     if config is None:
+        # An unconfigured install is silent, as documented; a configured one
+        # held back by the residency gate is not — an operator who set a
+        # non-EU host has to learn that from the hook, not from traces never
+        # turning up.
+        refusal = residency_refusal()
+        if refusal is not None:
+            print(json.dumps({"systemMessage": refusal}))
         return 0
 
     # Runs on every firing, independent of this run's hook_context/payload —

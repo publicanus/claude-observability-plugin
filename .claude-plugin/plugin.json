@@ -23,8 +23,8 @@
     "LANGFUSE_BASE_URL": {
       "type": "string",
       "title": "Langfuse Base URL",
-      "description": "Langfuse host. Use https://us.cloud.langfuse.com for US, https://cloud.langfuse.com for EU, or your self-hosted URL.",
-      "default": "https://us.cloud.langfuse.com"
+      "description": "Langfuse host. Defaults to https://cloud.langfuse.com (Langfuse Cloud EU). Langfuse Cloud's non-EU regions (US, HIPAA, Japan) are refused and nothing is sent. A self-hosted URL is accepted as given — the plugin cannot tell where that host stands.",
+      "default": "https://cloud.langfuse.com"
     },
     "LANGFUSE_USER_ID": {
       "type": "string",

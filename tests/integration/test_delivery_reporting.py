@@ -255,9 +255,11 @@ def test_warning_on_unreachable_host_is_a_repair_recipe(hook_module):
     # Names the host actually tried, not just "unreachable".
     assert "https://example.test did not respond" in warning
     assert "LANGFUSE_BASE_URL" in warning
-    # Names the region trap: default host vs. an EU project's host.
-    assert "us.cloud.langfuse.com" in warning
-    assert "cloud.langfuse.com" in warning
+    # Names the host an unset value resolves to, so "I set nothing" is a
+    # checkable statement. Never the US host: that one is refused outright
+    # (see tests/unit/test_data_residency.py) and can't be the cause here.
+    assert "https://cloud.langfuse.com" in warning
+    assert "us.cloud.langfuse.com" not in warning
     assert "restart Claude Code" in warning
     assert "frozen" in warning
 
@@ -383,7 +385,7 @@ def test_main_logs_unreachable_instead_of_processed_on_dead_host(
     warning = system_message["systemMessage"]
     assert "no traces are being recorded" in warning
     assert "LANGFUSE_BASE_URL" in warning
-    assert "us.cloud.langfuse.com" in warning
+    assert "https://cloud.langfuse.com" in warning
     assert "restart Claude Code" in warning
 
 
