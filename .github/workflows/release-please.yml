@@ -1,0 +1,64 @@
+# Opens/updates a release PR from Conventional Commits on main, and tags a GitHub
+# release when that PR merges. release-please-config.json + .release-please-manifest.json
+# are the source of truth for what gets bumped and how; this workflow only invokes it.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Claude Code resolves version-constrained dependencies between plugins against
+      # tags named {plugin-name}--v{version}. release-please tags in its own native
+      # format for its own bookkeeping, and cannot be made to emit this shape as well:
+      # its tag parser only ever reads a single-character separator, so a two-character
+      # one is written correctly and never recognised again. The two formats therefore
+      # stay separate, each written by whoever owns it.
+      #
+      # The release commit is already on this branch by the time this runs, so
+      # plugin.json here carries the version just released.
+      - name: Create the {name}--v{version} tag
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          set -euo pipefail
+          name=$(jq -er '.name' .claude-plugin/plugin.json)
+          version=$(jq -er '.version' .claude-plugin/plugin.json)
+
+          # plugin.json is mirrored from version.txt by release-please's extra-files
+          # updater. If that mirror ever silently stops working, plugin.json keeps the
+          # previous version, installs resolve to it, and the release reaches nobody —
+          # the exact failure this whole arrangement exists to prevent. So assert the
+          # mirror landed rather than trusting it.
+          released="${{ steps.release.outputs.version }}"
+          if [ "${version}" != "${released}" ]; then
+            echo "::error::release-please released ${released} but .claude-plugin/plugin.json says ${version} — the extra-files mirror did not apply, so installs would never see this release." >&2
+            exit 1
+          fi
+
+          tag="${name}--v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "${tag} already exists on origin; nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "${name} ${version}"
+          git push origin "${tag}"
+          echo "Tagged ${tag}"
