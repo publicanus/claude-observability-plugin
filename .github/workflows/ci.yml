@@ -1,0 +1,68 @@
+# The mechanical gate — main must stay installable as a plugin and correct as python.
+# The hook here runs on every Stop and SessionEnd in every session of every install,
+# so a broken main is a broken session for everyone, not a broken build.
+# Mechanical checks only; judgment is the reviewer's job, not CI's.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Manifests parse
+        run: |
+          jq . .claude-plugin/plugin.json > /dev/null
+          jq . .claude-plugin/marketplace.json > /dev/null
+          jq . hooks/hooks.json > /dev/null
+
+      - name: No userConfig field is install-required
+        run: |
+          jq -e '[.userConfig // {} | .[] | select(.required == true)] | length == 0' \
+            .claude-plugin/plugin.json > /dev/null || {
+            echo "userConfig fields must not be required: the install UI offers no skip path."
+            exit 1
+          }
+
+      # A rename of the hook script that misses hooks.json breaks every install
+      # on the next Stop, and no test sees it: the manifest is data, not code.
+      - name: Every hook command points at a file that exists
+        run: |
+          set -euo pipefail
+          scripts=$(jq -r '[.. | objects | select(.type == "command") | .command] | .[]' hooks/hooks.json \
+            | grep -oE '\$\{CLAUDE_PLUGIN_ROOT\}"?/[A-Za-z0-9_/.-]*\.py' \
+            | sed -E 's|.*\}"?/||' | sort -u)
+          # An empty match would pass this step while checking nothing.
+          test -n "$scripts" || { echo "no plugin-root script paths found in hooks/hooks.json"; exit 1; }
+          for script in $scripts; do
+            test -f "$script" || { echo "hook command references missing file: $script"; exit 1; }
+            echo "ok: $script"
+          done
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor requires-python declares, and a current release. The hook runs
+        # on whatever interpreter the user's machine offers, so the floor is the
+        # gate that matters.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      # The suite drives the hook over recorded transcript fixtures — no Langfuse
+      # keys, no network. This job deliberately holds no secrets, so a test that
+      # starts reaching for a real credential or a real host fails here.
+      - name: pytest
+        run: uv run --python ${{ matrix.python }} --frozen pytest
