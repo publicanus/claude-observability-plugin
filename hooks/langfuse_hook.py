@@ -2608,6 +2608,33 @@ def get_delivery_status(config: LangfuseConfig) -> Tuple[str, str]:
     return status, detail
 
 
+def peek_delivery_status(config: LangfuseConfig) -> Optional[Tuple[str, str]]:
+    """Reads whatever delivery status was last recorded for this credential
+    fingerprint, however stale — never probes and never refreshes the cache.
+
+    For the firings that have nothing new to send: emitting nothing new is
+    not the same as the plugin working, and a known-bad status must still
+    surface every time, not just on the (rate-limited) firings that
+    re-probe. Returns None only when there is no verdict yet at all (never
+    checked, or checked under different credentials) — silence in that case
+    is correct, not a gap: an unverified plugin must not warn speculatively.
+    """
+    fingerprint = _credential_fingerprint(config)
+    try:
+        with FileLock(LOCK_FILE):
+            state = load_hook_state()
+    except TimeoutError:
+        return None
+    cached = state.get(DELIVERY_HEALTH_STATE_KEY)
+    if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+        return None
+    status = cached.get("status")
+    if not isinstance(status, str):
+        return None
+    detail = cached.get("detail")
+    return status, detail if isinstance(detail, str) else ""
+
+
 def format_processed_log(emitted: int, dur: float, session_id: str, status: str, detail: str) -> str:
     """Renders the one line main() logs after each firing.
 
@@ -2629,6 +2656,34 @@ def format_processed_log(emitted: int, dur: float, session_id: str, status: str,
             f"(session={session_id})."
         )
     return f"Processed {emitted} turns in {dur:.2f}s (session={session_id})"
+
+
+def format_delivery_warning(status: str, detail: str) -> Optional[str]:
+    """The user-visible warning for a known-bad delivery status, surfaced via
+    the hook's JSON `systemMessage` field — not the log file nobody opens.
+
+    Returns None for "ok" or any status this session has no verdict on yet;
+    a working (or unverified) session must stay completely silent, or the
+    warning gets ignored within a day. A bad status gets a message every
+    time this is called, deliberately not rate-limited like the probe that
+    produced it: staying quiet between probes is exactly how the original
+    bug went unnoticed for three days.
+    """
+    if status == "rejected":
+        return (
+            "Langfuse tracing is broken: credentials were rejected "
+            f"({detail}) — no traces are being recorded. This is usually a "
+            "rotated key: check LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY and "
+            "start a new terminal session with the current values — this "
+            "one will keep failing silently on the old ones otherwise."
+        )
+    if status == "unreachable":
+        return (
+            f"Langfuse tracing is broken: {detail} — no traces are being "
+            "recorded. Check LANGFUSE_BASE_URL and that this machine can "
+            "reach that host."
+        )
+    return None
 
 
 def flush_and_shutdown_langfuse_client(langfuse: Optional[Langfuse]) -> None:
@@ -2698,10 +2753,23 @@ def main() -> int:
 
         dur = time.time() - start
         # Nothing was even attempted to be sent, so "Processed 0" needs no
-        # delivery probe — skipping it here also keeps the probe off the
-        # (common) firings that had nothing new to emit.
-        status, detail = ("ok", "") if emitted == 0 else get_delivery_status(config)
+        # fresh delivery probe — skipping it here also keeps the probe off
+        # the (common) firings that had nothing new to emit. A firing with
+        # nothing to send still checks the cache (never probes) so a
+        # known-bad plugin keeps warning even between turns.
+        if emitted == 0:
+            status, detail = peek_delivery_status(config) or ("ok", "")
+        else:
+            status, detail = get_delivery_status(config)
         info(format_processed_log(emitted, dur, session_id, status, detail))
+
+        # User-visible, unlike the line above: printed on every firing the
+        # status is bad, not rate-limited with the probe that produced it,
+        # and silent whenever it is healthy or not yet known.
+        warning = format_delivery_warning(status, detail)
+        if warning is not None:
+            print(json.dumps({"systemMessage": warning}))
+
         return 0
 
     except TimeoutError as e:
