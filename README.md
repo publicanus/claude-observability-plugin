@@ -4,6 +4,7 @@
 >
 > 1. This fork captures named teammate agents (subagents spawned with a `name:`, Claude Code's agent-teams feature) — upstream drops them silently, so a teammate-heavy session can do most of its work invisibly to Langfuse. Documented upstream as [langfuse/claude-observability-plugin#28](https://github.com/langfuse/claude-observability-plugin/issues/28).
 > 2. This fork attaches pending `/hurt` annotations (from the companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin) onto their target traces — see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt) below. This is mate-ecosystem-specific and not expected to be upstreamed.
+> 3. This fork sends to EU endpoints only: `LANGFUSE_BASE_URL` defaults to Langfuse Cloud EU and Langfuse Cloud's non-EU regions are refused rather than merely defaulted away from — see [Data residency](#data-residency). Upstream defaults to the US region.
 >
 > The upstream README follows unchanged below.
 
@@ -43,7 +44,7 @@ The plugin requires or accepts:
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
 | `LANGFUSE_SECRET_KEY` | Your Langfuse secret key (`sk-lf-...`). Stored in your OS keychain.                                  |
 | `LANGFUSE_PUBLIC_KEY` | Your Langfuse public key (`pk-lf-...`).                                                              |
-| `LANGFUSE_BASE_URL`   | https://us.cloud.langfuse.com (default), https://cloud.langfuse.com for EU, or your self-hosted URL. |
+| `LANGFUSE_BASE_URL`   | https://cloud.langfuse.com (Langfuse Cloud EU, the default) or your self-hosted URL. Langfuse Cloud's non-EU regions are refused — see [Data residency](#data-residency). |
 | `LANGFUSE_USER_ID`    | Optional. User identifier attached to every trace (shown as the user in Langfuse).                   |
 | `CC_LANGFUSE_DEBUG`   | Verbose logging to `~/.claude/state/langfuse_hook.log`.                                              |
 | `CC_LANGFUSE_MAX_CHARS` | Truncate captured inputs/outputs to this many characters (default 20000).                          |
@@ -175,12 +176,30 @@ This hook is the sole consumer (`hooks/hurt_annotations.py`): on every `Stop`/`S
 
 An entry is removed only once all of that succeeds. One that can't yet be attached — Langfuse unreachable, the trace not yet uploaded, credentials misconfigured — stays queued and is retried the next time *any* Claude Code session's hook fires on this machine (the queue is not scoped to the session that created it, so a healthy project's hook can drain hurts left behind by one whose hook never runs again). Entries older than 30 days that are still unresolvable are dropped rather than retried forever.
 
+## Data residency
+
+`LANGFUSE_BASE_URL` decides which jurisdiction your session data lands in, and most
+installs never set it — so it defaults to `https://cloud.langfuse.com`, Langfuse
+Cloud's EU region.
+
+A default only steers, though. Langfuse Cloud's other regions are refused outright:
+set `LANGFUSE_BASE_URL` (or `CC_LANGFUSE_BASE_URL`) to `us.cloud.langfuse.com`,
+`hipaa.cloud.langfuse.com` or `jp.cloud.langfuse.com` and the hook sends nothing at
+all, prints why, and names the EU host to use instead. Note that Langfuse Cloud
+regions have entirely separate accounts, so switching region means keys from an EU
+project, not the ones you have.
+
+Any other host — including every self-hosted Langfuse — is accepted as given. Where
+a self-hosted instance physically stands cannot be read off its URL, so the plugin
+does not pretend to judge it: this restricts where the plugin will send, it does not
+certify where your data ends up.
+
 ## Privacy
 
 This plugin transmits your Claude Code session data — conversation turns, assistant
 generations, tool calls, and token-usage statistics — to the Langfuse endpoint you
-configure (`LANGFUSE_BASE_URL`, default `https://us.cloud.langfuse.com`; EU and
-self-hosted endpoints are supported). Data is sent at the end of each turn (the
+configure (`LANGFUSE_BASE_URL`, default `https://cloud.langfuse.com`; see
+[Data residency](#data-residency)). Data is sent at the end of each turn (the
 `Stop` hook) and at session end (`SessionEnd`) using the Langfuse API keys you
 provide, which are stored in your OS keychain. No data is sent anywhere other than
 the endpoint you configure. If the companion mate-hurt plugin is installed, this
@@ -227,6 +246,7 @@ claude plugin uninstall langfuse-observability
 ## Troubleshooting
 
 - Nothing in Langfuse: check `~/.claude/state/langfuse_hook.log` (enable `CC_LANGFUSE_DEBUG`).
+- "Langfuse tracing is off … region": `LANGFUSE_BASE_URL` points at a non-EU Langfuse Cloud host, which this plugin refuses. Use the EU host with EU-project keys, or your self-hosted URL, and restart Claude Code — see [Data residency](#data-residency).
 - Desktop chat has no traces: regular Claude Desktop Chat mode is not hook-backed. Use the `claude` CLI or Claude Code GUI Code mode.
 - Hook not firing: confirm with `claude plugin list` that langfuse-observability is enabled; restart Claude Code.
 - langfuse import errors (no uv): install uv, or ensure the `python3` on your PATH is Python 3.10+ and has `langfuse>=4.0,<5` installed.
