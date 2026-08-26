@@ -1,14 +1,15 @@
 # Keeps action references current. Third-party actions are pinned to a full
-# commit SHA because a tag is a mutable pointer its owner can repoint — which
-# is how tj-actions/changed-files leaked 23,000 repositories' secrets in March
-# 2025. A pinned SHA cannot move, and therefore cannot pick up a fix either,
-# so something has to bump it: that is this file. Dependabot rewrites both the
-# SHA and the `# vX.Y.Z` comment beside it, so the readable label stays true.
+# commit SHA because a tag is a pointer its owner can move: in March 2025 a
+# stolen bot token repointed every version tag of tj-actions/changed-files at
+# one malicious commit, and the ~23,000 repositories using it were one run from
+# leaking their runner's secrets into their build logs. A pinned SHA cannot
+# move, and therefore cannot pick up a fix either, so something has to bump it:
+# that is this file. Dependabot rewrites both the SHA and the `# vX.Y.Z`
+# comment beside it, so the readable label stays true.
 #
-# Actions under actions/ and github/ are referenced by major version tag
-# instead. Compromising one of those means compromising GitHub itself, at
-# which point the runner, the token and the API are all suspect and a pin
-# saves nothing.
+# Actions owned by the actions and github organizations are referenced by major
+# version tag instead — a churn tradeoff on the platform's most-scrutinised
+# repositories, not a claim that they cannot be compromised.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
