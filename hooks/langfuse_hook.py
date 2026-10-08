@@ -81,6 +81,8 @@ class LangfuseConfig:
     user_id: Optional[str]
     trace_seed: Optional[str] = None
 
+NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
+
 def get_langfuse_config() -> Optional[LangfuseConfig]:
     public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
     secret_key = _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY")
@@ -217,6 +219,10 @@ def get_session_id_and_transcript_path(payload: Dict[str, Any]) -> Optional[Tupl
 def is_session_end_hook_payload(payload: Dict[str, Any]) -> bool:
     hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
     return hook_event_name == "SessionEnd"
+
+def is_session_start_hook_payload(payload: Dict[str, Any]) -> bool:
+    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
+    return hook_event_name == "SessionStart"
 
 
 # ----------------- State file concurrency control -----------------
@@ -2724,7 +2730,15 @@ def main() -> int:
     start = time.time()
     debug("Hook started")
 
+    payload = read_hook_payload()
     config = get_langfuse_config()
+
+    # SessionStart exists only to say, once, that this session goes untraced.
+    if is_session_start_hook_payload(payload):
+        if config is None:
+            print(json.dumps({"systemMessage": NO_KEYS_WARNING}))
+        return 0
+
     if config is None:
         return 0
 
@@ -2743,7 +2757,6 @@ def main() -> int:
     except Exception as e:
         debug(f"pending hurt processing failed: {e}")
 
-    payload = read_hook_payload()
     hook_context = get_session_id_and_transcript_path(payload)
     if hook_context is None:
         return 0
