@@ -201,6 +201,20 @@ def test_post_score_sends_expected_payload(hurt_annotations_module: Any) -> None
     }
 
 
+def test_post_score_sends_id_and_timestamp_when_given(hurt_annotations_module: Any) -> None:
+    module = hurt_annotations_module
+    client = FakeClient(module)
+    client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "hurt-1"}))
+
+    module.post_score(
+        client, "tid", "other", "cfg-1", score_id="hurt-1", timestamp="2026-10-01T12:00:00+00:00"
+    )
+
+    _, _, body = client.calls[0]
+    assert body["id"] == "hurt-1"
+    assert body["timestamp"] == "2026-10-01T12:00:00+00:00"
+
+
 def test_post_comment_sends_expected_payload(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
