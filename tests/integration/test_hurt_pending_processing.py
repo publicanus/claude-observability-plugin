@@ -188,15 +188,14 @@ def test_process_pending_hurts_keeps_record_queued_on_partial_write_failure(
     attached = module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert attached == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag"]}]
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag", "comment"]}]
     assert any("hurt score failed" in line and "HTTP 500" in line for line in logged)
 
 
 def test_process_pending_hurts_logs_each_refused_write(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """The hook's own path logs a refused tag, score and comment write. A
-    run stops at the first refused write, so each run fails the next one."""
+    """The hook's own path logs a refused tag, score and comment write."""
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
     write_pending(pending_file, [make_record(module)])
@@ -209,10 +208,6 @@ def test_process_pending_hurts_logs_each_refused_write(
     install_fake_client(module, monkeypatch, client)
     logged: list[str] = []
 
-    module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=200, body={}))
-    module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
-    client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "s"}))
     module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert any("hurt tag failed" in line and "HTTP 401" in line for line in logged)
@@ -256,7 +251,7 @@ def posts(client: RoutedClient) -> list[str]:
     return [path for method, path, _ in client.calls if method == "POST" and "score-configs" not in path]
 
 
-def test_retry_after_score_failure_sends_score_and_comment_but_not_tag(
+def test_retry_after_score_failure_sends_only_the_score(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
     module = hurt_annotations_module
@@ -268,13 +263,13 @@ def test_retry_after_score_failure_sends_score_and_comment_but_not_tag(
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert posts(client) == ["/api/public/ingestion", "/api/public/scores"]
-    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["tag"]
+    assert posts(client) == ["/api/public/ingestion", "/api/public/scores", "/api/public/comments"]
+    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["tag", "comment"]
 
     client.calls.clear()
     client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "s"}))
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
-    assert posts(client) == ["/api/public/scores", "/api/public/comments"]
+    assert posts(client) == ["/api/public/scores"]
     assert json.loads(pending_file.read_text(encoding="utf-8")) == []
 
 
@@ -296,8 +291,6 @@ def test_retry_after_comment_failure_sends_only_the_comment(
     client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "c"}))
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
     assert posts(client) == ["/api/public/comments"]
-    # A write already accepted proves the trace exists: no trace GET.
-    assert not any(path.startswith("/api/public/traces/") for _, path, _ in client.calls)
 
 
 def test_retried_score_carries_the_same_id_and_timestamp(
@@ -336,8 +329,7 @@ def test_rate_limited_write_leaves_the_entry_queued_with_its_progress(
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag"]}]
-    assert "/api/public/comments" not in posts(client)
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag", "comment"]}]
 
 
 def test_entry_with_unusable_done_field_is_treated_as_nothing_done(

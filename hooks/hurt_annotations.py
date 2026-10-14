@@ -336,10 +336,7 @@ def _attempt_annotation(
     writes (tag, score, comment) have succeeded, in this run or an earlier
     one. Each write that succeeds is added to record["done"] at once, so the
     caller can save progress even when a later write fails."""
-    done = _done_steps(record)
-    # A write already accepted proves the trace exists; skip the GET, which
-    # counts against Langfuse's tight trace-read rate limit.
-    if not done and not trace_exists(client, record["trace_id"]):
+    if not trace_exists(client, record["trace_id"]):
         return False
 
     if "value" not in project_id_cache:
@@ -367,16 +364,14 @@ def _attempt_annotation(
         ),
         "comment": lambda: post_comment(client, project_id, record["trace_id"], record["comment"], log),
     }
+    done = _done_steps(record)
     for step in STEPS:
         if step in done:
             continue
-        # Stop at the first refused write: the next run retries from here,
-        # and a rate-limited Langfuse gets no further calls this run.
-        if not writes[step]():
-            return False
-        done.append(step)
-        record["done"] = [s for s in STEPS if s in done]
-    return True
+        if writes[step]():
+            done.append(step)
+            record["done"] = [s for s in STEPS if s in done]
+    return len(done) == len(STEPS)
 
 
 def process_pending_hurts(
