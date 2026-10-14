@@ -101,6 +101,18 @@ class LangfuseClient:
         return self._request("POST", path, body)
 
 
+Log = Optional[Callable[[str], None]]
+
+
+def _report_failure(log: Log, step: str, resp: HttpResponse) -> None:
+    """Say in the hook log which write Langfuse refused, and why, so a
+    rejected request is not mistaken for a trace that is not ready yet."""
+    if log is None:
+        return
+    body = json.dumps(resp.body) if resp.body is not None else ""
+    log(f"hurt {step} failed: HTTP {resp.status} {body[:300]}".rstrip())
+
+
 def trace_exists(client: LangfuseClient, trace_id: str) -> bool:
     return client.get(f"/api/public/traces/{trace_id}").status == 200
 
@@ -136,12 +148,14 @@ def _find_matching_score_config(client: LangfuseClient) -> Optional[str]:
                 # An archived config can't take new scores in Langfuse —
                 # treat it as absent so a fresh, usable one gets created.
                 continue
-            values = {
-                c.get("value")
+            # Langfuse stores each category as a numeric value and a label;
+            # the label is the category name a score is sent with.
+            labels = {
+                c.get("label")
                 for c in config.get("categories") or []
                 if isinstance(c, dict)
             }
-            if values == set(CATEGORIES):
+            if labels == set(CATEGORIES):
                 config_id = config.get("id")
                 if isinstance(config_id, str):
                     return config_id
@@ -152,7 +166,7 @@ def _find_matching_score_config(client: LangfuseClient) -> Optional[str]:
         page += 1
 
 
-def ensure_score_config(client: LangfuseClient) -> Optional[str]:
+def ensure_score_config(client: LangfuseClient, log: Log = None) -> Optional[str]:
     """Idempotent: reuse an existing 'hurt' categorical config with the
     right taxonomy, or create one. Returns the config's id, or None on
     failure. Provisioning lives here — done once by the component that
@@ -166,16 +180,21 @@ def ensure_score_config(client: LangfuseClient) -> Optional[str]:
         {
             "name": SCORE_CONFIG_NAME,
             "dataType": "CATEGORICAL",
-            "categories": [{"value": category, "label": category} for category in CATEGORIES],
+            # Langfuse requires a number as each category's value.
+            "categories": [
+                {"value": index, "label": category}
+                for index, category in enumerate(CATEGORIES)
+            ],
         },
     )
     if resp.status not in (200, 201) or not isinstance(resp.body, dict):
+        _report_failure(log, "score-config create", resp)
         return None
     config_id = resp.body.get("id")
     return config_id if isinstance(config_id, str) else None
 
 
-def tag_trace(client: LangfuseClient, trace_id: str) -> bool:
+def tag_trace(client: LangfuseClient, trace_id: str, log: Log = None) -> bool:
     resp = client.post(
         "/api/public/ingestion",
         {
@@ -189,10 +208,15 @@ def tag_trace(client: LangfuseClient, trace_id: str) -> bool:
             ]
         },
     )
-    return resp.status in (200, 207)
+    if resp.status in (200, 207):
+        return True
+    _report_failure(log, "tag", resp)
+    return False
 
 
-def post_score(client: LangfuseClient, trace_id: str, category: str, config_id: str) -> bool:
+def post_score(
+    client: LangfuseClient, trace_id: str, category: str, config_id: str, log: Log = None
+) -> bool:
     resp = client.post(
         "/api/public/scores",
         {
@@ -203,10 +227,15 @@ def post_score(client: LangfuseClient, trace_id: str, category: str, config_id: 
             "configId": config_id,
         },
     )
-    return resp.status in (200, 201)
+    if resp.status in (200, 201):
+        return True
+    _report_failure(log, "score", resp)
+    return False
 
 
-def post_comment(client: LangfuseClient, project_id: str, trace_id: str, content: str) -> bool:
+def post_comment(
+    client: LangfuseClient, project_id: str, trace_id: str, content: str, log: Log = None
+) -> bool:
     resp = client.post(
         "/api/public/comments",
         {
@@ -216,7 +245,10 @@ def post_comment(client: LangfuseClient, project_id: str, trace_id: str, content
             "content": content,
         },
     )
-    return resp.status in (200, 201)
+    if resp.status in (200, 201):
+        return True
+    _report_failure(log, "comment", resp)
+    return False
 
 
 # ----------------- Pending queue I/O -----------------
@@ -262,6 +294,7 @@ def _attempt_annotation(
     record: Dict[str, Any],
     project_id_cache: Dict[str, Optional[str]],
     config_id_cache: Dict[str, Optional[str]],
+    log: Log = None,
 ) -> bool:
     """Try to fully attach one record. Returns True only if the trace exists
     and all three writes (tag, score, comment) succeeded."""
@@ -275,14 +308,14 @@ def _attempt_annotation(
         return False
 
     if "value" not in config_id_cache:
-        config_id_cache["value"] = ensure_score_config(client)
+        config_id_cache["value"] = ensure_score_config(client, log)
     config_id = config_id_cache["value"]
     if config_id is None:
         return False
 
-    tagged = tag_trace(client, record["trace_id"])
-    scored = post_score(client, record["trace_id"], record["category"], config_id)
-    commented = post_comment(client, project_id, record["trace_id"], record["comment"])
+    tagged = tag_trace(client, record["trace_id"], log)
+    scored = post_score(client, record["trace_id"], record["category"], config_id, log)
+    commented = post_comment(client, project_id, record["trace_id"], record["comment"], log)
     return tagged and scored and commented
 
 
@@ -325,7 +358,7 @@ def process_pending_hurts(
 
         completed = False
         try:
-            completed = _attempt_annotation(client, record, project_id_cache, config_id_cache)
+            completed = _attempt_annotation(client, record, project_id_cache, config_id_cache, log)
         except Exception as e:
             _log(f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
 
