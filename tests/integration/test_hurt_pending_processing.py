@@ -183,11 +183,36 @@ def test_process_pending_hurts_keeps_record_queued_on_partial_write_failure(
     full_success_routes(module, client)
     client.when_post("/api/public/scores", module.HttpResponse(status=500, body=None))
     install_fake_client(module, monkeypatch, client)
+    logged: list[str] = []
 
-    attached = module.process_pending_hurts(FakeConfig(), pending_file)
+    attached = module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert attached == 0
     assert json.loads(pending_file.read_text(encoding="utf-8")) == [record]
+    assert any("hurt score failed" in line and "HTTP 500" in line for line in logged)
+
+
+def test_process_pending_hurts_logs_each_refused_write(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The hook's own path logs a refused tag, score and comment write."""
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    write_pending(pending_file, [make_record(module)])
+
+    client = RoutedClient(module)
+    full_success_routes(module, client)
+    client.when_post("/api/public/ingestion", module.HttpResponse(status=401, body=None))
+    client.when_post("/api/public/scores", module.HttpResponse(status=400, body=None))
+    client.when_post("/api/public/comments", module.HttpResponse(status=503, body=None))
+    install_fake_client(module, monkeypatch, client)
+    logged: list[str] = []
+
+    module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
+
+    assert any("hurt tag failed" in line and "HTTP 401" in line for line in logged)
+    assert any("hurt score failed" in line and "HTTP 400" in line for line in logged)
+    assert any("hurt comment failed" in line and "HTTP 503" in line for line in logged)
 
 
 def test_process_pending_hurts_logs_a_refused_score_config_and_keeps_the_record(
