@@ -16,9 +16,15 @@ Queue file: ~/.claude/state/hurt_pending.json — a JSON array of objects:
     comment     str, the operator's own words
     created     str, ISO 8601 UTC timestamp
     session_id  str, for log correlation only — never read here
+    done        list of str, written here, never by mate-hurt: the writes
+                ("tag", "score", "comment") already accepted for this entry.
+                Absent means none. mate-hurt appends under the same lock and
+                rewrites the array as read, so it keeps this field.
 
 An entry is removed only once every write for it (tag, score, comment) has
-succeeded. A hurt that can't yet be attached — Langfuse unreachable, the
+succeeded. A retry sends only the writes not yet in `done`, because a
+comment sent twice shows twice. The score also carries the entry's id and
+creation time, so Langfuse keeps one score even if it is sent again. A hurt that can't yet be attached — Langfuse unreachable, the
 trace not yet uploaded, credentials misconfigured — stays queued and is
 retried the next time any Claude Code session's hook fires; it is never
 dropped optimistically. Entries older than PENDING_MAX_AGE_DAYS that still
@@ -49,6 +55,8 @@ CATEGORIES = (
 )
 
 SCORE_CONFIG_NAME = "hurt"
+
+STEPS = ("tag", "score", "comment")
 
 # Bound on how long an unresolvable pending hurt is retried before it is
 # dropped, mirroring the hook's own 30-day session-state pruning.
@@ -101,6 +109,18 @@ class LangfuseClient:
         return self._request("POST", path, body)
 
 
+Log = Optional[Callable[[str], None]]
+
+
+def _report_failure(log: Log, step: str, resp: HttpResponse) -> None:
+    """Say in the hook log which write Langfuse refused, and why, so a
+    rejected request is not mistaken for a trace that is not ready yet."""
+    if log is None:
+        return
+    body = json.dumps(resp.body) if resp.body is not None else ""
+    log(f"hurt {step} failed: HTTP {resp.status} {body[:300]}".rstrip())
+
+
 def trace_exists(client: LangfuseClient, trace_id: str) -> bool:
     return client.get(f"/api/public/traces/{trace_id}").status == 200
 
@@ -136,12 +156,14 @@ def _find_matching_score_config(client: LangfuseClient) -> Optional[str]:
                 # An archived config can't take new scores in Langfuse —
                 # treat it as absent so a fresh, usable one gets created.
                 continue
-            values = {
-                c.get("value")
+            # Langfuse stores each category as a numeric value and a label;
+            # the label is the category name a score is sent with.
+            labels = {
+                c.get("label")
                 for c in config.get("categories") or []
                 if isinstance(c, dict)
             }
-            if values == set(CATEGORIES):
+            if labels == set(CATEGORIES):
                 config_id = config.get("id")
                 if isinstance(config_id, str):
                     return config_id
@@ -152,7 +174,7 @@ def _find_matching_score_config(client: LangfuseClient) -> Optional[str]:
         page += 1
 
 
-def ensure_score_config(client: LangfuseClient) -> Optional[str]:
+def ensure_score_config(client: LangfuseClient, log: Log = None) -> Optional[str]:
     """Idempotent: reuse an existing 'hurt' categorical config with the
     right taxonomy, or create one. Returns the config's id, or None on
     failure. Provisioning lives here — done once by the component that
@@ -166,16 +188,21 @@ def ensure_score_config(client: LangfuseClient) -> Optional[str]:
         {
             "name": SCORE_CONFIG_NAME,
             "dataType": "CATEGORICAL",
-            "categories": [{"value": category, "label": category} for category in CATEGORIES],
+            # Langfuse requires a number as each category's value.
+            "categories": [
+                {"value": index, "label": category}
+                for index, category in enumerate(CATEGORIES)
+            ],
         },
     )
     if resp.status not in (200, 201) or not isinstance(resp.body, dict):
+        _report_failure(log, "score-config create", resp)
         return None
     config_id = resp.body.get("id")
     return config_id if isinstance(config_id, str) else None
 
 
-def tag_trace(client: LangfuseClient, trace_id: str) -> bool:
+def tag_trace(client: LangfuseClient, trace_id: str, log: Log = None) -> bool:
     resp = client.post(
         "/api/public/ingestion",
         {
@@ -189,24 +216,45 @@ def tag_trace(client: LangfuseClient, trace_id: str) -> bool:
             ]
         },
     )
-    return resp.status in (200, 207)
+    if resp.status in (200, 207):
+        return True
+    _report_failure(log, "tag", resp)
+    return False
 
 
-def post_score(client: LangfuseClient, trace_id: str, category: str, config_id: str) -> bool:
-    resp = client.post(
-        "/api/public/scores",
-        {
-            "traceId": trace_id,
-            "name": SCORE_CONFIG_NAME,
-            "dataType": "CATEGORICAL",
-            "value": category,
-            "configId": config_id,
-        },
-    )
-    return resp.status in (200, 201)
+def post_score(
+    client: LangfuseClient,
+    trace_id: str,
+    category: str,
+    config_id: str,
+    log: Log = None,
+    *,
+    score_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+) -> bool:
+    body = {
+        "traceId": trace_id,
+        "name": SCORE_CONFIG_NAME,
+        "dataType": "CATEGORICAL",
+        "value": category,
+        "configId": config_id,
+    }
+    # Langfuse replaces a score sent again with the same id, name and
+    # timestamp instead of adding a second one.
+    if score_id:
+        body["id"] = score_id
+    if timestamp:
+        body["timestamp"] = timestamp
+    resp = client.post("/api/public/scores", body)
+    if resp.status in (200, 201):
+        return True
+    _report_failure(log, "score", resp)
+    return False
 
 
-def post_comment(client: LangfuseClient, project_id: str, trace_id: str, content: str) -> bool:
+def post_comment(
+    client: LangfuseClient, project_id: str, trace_id: str, content: str, log: Log = None
+) -> bool:
     resp = client.post(
         "/api/public/comments",
         {
@@ -216,7 +264,10 @@ def post_comment(client: LangfuseClient, project_id: str, trace_id: str, content
             "content": content,
         },
     )
-    return resp.status in (200, 201)
+    if resp.status in (200, 201):
+        return True
+    _report_failure(log, "comment", resp)
+    return False
 
 
 # ----------------- Pending queue I/O -----------------
@@ -257,14 +308,34 @@ def _is_expired(record: Dict[str, Any], now: datetime) -> bool:
     return now - created_ts > timedelta(days=PENDING_MAX_AGE_DAYS)
 
 
+def _score_timestamp(record: Dict[str, Any]) -> Optional[str]:
+    created = record.get("created")
+    if not isinstance(created, str):
+        return None
+    try:
+        return datetime.fromisoformat(created.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        return None
+
+
+def _done_steps(record: Dict[str, Any]) -> List[str]:
+    done = record.get("done")
+    if not isinstance(done, list):
+        return []
+    return [step for step in STEPS if step in done]
+
+
 def _attempt_annotation(
     client: LangfuseClient,
     record: Dict[str, Any],
     project_id_cache: Dict[str, Optional[str]],
     config_id_cache: Dict[str, Optional[str]],
+    log: Log = None,
 ) -> bool:
-    """Try to fully attach one record. Returns True only if the trace exists
-    and all three writes (tag, score, comment) succeeded."""
+    """Try to fully attach one record. Returns True only once all three
+    writes (tag, score, comment) have succeeded, in this run or an earlier
+    one. Each write that succeeds is added to record["done"] at once, so the
+    caller can save progress even when a later write fails."""
     if not trace_exists(client, record["trace_id"]):
         return False
 
@@ -275,15 +346,32 @@ def _attempt_annotation(
         return False
 
     if "value" not in config_id_cache:
-        config_id_cache["value"] = ensure_score_config(client)
+        config_id_cache["value"] = ensure_score_config(client, log)
     config_id = config_id_cache["value"]
     if config_id is None:
         return False
 
-    tagged = tag_trace(client, record["trace_id"])
-    scored = post_score(client, record["trace_id"], record["category"], config_id)
-    commented = post_comment(client, project_id, record["trace_id"], record["comment"])
-    return tagged and scored and commented
+    writes = {
+        "tag": lambda: tag_trace(client, record["trace_id"], log),
+        "score": lambda: post_score(
+            client,
+            record["trace_id"],
+            record["category"],
+            config_id,
+            log,
+            score_id=record.get("id") if isinstance(record.get("id"), str) else None,
+            timestamp=_score_timestamp(record),
+        ),
+        "comment": lambda: post_comment(client, project_id, record["trace_id"], record["comment"], log),
+    }
+    done = _done_steps(record)
+    for step in STEPS:
+        if step in done:
+            continue
+        if writes[step]():
+            done.append(step)
+            record["done"] = [s for s in STEPS if s in done]
+    return len(done) == len(STEPS)
 
 
 def process_pending_hurts(
@@ -317,6 +405,7 @@ def process_pending_hurts(
     remaining: List[Dict[str, Any]] = []
     attached = 0
     dropped = 0
+    progressed = False
 
     for record in records:
         if not _is_well_formed(record):
@@ -324,8 +413,9 @@ def process_pending_hurts(
             continue
 
         completed = False
+        done_before = _done_steps(record)
         try:
-            completed = _attempt_annotation(client, record, project_id_cache, config_id_cache)
+            completed = _attempt_annotation(client, record, project_id_cache, config_id_cache, log)
         except Exception as e:
             _log(f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
 
@@ -336,7 +426,8 @@ def process_pending_hurts(
             _log(f"Dropping pending hurt {record.get('id')}: unresolved after {PENDING_MAX_AGE_DAYS} days")
         else:
             remaining.append(record)
+            progressed = progressed or _done_steps(record) != done_before
 
-    if attached or dropped:
+    if attached or dropped or progressed:
         save_pending_hurts(pending_file, remaining)
     return attached
