@@ -17,15 +17,23 @@ Queue file: ~/.claude/state/hurt_pending.json — a JSON array of objects:
     created     str, ISO 8601 UTC timestamp
     session_id  str, for log correlation only — never read here
     done        list of str, written here, never by mate-hurt: the writes
-                ("tag", "score", "comment") already accepted for this entry.
-                Absent means none. mate-hurt appends under the same lock and
-                rewrites the array as read, so it keeps this field.
+                ("score", "comment") already accepted for this entry.
+                Absent means none. Entries queued by older versions can also
+                hold "tag"; it is ignored. mate-hurt appends under the same
+                lock and rewrites the array as read, so it keeps this field.
 
-An entry is removed only once every write for it (tag, score, comment) has
+An entry is removed only once both its writes (score, comment) have
 succeeded. A retry sends only the writes not yet in `done`, because a
 comment sent twice shows twice. The score also carries the entry's id and
-creation time, so Langfuse keeps one score even if it is sent again. A hurt that can't yet be attached — Langfuse unreachable, the
-trace not yet uploaded, credentials misconfigured — stays queued and is
+creation time, so Langfuse keeps one score even if it is sent again. Hurts
+are found in Langfuse by their `hurt` score; no tag is written.
+
+Whether the trace is there is asked of the v2 Observations API, which
+Langfuse Cloud and self-hosted Langfuse v4 serve. A trace not there yet
+keeps its hurt queued for a later run.
+
+A hurt that can't yet be attached — Langfuse unreachable, the trace not
+yet uploaded, credentials misconfigured — stays queued and is
 retried the next time any Claude Code session's hook fires; it is never
 dropped optimistically. Entries older than PENDING_MAX_AGE_DAYS that still
 can't resolve are dropped so the queue doesn't grow without bound — logged,
@@ -37,13 +45,13 @@ from __future__ import annotations
 import base64
 import json
 import os
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib import error as urlerror
 from urllib import request as urlrequest
+from urllib.parse import urlencode
 
 CATEGORIES = (
     "correction-repeated",
@@ -56,11 +64,16 @@ CATEGORIES = (
 
 SCORE_CONFIG_NAME = "hurt"
 
-STEPS = ("tag", "score", "comment")
+STEPS = ("score", "comment")
 
 # Bound on how long an unresolvable pending hurt is retried before it is
 # dropped, mirroring the hook's own 30-day session-state pruning.
 PENDING_MAX_AGE_DAYS = 30
+
+# The trace lookup needs a time range. A hurt targets the session's latest
+# turn, which started before the hurt was queued — days before when an old
+# session is resumed — so the range reaches this far back from that moment.
+TRACE_LOOKBACK_DAYS = 30
 
 
 # ----------------- Minimal Langfuse REST client -----------------
@@ -121,8 +134,38 @@ def _report_failure(log: Log, step: str, resp: HttpResponse) -> None:
     log(f"hurt {step} failed: HTTP {resp.status} {body[:300]}".rstrip())
 
 
-def trace_exists(client: LangfuseClient, trace_id: str) -> bool:
-    return client.get(f"/api/public/traces/{trace_id}").status == 200
+def _iso_utc(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def trace_exists(
+    client: LangfuseClient,
+    trace_id: str,
+    queued_at: datetime,
+    now: datetime,
+    log: Log = None,
+) -> bool:
+    """True once at least one observation of the trace is in the project.
+
+    queued_at is when the hurt was queued; the trace is looked for from
+    TRACE_LOOKBACK_DAYS before it up to now. A refused lookup is logged;
+    an unreachable Langfuse is not."""
+    query = urlencode(
+        {
+            "traceId": trace_id,
+            "fields": "core",
+            "limit": 1,
+            "fromStartTime": _iso_utc(queued_at - timedelta(days=TRACE_LOOKBACK_DAYS)),
+            "toStartTime": _iso_utc(now),
+        }
+    )
+    resp = client.get(f"/api/public/v2/observations?{query}")
+    if resp.status != 200 or not isinstance(resp.body, dict):
+        if resp.status != 0:
+            _report_failure(log, "trace lookup", resp)
+        return False
+    rows = resp.body.get("data")
+    return isinstance(rows, list) and len(rows) > 0
 
 
 def resolve_project_id(client: LangfuseClient) -> Optional[str]:
@@ -200,26 +243,6 @@ def ensure_score_config(client: LangfuseClient, log: Log = None) -> Optional[str
         return None
     config_id = resp.body.get("id")
     return config_id if isinstance(config_id, str) else None
-
-
-def tag_trace(client: LangfuseClient, trace_id: str, log: Log = None) -> bool:
-    resp = client.post(
-        "/api/public/ingestion",
-        {
-            "batch": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "type": "trace-create",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "body": {"id": trace_id, "tags": ["hurt"]},
-                }
-            ]
-        },
-    )
-    if resp.status in (200, 207):
-        return True
-    _report_failure(log, "tag", resp)
-    return False
 
 
 def post_score(
@@ -308,14 +331,19 @@ def _is_expired(record: Dict[str, Any], now: datetime) -> bool:
     return now - created_ts > timedelta(days=PENDING_MAX_AGE_DAYS)
 
 
-def _score_timestamp(record: Dict[str, Any]) -> Optional[str]:
+def _created_at(record: Dict[str, Any]) -> Optional[datetime]:
     created = record.get("created")
     if not isinstance(created, str):
         return None
     try:
-        return datetime.fromisoformat(created.replace("Z", "+00:00")).isoformat()
+        return datetime.fromisoformat(created.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _score_timestamp(record: Dict[str, Any]) -> Optional[str]:
+    created = _created_at(record)
+    return created.isoformat() if created is not None else None
 
 
 def _done_steps(record: Dict[str, Any]) -> List[str]:
@@ -330,13 +358,15 @@ def _attempt_annotation(
     record: Dict[str, Any],
     project_id_cache: Dict[str, Optional[str]],
     config_id_cache: Dict[str, Optional[str]],
+    now: datetime,
     log: Log = None,
 ) -> bool:
-    """Try to fully attach one record. Returns True only once all three
-    writes (tag, score, comment) have succeeded, in this run or an earlier
-    one. Each write that succeeds is added to record["done"] at once, so the
-    caller can save progress even when a later write fails."""
-    if not trace_exists(client, record["trace_id"]):
+    """Try to fully attach one record. Returns True only once both writes
+    (score, comment) have succeeded, in this run or an earlier one. Each
+    write that succeeds is added to record["done"] at once, so the caller
+    can save progress even when a later write fails."""
+    queued_at = _created_at(record) or now
+    if not trace_exists(client, record["trace_id"], queued_at, now, log):
         return False
 
     if "value" not in project_id_cache:
@@ -352,7 +382,6 @@ def _attempt_annotation(
         return False
 
     writes = {
-        "tag": lambda: tag_trace(client, record["trace_id"], log),
         "score": lambda: post_score(
             client,
             record["trace_id"],
@@ -415,7 +444,7 @@ def process_pending_hurts(
         completed = False
         done_before = _done_steps(record)
         try:
-            completed = _attempt_annotation(client, record, project_id_cache, config_id_cache, log)
+            completed = _attempt_annotation(client, record, project_id_cache, config_id_cache, now, log)
         except Exception as e:
             _log(f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
 

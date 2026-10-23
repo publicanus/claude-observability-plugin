@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 
 class FakeConfig:
@@ -16,8 +17,9 @@ class FakeConfig:
 class RoutedClient:
     """Stand-in for LangfuseClient, installed via monkeypatch so
     process_pending_hurts talks to it instead of the network. Routes are
-    keyed by exact path; a route may be a response, a list of responses
-    consumed in order, or an exception instance to raise."""
+    keyed by path prefix; a route may be a response, a list of responses
+    consumed in order, a function of the full path, or an exception
+    instance to raise."""
 
     def __init__(self, module: Any) -> None:
         self._module = module
@@ -36,6 +38,8 @@ class RoutedClient:
             if path == prefix or path.startswith(prefix):
                 if isinstance(response, list):
                     return response.pop(0) if response else self._module.HttpResponse(status=404, body=None)
+                if callable(response):
+                    return response(path)
                 return response
         return self._module.HttpResponse(status=404, body=None)
 
@@ -76,8 +80,45 @@ def make_record(module: Any, **overrides: Any) -> dict:
     return record
 
 
-def full_success_routes(module: Any, client: RoutedClient, trace_id: str = "tid-123") -> None:
-    client.when_get(f"/api/public/traces/{trace_id}", module.HttpResponse(status=200, body={"id": trace_id}))
+OBSERVATIONS_V2 = "/api/public/v2/observations"
+
+
+class FakeV4Observations:
+    """Answers GET /api/public/v2/observations the way a Langfuse v4 project
+    does (ObservationsV2Response in Langfuse's OpenAPI spec): a `data` list
+    of observation rows and a `meta` object whose `cursor` is absent when
+    there is no next page. A trace counts as uploaded once it is in
+    `uploaded`; its rows are only returned for the trace asked for in the
+    `traceId` query parameter."""
+
+    def __init__(self, module: Any, uploaded: set[str] | None = None) -> None:
+        self._module = module
+        self.uploaded = set(uploaded or ())
+        self.queries: list[dict[str, list[str]]] = []
+
+    def __call__(self, path: str) -> Any:
+        query = parse_qs(urlsplit(path).query)
+        self.queries.append(query)
+        trace_id = query.get("traceId", [None])[0]
+        rows = []
+        if trace_id in self.uploaded:
+            rows.append(
+                {
+                    "id": f"obs-{trace_id}",
+                    "traceId": trace_id,
+                    "startTime": "2026-10-23T10:00:00.000Z",
+                    "endTime": "2026-10-23T10:00:05.000Z",
+                    "projectId": "proj-1",
+                    "parentObservationId": None,
+                    "type": "SPAN",
+                }
+            )
+        return self._module.HttpResponse(status=200, body={"data": rows, "meta": {}})
+
+
+def full_success_routes(module: Any, client: RoutedClient, trace_id: str = "tid-123") -> FakeV4Observations:
+    observations = FakeV4Observations(module, {trace_id})
+    client.when_get(OBSERVATIONS_V2, observations)
     client.when_get("/api/public/projects", module.HttpResponse(status=200, body={"data": [{"id": "proj-1"}]}))
     client.when_get(
         "/api/public/score-configs",
@@ -98,28 +139,45 @@ def full_success_routes(module: Any, client: RoutedClient, trace_id: str = "tid-
             },
         ),
     )
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=200, body={}))
     client.when_post("/api/public/scores", module.HttpResponse(status=201, body={"id": "score-1"}))
     client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "comment-1"}))
+    return observations
 
 
 # ----------------- happy path -----------------
 
-def test_process_pending_hurts_attaches_and_removes_a_complete_record(
+def test_on_a_v4_project_a_queued_hurt_attaches_its_score_and_comment_and_leaves_the_queue(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
+    """Langfuse v4 replies only: the trace is found through the v2
+    Observations API, and nothing calls the legacy trace or ingestion API
+    that Langfuse Cloud removes."""
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module)])
+    write_pending(pending_file, [make_record(module, category="redone-work", comment="had to redo the export")])
 
     client = RoutedClient(module)
     full_success_routes(module, client)
     install_fake_client(module, monkeypatch, client)
+    logged: list[str] = []
 
-    attached = module.process_pending_hurts(FakeConfig(), pending_file)
+    attached = module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert attached == 1
     assert json.loads(pending_file.read_text(encoding="utf-8")) == []
+    score_bodies = [body for method, path, body in client.calls if path == "/api/public/scores"]
+    assert len(score_bodies) == 1
+    assert score_bodies[0]["traceId"] == "tid-123"
+    assert score_bodies[0]["name"] == "hurt"
+    assert score_bodies[0]["value"] == "redone-work"
+    comment_bodies = [body for method, path, body in client.calls if path == "/api/public/comments"]
+    assert comment_bodies == [
+        {"projectId": "proj-1", "objectType": "TRACE", "objectId": "tid-123", "content": "had to redo the export"}
+    ]
+    paths = [path for _, path, _ in client.calls]
+    assert not any(path.startswith("/api/public/traces") for path in paths)
+    assert "/api/public/ingestion" not in paths
+    assert not any("failed" in line for line in logged)
 
 
 def test_process_pending_hurts_caches_project_and_config_across_records(
@@ -136,8 +194,8 @@ def test_process_pending_hurts_caches_project_and_config_across_records(
     )
 
     client = RoutedClient(module)
-    full_success_routes(module, client, trace_id="tid-1")
-    client.when_get("/api/public/traces/tid-2", module.HttpResponse(status=200, body={"id": "tid-2"}))
+    observations = full_success_routes(module, client, trace_id="tid-1")
+    observations.uploaded.add("tid-2")
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
@@ -160,7 +218,8 @@ def test_process_pending_hurts_keeps_record_queued_when_trace_not_yet_uploaded(
     write_pending(pending_file, [record])
 
     client = RoutedClient(module)
-    client.when_get("/api/public/traces/tid-123", module.HttpResponse(status=404, body=None))
+    observations = full_success_routes(module, client)
+    observations.uploaded.clear()
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
@@ -169,6 +228,11 @@ def test_process_pending_hurts_keeps_record_queued_when_trace_not_yet_uploaded(
     remaining = json.loads(pending_file.read_text(encoding="utf-8"))
     assert remaining == [record]
     assert not any(method == "POST" for method, _, _ in client.calls)
+
+    # The trace arrives in the project; a later run attaches the hurt.
+    observations.uploaded.add("tid-123")
+    assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == []
 
 
 def test_process_pending_hurts_keeps_record_queued_on_partial_write_failure(
@@ -188,21 +252,20 @@ def test_process_pending_hurts_keeps_record_queued_on_partial_write_failure(
     attached = module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert attached == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag", "comment"]}]
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["comment"]}]
     assert any("hurt score failed" in line and "HTTP 500" in line for line in logged)
 
 
 def test_process_pending_hurts_logs_each_refused_write(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """The hook's own path logs a refused tag, score and comment write."""
+    """The hook's own path logs a refused score and comment write."""
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
     write_pending(pending_file, [make_record(module)])
 
     client = RoutedClient(module)
     full_success_routes(module, client)
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=401, body=None))
     client.when_post("/api/public/scores", module.HttpResponse(status=400, body=None))
     client.when_post("/api/public/comments", module.HttpResponse(status=503, body=None))
     install_fake_client(module, monkeypatch, client)
@@ -210,7 +273,6 @@ def test_process_pending_hurts_logs_each_refused_write(
 
     module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
-    assert any("hurt tag failed" in line and "HTTP 401" in line for line in logged)
     assert any("hurt score failed" in line and "HTTP 400" in line for line in logged)
     assert any("hurt comment failed" in line and "HTTP 503" in line for line in logged)
 
@@ -263,8 +325,8 @@ def test_retry_after_score_failure_sends_only_the_score(
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert posts(client) == ["/api/public/ingestion", "/api/public/scores", "/api/public/comments"]
-    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["tag", "comment"]
+    assert posts(client) == ["/api/public/scores", "/api/public/comments"]
+    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["comment"]
 
     client.calls.clear()
     client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "s"}))
@@ -285,7 +347,7 @@ def test_retry_after_comment_failure_sends_only_the_comment(
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["tag", "score"]
+    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["score"]
 
     client.calls.clear()
     client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "c"}))
@@ -329,7 +391,7 @@ def test_rate_limited_write_leaves_the_entry_queued_with_its_progress(
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag", "comment"]}]
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["comment"]}]
 
 
 def test_entry_with_unusable_done_field_is_treated_as_nothing_done(
@@ -337,13 +399,47 @@ def test_entry_with_unusable_done_field_is_treated_as_nothing_done(
 ) -> None:
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module, done="tag")])
+    write_pending(pending_file, [make_record(module, done="score")])
     client = RoutedClient(module)
     full_success_routes(module, client)
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
-    assert posts(client) == ["/api/public/ingestion", "/api/public/scores", "/api/public/comments"]
+    assert posts(client) == ["/api/public/scores", "/api/public/comments"]
+
+
+# ----------------- hurts queued before the tag was dropped -----------------
+
+def test_queued_hurt_whose_score_is_on_the_trace_but_comment_is_not_gets_the_comment_once(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The example in the work item: an entry queued by the old hook, whose
+    tag and score were written but whose comment was not."""
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    write_pending(pending_file, [make_record(module, done=["tag", "score"])])
+    client = RoutedClient(module)
+    full_success_routes(module, client)
+    install_fake_client(module, monkeypatch, client)
+
+    assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
+    assert posts(client) == ["/api/public/comments"]
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == []
+
+
+def test_queued_hurt_with_only_its_tag_done_gets_score_and_comment(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    write_pending(pending_file, [make_record(module, done=["tag"])])
+    client = RoutedClient(module)
+    full_success_routes(module, client)
+    install_fake_client(module, monkeypatch, client)
+
+    assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
+    assert posts(client) == ["/api/public/scores", "/api/public/comments"]
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == []
 
 
 def test_process_pending_hurts_keeps_record_queued_when_client_raises(
@@ -357,7 +453,7 @@ def test_process_pending_hurts_keeps_record_queued_when_client_raises(
     write_pending(pending_file, [record])
 
     client = RoutedClient(module)
-    client.when_get("/api/public/traces/tid-123", ConnectionError("network unreachable"))
+    client.when_get(OBSERVATIONS_V2, ConnectionError("network unreachable"))
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
@@ -403,7 +499,7 @@ def test_process_pending_hurts_drops_expired_unresolvable_record(
     write_pending(pending_file, [record])
 
     client = RoutedClient(module)
-    client.when_get("/api/public/traces/tid-123", module.HttpResponse(status=404, body=None))
+    client.when_get(OBSERVATIONS_V2, FakeV4Observations(module))
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
