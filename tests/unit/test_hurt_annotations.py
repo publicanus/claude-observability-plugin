@@ -102,6 +102,16 @@ def test_trace_exists_false_and_logged_when_the_lookup_is_refused(hurt_annotatio
     assert "trace lookup" in logged[0] and "HTTP 400" in logged[0]
 
 
+def test_trace_exists_false_and_logged_when_the_reply_has_no_data_list(hurt_annotations_module: Any) -> None:
+    module = hurt_annotations_module
+    client = FakeClient(module)
+    client.when_get("/api/public/v2/observations", module.HttpResponse(status=200, body={"rows": []}))
+    logged: list[str] = []
+    assert module.trace_exists(client, "tid", QUEUED, NOW, logged.append) is False
+    assert len(logged) == 1
+    assert "trace lookup" in logged[0] and "HTTP 200" in logged[0]
+
+
 def test_trace_exists_asks_for_one_row_of_the_trace_in_a_window_around_the_hurt(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)

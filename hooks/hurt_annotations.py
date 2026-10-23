@@ -165,7 +165,10 @@ def trace_exists(
             _report_failure(log, "trace lookup", resp)
         return False
     rows = resp.body.get("data")
-    return isinstance(rows, list) and len(rows) > 0
+    if not isinstance(rows, list):
+        _report_failure(log, "trace lookup", resp)
+        return False
+    return len(rows) > 0
 
 
 def resolve_project_id(client: LangfuseClient) -> Optional[str]:
