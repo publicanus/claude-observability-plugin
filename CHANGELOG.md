@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.4.1...v1.5.0) (2026-10-24)
+
+
+### Features
+
+* **hook:** each trace carries the real user without anyone typing it ([#27](https://github.com/publicanus/claude-observability-plugin/issues/27)) ([b99bb9e](https://github.com/publicanus/claude-observability-plugin/commit/b99bb9e795be3a4c127f5449a0952808f005113f))
+
+
+### Bug Fixes
+
+* **hook:** queued /hurt annotations keep attaching on Langfuse v4 ([#26](https://github.com/publicanus/claude-observability-plugin/issues/26)) ([09921e8](https://github.com/publicanus/claude-observability-plugin/commit/09921e84162843b874dc390f10fa4cb6308804ec))
+
 ## [1.4.1](https://github.com/publicanus/claude-observability-plugin/compare/v1.4.0...v1.4.1) (2026-10-15)
 
 
