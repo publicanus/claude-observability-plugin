@@ -218,6 +218,16 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "LOG_FILE", state_dir / "langfuse_hook.log")
     monkeypatch.setattr(hook_module, "HURT_PENDING_FILE", state_dir / "hurt_pending.json")
     monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
+    # The trace-user lookup reads ~/.claude.json and git config; keep both off
+    # the real machine. The chdir covers a payload without a cwd, where git
+    # runs in the hook's own directory.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(hook_module, "CLAUDE_JSON_FILE", home / ".claude.json")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.chdir(home)
     # _get_logger() caches its handler in this module-level global on first
     # use, and logging.getLogger("langfuse_hook") is itself a process-wide
     # singleton keyed by name — resetting only the module global still

@@ -29,7 +29,7 @@
     "LANGFUSE_USER_ID": {
       "type": "string",
       "title": "User ID",
-      "description": "Optional user identifier attached to every trace (shown as the user in Langfuse). Leave empty to omit."
+      "description": "Optional user identifier attached to every trace (shown as the user in Langfuse). Leave empty to use your Claude login email, or else your git email."
     },
     "CC_LANGFUSE_DEBUG": {
       "type": "boolean",
