@@ -67,9 +67,8 @@ def test_login_email_is_the_user_when_no_explicit_config(hook_module, traced, tm
         None,  # no ~/.claude.json at all
         json.dumps({"numStartups": 3}),  # not logged in
         json.dumps({"oauthAccount": {"emailAddress": ""}}),
-        "{not json",
     ],
-    ids=["no-file", "no-oauth-account", "empty-email", "unreadable"],
+    ids=["no-file", "no-oauth-account", "empty-email"],
 )
 def test_git_email_of_the_session_dir_is_the_user_without_a_login_email(
     hook_module, traced, tmp_path, claude_json_content
@@ -94,8 +93,10 @@ def test_no_user_when_neither_login_nor_git_email(hook_module, traced, tmp_path,
     assert config.user_id is None
 
 
-def test_hook_resolves_git_email_from_the_payload_cwd(hook_module, traced, monkeypatch, tmp_path):
-    repo = make_repo(tmp_path / "repo", "git@example.com")
+def run_hook(
+    hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, tmp_path: Path, fake_langfuse: Any, cwd: Path
+) -> tuple[Optional[str], Optional[str]]:
+    """Runs one Stop firing in cwd; returns the trace user and the system message shown, if any."""
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text("", encoding="utf-8")
     monkeypatch.setattr(
@@ -105,11 +106,52 @@ def test_hook_resolves_git_email_from_the_payload_cwd(hook_module, traced, monke
             "hook_event_name": "Stop",
             "session_id": "sess-user",
             "transcript_path": str(transcript),
-            "cwd": str(repo),
+            "cwd": str(cwd),
         },
     )
     seen = []
-    monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: seen.append(config))
+
+    def create_client(config: Any) -> Any:
+        seen.append(config)
+        return fake_langfuse
+
+    monkeypatch.setattr(hook_module, "create_langfuse_client", create_client)
 
     assert hook_module.main() == 0
-    assert [config.user_id for config in seen] == ["git@example.com"]
+    out = capsys.readouterr().out
+    message = json.loads(out)["systemMessage"] if out.strip() else None
+    return seen[0].user_id, message
+
+
+def test_hook_resolves_git_email_from_the_payload_cwd(
+    hook_module, traced, monkeypatch, capsys, tmp_path, fake_langfuse
+):
+    repo = make_repo(tmp_path / "repo", "git@example.com")
+
+    user, message = run_hook(hook_module, monkeypatch, capsys, tmp_path, fake_langfuse, repo)
+
+    assert (user, message) == ("git@example.com", None)
+
+
+def test_unreadable_login_file_attaches_no_user_and_says_so(
+    hook_module, traced, monkeypatch, capsys, tmp_path, fake_langfuse
+):
+    traced.write_text("{not json", encoding="utf-8")
+    repo = make_repo(tmp_path / "repo", "git@example.com")
+
+    user, message = run_hook(hook_module, monkeypatch, capsys, tmp_path, fake_langfuse, repo)
+
+    assert user is None
+    assert str(traced) in message
+
+
+def test_git_error_attaches_no_user_and_says_so(
+    hook_module, traced, monkeypatch, capsys, tmp_path, fake_langfuse
+):
+    repo = make_repo(tmp_path / "repo", "git@example.com")
+    (repo / ".git" / "config").write_text("[core\nbroken", encoding="utf-8")
+
+    user, message = run_hook(hook_module, monkeypatch, capsys, tmp_path, fake_langfuse, repo)
+
+    assert user is None
+    assert "bad config line 1" in message

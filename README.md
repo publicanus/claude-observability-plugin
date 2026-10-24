@@ -63,6 +63,8 @@ Each trace carries a user, so Langfuse can show usage per person. The hook takes
 
 With none of these, the trace has no user.
 
+If `~/.claude.json` or the git config exists but cannot be read, the hook does not move on to the next source. The trace has no user, and Claude Code shows a message that names the problem.
+
 ## Requirements
 
 One of:

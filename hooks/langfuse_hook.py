@@ -84,26 +84,36 @@ class LangfuseConfig:
     host: str
     user_id: Optional[str]
     trace_seed: Optional[str] = None
+    # Set when a source for the trace user exists but could not be read; shown to the user.
+    user_warning: Optional[str] = None
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
 
+class TraceUserError(Exception):
+    """A source for the trace user exists but could not be read."""
+
 def read_login_email() -> Optional[str]:
-    """The Claude login email from CLAUDE_JSON_FILE; None when not logged in or the file cannot be read."""
+    """The Claude login email from CLAUDE_JSON_FILE; None when there is no file or no login.
+
+    Raises TraceUserError when the file exists but cannot be read or parsed.
+    """
     try:
         data = json.loads(CLAUDE_JSON_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
-        info(f"Cannot read the login email from {CLAUDE_JSON_FILE}: {type(e).__name__}")
-        return None
+        raise TraceUserError(f"cannot read the login email from {CLAUDE_JSON_FILE}: {e}") from e
     account = data.get("oauthAccount") if isinstance(data, dict) else None
     email = account.get("emailAddress") if isinstance(account, dict) else None
     return email if isinstance(email, str) and email else None
+
+GIT_CONFIG_KEY_NOT_FOUND = 1
 
 def read_git_email(cwd: Optional[str]) -> Optional[str]:
     """`git config user.email` as git sees it from cwd (None: the hook's own directory).
 
     None when the email is unset, git is not installed, or cwd does not exist.
+    Raises TraceUserError, with git's error output, when git fails for another reason.
     """
     try:
         result = subprocess.run(
@@ -112,8 +122,12 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
     except OSError as e:
         debug(f"git config user.email could not run: {type(e).__name__}: {e}")
         return None
-    if result.returncode != 0:
+    if result.returncode == GIT_CONFIG_KEY_NOT_FOUND:
         return None
+    if result.returncode != 0:
+        raise TraceUserError(
+            f"`git config user.email` failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
     return result.stdout.strip() or None
 
 def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
@@ -121,6 +135,7 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
 
     The trace user is, in order: LANGFUSE_USER_ID or CC_LANGFUSE_USER_ID (env var or
     plugin userConfig), the Claude login email, `git config user.email` in cwd, or None.
+    When a source exists but cannot be read, the user is None and user_warning says why.
     """
     public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
     secret_key = _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY")
@@ -128,12 +143,18 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         return None
 
     host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com"
-    user_id = (
-        _opt("LANGFUSE_USER_ID")
-        or _opt("CC_LANGFUSE_USER_ID")
-        or read_login_email()
-        or read_git_email(cwd)
-    )
+    user_id = None
+    user_warning = None
+    try:
+        user_id = (
+            _opt("LANGFUSE_USER_ID")
+            or _opt("CC_LANGFUSE_USER_ID")
+            or read_login_email()
+            or read_git_email(cwd)
+        )
+    except TraceUserError as e:
+        user_warning = f"Langfuse: traces carry no user, because {e}"
+        info(user_warning)
     trace_seed = _opt("CC_LANGFUSE_TRACE_SEED") or None
 
     return LangfuseConfig(
@@ -142,6 +163,7 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         host=host,
         user_id=user_id,
         trace_seed=trace_seed,
+        user_warning=user_warning,
     )
 
 def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
@@ -2832,12 +2854,12 @@ def main() -> int:
             status, detail = get_delivery_status(config)
         info(format_processed_log(emitted, dur, session_id, status, detail))
 
-        # User-visible, unlike the line above: printed on every firing the
-        # status is bad, not rate-limited with the probe that produced it,
-        # and silent whenever it is healthy or not yet known.
-        warning = format_delivery_warning(status, detail)
-        if warning is not None:
-            print(json.dumps({"systemMessage": warning}))
+        # User-visible, unlike the line above: printed on every firing while the
+        # trace user cannot be read or the delivery status is bad (not
+        # rate-limited with the probe that produced it), and silent otherwise.
+        warnings = [w for w in (config.user_warning, format_delivery_warning(status, detail)) if w]
+        if warnings:
+            print(json.dumps({"systemMessage": "\n".join(warnings)}))
 
         return 0
 
