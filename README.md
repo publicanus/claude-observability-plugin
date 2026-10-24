@@ -173,7 +173,7 @@ The companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin lets a
 | `created`    | ISO 8601 UTC timestamp.                                            |
 | `session_id` | For log correlation only.                                         |
 
-This hook is the sole consumer (`hooks/hurt_annotations.py`): on every `Stop`/`SessionEnd` firing, before anything else, it attempts every queued entry using its own already-configured Langfuse credentials — the same ones writing this machine's traces, so a hurt can never be misrouted to the wrong project. For each entry it confirms the trace exists, provisions a `hurt` categorical score config idempotently, then writes the categorical `hurt` score and a comment carrying the operator's text. In Langfuse, find hurts by the `hurt` score.
+This hook is the sole consumer (`hooks/hurt_annotations.py`): on every `Stop`/`SessionEnd` firing, before anything else, it attempts every queued entry using its own already-configured Langfuse credentials — the same ones writing this machine's traces, so a hurt can never be misrouted to the wrong project. For each entry it confirms the trace exists, provisions a `hurt` categorical score config idempotently, then writes the categorical `hurt` score with the operator's text as the score's comment. In Langfuse, find hurts by the `hurt` score.
 
 The trace is looked up through Langfuse's v2 Observations API (`/api/public/v2/observations`), which Langfuse Cloud and self-hosted Langfuse v4 serve. A self-hosted Langfuse v3 server does not, so there hurts stay queued and are not attached. A hurt whose trace is not there yet waits in the queue for a later run.
 

@@ -239,13 +239,14 @@ def test_post_score_sends_expected_payload(hurt_annotations_module: Any) -> None
     client = FakeClient(module)
     client.when_post("/api/public/scores", module.HttpResponse(status=201, body={"id": "score-1"}))
 
-    assert module.post_score(client, "tid-123", "stalled-loop", "cfg-1") is True
+    assert module.post_score(client, "tid-123", "stalled-loop", "went in circles", "cfg-1") is True
     _, _, body = client.calls[0]
     assert body == {
         "traceId": "tid-123",
         "name": "hurt",
         "dataType": "CATEGORICAL",
         "value": "stalled-loop",
+        "comment": "went in circles",
         "configId": "cfg-1",
     }
 
@@ -256,7 +257,7 @@ def test_post_score_sends_id_and_timestamp_when_given(hurt_annotations_module: A
     client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "hurt-1"}))
 
     module.post_score(
-        client, "tid", "other", "cfg-1", score_id="hurt-1", timestamp="2026-10-01T12:00:00+00:00"
+        client, "tid", "other", "x", "cfg-1", score_id="hurt-1", timestamp="2026-10-01T12:00:00+00:00"
     )
 
     _, _, body = client.calls[0]
@@ -264,36 +265,18 @@ def test_post_score_sends_id_and_timestamp_when_given(hurt_annotations_module: A
     assert body["timestamp"] == "2026-10-01T12:00:00+00:00"
 
 
-def test_post_comment_sends_expected_payload(hurt_annotations_module: Any) -> None:
-    module = hurt_annotations_module
-    client = FakeClient(module)
-    client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "c-1"}))
-
-    assert module.post_comment(client, "proj-1", "tid-123", "went in circles") is True
-    _, _, body = client.calls[0]
-    assert body == {
-        "projectId": "proj-1",
-        "objectType": "TRACE",
-        "objectId": "tid-123",
-        "content": "went in circles",
-    }
-
-
 # ----------------- a refused write is logged -----------------
 
-def test_each_refused_write_logs_its_step_and_status(hurt_annotations_module: Any) -> None:
+def test_a_refused_score_logs_its_status_and_reason(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
     client.when_post("/api/public/scores", module.HttpResponse(status=400, body={"message": "bad value"}))
-    client.when_post("/api/public/comments", module.HttpResponse(status=500, body=None))
     logged: list[str] = []
 
-    assert module.post_score(client, "tid", "other", "cfg-1", logged.append) is False
-    assert module.post_comment(client, "proj-1", "tid", "x", logged.append) is False
+    assert module.post_score(client, "tid", "other", "x", "cfg-1", logged.append) is False
 
-    assert len(logged) == 2
+    assert len(logged) == 1
     assert "score" in logged[0] and "HTTP 400" in logged[0] and "bad value" in logged[0]
-    assert "comment" in logged[1] and "HTTP 500" in logged[1]
 
 
 def test_long_error_body_is_cut_short_in_the_log(hurt_annotations_module: Any) -> None:
@@ -302,19 +285,17 @@ def test_long_error_body_is_cut_short_in_the_log(hurt_annotations_module: Any) -
     client.when_post("/api/public/scores", module.HttpResponse(status=400, body={"message": "x" * 5000}))
     logged: list[str] = []
 
-    module.post_score(client, "tid", "other", "cfg-1", logged.append)
+    module.post_score(client, "tid", "other", "x", "cfg-1", logged.append)
 
     assert len(logged) == 1
     assert len(logged[0]) < 400
 
 
-def test_successful_writes_log_nothing(hurt_annotations_module: Any) -> None:
+def test_an_accepted_score_logs_nothing(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
     client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "s"}))
-    client.when_post("/api/public/comments", module.HttpResponse(status=201, body={"id": "c"}))
     logged: list[str] = []
 
-    assert module.post_score(client, "tid", "other", "cfg-1", logged.append) is True
-    assert module.post_comment(client, "proj-1", "tid", "x", logged.append) is True
+    assert module.post_score(client, "tid", "other", "x", "cfg-1", logged.append) is True
     assert logged == []
