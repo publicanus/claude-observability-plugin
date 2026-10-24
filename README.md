@@ -44,7 +44,7 @@ The plugin requires or accepts:
 | `LANGFUSE_SECRET_KEY` | Your Langfuse secret key (`sk-lf-...`). Stored in your OS keychain.                                  |
 | `LANGFUSE_PUBLIC_KEY` | Your Langfuse public key (`pk-lf-...`).                                                              |
 | `LANGFUSE_BASE_URL`   | https://us.cloud.langfuse.com (default), https://cloud.langfuse.com for EU, or your self-hosted URL. |
-| `LANGFUSE_USER_ID`    | Optional. User identifier attached to every trace (shown as the user in Langfuse).                   |
+| `LANGFUSE_USER_ID`    | Optional. User identifier attached to every trace (shown as the user in Langfuse). Leave it empty to use your login email. See [Trace user](#trace-user). |
 | `CC_LANGFUSE_DEBUG`   | Verbose logging to `~/.claude/state/langfuse_hook.log`.                                              |
 | `CC_LANGFUSE_MAX_CHARS` | Truncate captured inputs/outputs to this many characters (default 20000).                          |
 | `CC_LANGFUSE_SKILL_TAGS` | Tag traces with `skill:<name>` for every skill invoked in the turn (default true).                 |
@@ -52,6 +52,16 @@ The plugin requires or accepts:
 | `CC_LANGFUSE_TRACE_SEED` | Optional. Opt-in seed for deterministic trace IDs — see [Deterministic trace IDs](#deterministic-trace-ids). |
 
 Get keys from your Langfuse project settings → API Keys.
+
+### Trace user
+
+Each trace carries a user, so Langfuse can show usage per person. The hook takes the first of these that has a value:
+
+1. `LANGFUSE_USER_ID` or `CC_LANGFUSE_USER_ID`, as an env var or as plugin config.
+2. Your Claude login email: `oauthAccount.emailAddress` in `~/.claude.json`.
+3. `git config user.email`, as git sees it from the session's working directory.
+
+With none of these, the trace has no user.
 
 ## Requirements
 
