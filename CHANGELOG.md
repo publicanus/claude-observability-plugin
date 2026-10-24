@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/publicanus/claude-observability-plugin/compare/v1.5.0...v1.5.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **hook:** session data goes only to Langfuse Cloud EU or a self-hosted Langfuse ([#30](https://github.com/publicanus/claude-observability-plugin/issues/30)) ([3c3d2d4](https://github.com/publicanus/claude-observability-plugin/commit/3c3d2d42a05ebd3f4dbaf526452fb3f3da54dc9b)), closes [#24](https://github.com/publicanus/claude-observability-plugin/issues/24)
+
 ## [1.5.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.4.1...v1.5.0) (2026-10-24)
 
 
