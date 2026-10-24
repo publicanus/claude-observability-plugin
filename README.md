@@ -1,9 +1,10 @@
 # Langfuse Observability Plugin for Claude Code
 
-> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `langfuse-observability` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). Two behavioral differences from upstream:
+> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `langfuse-observability` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). Three behavioral differences from upstream:
 >
 > 1. This fork captures named teammate agents (subagents spawned with a `name:`, Claude Code's agent-teams feature) — upstream drops them silently, so a teammate-heavy session can do most of its work invisibly to Langfuse. Documented upstream as [langfuse/claude-observability-plugin#28](https://github.com/langfuse/claude-observability-plugin/issues/28).
 > 2. This fork attaches pending `/hurt` annotations (from the companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin) onto their target traces — see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt) below. This is mate-ecosystem-specific and not expected to be upstreamed.
+> 3. This fork sends only to Langfuse Cloud's EU region (`https://cloud.langfuse.com`, the default) or to a self-hosted Langfuse. It refuses Langfuse Cloud's US, HIPAA and Japan regions. Upstream defaults to the US region.
 >
 > The upstream README follows unchanged below.
 
@@ -43,7 +44,7 @@ The plugin requires or accepts:
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
 | `LANGFUSE_SECRET_KEY` | Your Langfuse secret key (`sk-lf-...`). Stored in your OS keychain.                                  |
 | `LANGFUSE_PUBLIC_KEY` | Your Langfuse public key (`pk-lf-...`).                                                              |
-| `LANGFUSE_BASE_URL`   | https://us.cloud.langfuse.com (default), https://cloud.langfuse.com for EU, or your self-hosted URL. |
+| `LANGFUSE_BASE_URL`   | https://cloud.langfuse.com (Langfuse Cloud EU, the default) or your self-hosted URL. The plugin refuses Langfuse Cloud's US, HIPAA and Japan regions: it sends nothing there and says so when the session starts. |
 | `LANGFUSE_USER_ID`    | Optional. User identifier attached to every trace (shown as the user in Langfuse). Leave it empty to use your login email. See [Trace user](#trace-user). |
 | `CC_LANGFUSE_DEBUG`   | Verbose logging to `~/.claude/state/langfuse_hook.log`.                                              |
 | `CC_LANGFUSE_MAX_CHARS` | Truncate captured inputs/outputs to this many characters (default 20000).                          |
@@ -195,8 +196,8 @@ An entry is removed only once all of that succeeds. One that can't yet be attach
 
 This plugin transmits your Claude Code session data — conversation turns, assistant
 generations, tool calls, and token-usage statistics — to the Langfuse endpoint you
-configure (`LANGFUSE_BASE_URL`, default `https://us.cloud.langfuse.com`; EU and
-self-hosted endpoints are supported). Data is sent at the end of each turn (the
+configure (`LANGFUSE_BASE_URL`, default `https://cloud.langfuse.com`, Langfuse Cloud
+EU; self-hosted endpoints are supported, Langfuse Cloud's other regions are refused). Data is sent at the end of each turn (the
 `Stop` hook) and at session end (`SessionEnd`) using the Langfuse API keys you
 provide, which are stored in your OS keychain. No data is sent anywhere other than
 the endpoint you configure. If the companion mate-hurt plugin is installed, this

@@ -223,17 +223,17 @@ def test_log_on_unreachable_host(hook_module):
 # ----------------- format_delivery_warning: what the user is shown -----------------
 
 def test_warning_is_silent_when_healthy(hook_module):
-    assert hook_module.format_delivery_warning("ok", "") is None
+    assert hook_module.format_delivery_warning("ok", "", "https://example.test") is None
 
 
 def test_warning_is_silent_with_no_verdict_yet(hook_module):
     # peek_delivery_status's "no cache" case is represented the same way
     # main() treats it: an "ok" default, not a distinct unknown status.
-    assert hook_module.format_delivery_warning("ok", "") is None
+    assert hook_module.format_delivery_warning("ok", "", "https://example.test") is None
 
 
 def test_warning_on_authentication_rejection_is_a_repair_recipe(hook_module):
-    warning = hook_module.format_delivery_warning("rejected", "HTTP 401 from https://example.test")
+    warning = hook_module.format_delivery_warning("rejected", "HTTP 401 from https://example.test", "https://example.test")
 
     # Names the state and the likely cause.
     assert "no traces are being recorded" in warning
@@ -249,15 +249,16 @@ def test_warning_on_authentication_rejection_is_a_repair_recipe(hook_module):
 
 
 def test_warning_on_unreachable_host_is_a_repair_recipe(hook_module):
-    warning = hook_module.format_delivery_warning("unreachable", "https://example.test did not respond")
+    warning = hook_module.format_delivery_warning("unreachable", "https://example.test did not respond", "https://example.test")
 
     assert "no traces are being recorded" in warning
     # Names the host actually tried, not just "unreachable".
     assert "https://example.test did not respond" in warning
     assert "LANGFUSE_BASE_URL" in warning
-    # Names the region trap: default host vs. an EU project's host.
-    assert "us.cloud.langfuse.com" in warning
-    assert "cloud.langfuse.com" in warning
+    # Names the default address, and no other Langfuse Cloud region.
+    assert "https://cloud.langfuse.com" in warning
+    for other_region in ("us.cloud", "hipaa.cloud", "jp.cloud"):
+        assert other_region not in warning
     assert "restart Claude Code" in warning
     assert "frozen" in warning
 
@@ -306,10 +307,15 @@ def run_main(
     transcript: Path,
     *,
     hook_event_name: str = "Stop",
+    base_url: Optional[str] = "https://example.test",
 ) -> tuple[str, Optional[dict]]:
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://example.test")
+    for name in ("LANGFUSE_BASE_URL", "CC_LANGFUSE_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
+    if base_url is not None:
+        monkeypatch.setenv("LANGFUSE_BASE_URL", base_url)
     monkeypatch.setattr(
         hook_module,
         "read_hook_payload",
@@ -366,6 +372,25 @@ def test_main_logs_rejection_instead_of_processed_on_bad_credentials(
     assert "restart Claude Code" in warning
 
 
+def test_rejected_keys_with_no_address_set_point_at_the_eu_region(
+    hook_module, isolated_hook_state, fake_langfuse, monkeypatch, capsys, tmp_path
+):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
+    transcript = write_one_turn_transcript(tmp_path, "sess-eu-rejected")
+
+    _, system_message = run_main(
+        hook_module, monkeypatch, capsys, fake_langfuse, "sess-eu-rejected", transcript, base_url=None
+    )
+
+    warning = system_message["systemMessage"]
+    assert "no traces are being recorded" in warning
+    assert "EU region" in warning
+    assert "by default" in warning
+    assert "another region" in warning
+    assert "EU project" in warning
+    assert "restart Claude Code" in warning
+
+
 def test_main_logs_unreachable_instead_of_processed_on_dead_host(
     hook_module, isolated_hook_state, fake_langfuse, monkeypatch, capsys, tmp_path
 ):
@@ -383,7 +408,7 @@ def test_main_logs_unreachable_instead_of_processed_on_dead_host(
     warning = system_message["systemMessage"]
     assert "no traces are being recorded" in warning
     assert "LANGFUSE_BASE_URL" in warning
-    assert "us.cloud.langfuse.com" in warning
+    assert "https://cloud.langfuse.com" in warning
     assert "restart Claude Code" in warning
 
 

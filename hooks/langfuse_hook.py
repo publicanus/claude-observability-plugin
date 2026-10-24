@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 
 # ----------------- Langfuse import (fail-open) -----------------
@@ -89,6 +90,35 @@ class LangfuseConfig:
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
 
+EU_CLOUD_HOST = "https://cloud.langfuse.com"
+# Langfuse Cloud's regions outside the EU, by hostname: https://langfuse.com/docs/data-regions
+NON_EU_CLOUD_REGIONS = {
+    "us.cloud.langfuse.com": "US",
+    "hipaa.cloud.langfuse.com": "HIPAA (US)",
+    "jp.cloud.langfuse.com": "Japan",
+}
+
+class RefusedHostError(Exception):
+    """The Langfuse address is a Langfuse Cloud region outside the EU; str() is the user message."""
+
+def _hostname(host: str) -> str:
+    return urlsplit(host.strip()).hostname or ""
+
+def check_host_allowed(host: str) -> None:
+    """Raises RefusedHostError when host is Langfuse Cloud's US, HIPAA or Japan region.
+
+    Any other address, a self-hosted one included, is allowed.
+    """
+    region = NON_EU_CLOUD_REGIONS.get(_hostname(host))
+    if region is None:
+        return
+    raise RefusedHostError(
+        f"Langfuse: {host} is Langfuse Cloud's {region} region. This plugin sends only to "
+        f"the EU region or to your own Langfuse server, so this session is not traced and "
+        f"nothing is sent. Set LANGFUSE_BASE_URL to {EU_CLOUD_HOST}, with keys from an "
+        f"EU project, then restart Claude Code."
+    )
+
 class TraceUserError(Exception):
     """A source for the trace user exists but could not be read."""
 
@@ -133,16 +163,21 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
 def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     """The hook's Langfuse settings, or None when no keys are set.
 
+    The host is LANGFUSE_BASE_URL or CC_LANGFUSE_BASE_URL (env var or plugin userConfig),
+    else EU_CLOUD_HOST. Raises RefusedHostError for a refused host, with or without keys.
+
     The trace user is, in order: LANGFUSE_USER_ID or CC_LANGFUSE_USER_ID (env var or
     plugin userConfig), the Claude login email, `git config user.email` in cwd, or None.
     When a source exists but cannot be read, the user is None and user_warning says why.
     """
+    host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
+    check_host_allowed(host)
+
     public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
     secret_key = _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY")
     if not public_key or not secret_key:
         return None
 
-    host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com"
     user_id = None
     user_warning = None
     try:
@@ -2729,7 +2764,7 @@ def format_processed_log(emitted: int, dur: float, session_id: str, status: str,
     return f"Processed {emitted} turns in {dur:.2f}s (session={session_id})"
 
 
-def format_delivery_warning(status: str, detail: str) -> Optional[str]:
+def format_delivery_warning(status: str, detail: str, host: str) -> Optional[str]:
     """The user-visible warning for a known-bad delivery status, surfaced via
     the hook's JSON `systemMessage` field — not the log file nobody opens.
 
@@ -2746,6 +2781,17 @@ def format_delivery_warning(status: str, detail: str) -> Optional[str]:
     produced it: staying quiet between probes is exactly how the original
     bug went unnoticed for three days.
     """
+    if status == "rejected" and _hostname(host) == _hostname(EU_CLOUD_HOST):
+        return (
+            f"Langfuse tracing is broken: credentials rejected ({detail}) — "
+            "no traces are being recorded. This plugin sends to Langfuse "
+            f"Cloud's EU region ({EU_CLOUD_HOST}) by default. Keys from a "
+            "project in another region do not work there: you need keys from "
+            "an EU project. A rotated key fails the same way.\n"
+            "Fix: set LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY to the EU "
+            "project's keys, then exit and restart Claude Code — this "
+            "session's env vars are frozen at launch."
+        )
     if status == "rejected":
         return (
             f"Langfuse tracing is broken: credentials rejected ({detail}) — "
@@ -2760,9 +2806,8 @@ def format_delivery_warning(status: str, detail: str) -> Optional[str]:
         return (
             f"Langfuse tracing is broken: {detail} — no traces are being "
             "recorded. Check LANGFUSE_BASE_URL: unset defaults to "
-            "https://us.cloud.langfuse.com, EU projects need "
-            "https://cloud.langfuse.com — a region mismatch fails exactly "
-            "like this.\n"
+            f"{EU_CLOUD_HOST}, and a self-hosted Langfuse needs its own "
+            "address.\n"
             "Fix the value or your network/VPN access to that host, then "
             "restart Claude Code — this session's env vars are frozen and "
             "won't pick up the change on their own."
@@ -2796,10 +2841,17 @@ def main() -> int:
     debug("Hook started")
 
     payload = read_hook_payload()
-    config = get_langfuse_config(payload.get("cwd"))
+    is_session_start = is_session_start_hook_payload(payload)
+    try:
+        config = get_langfuse_config(payload.get("cwd"))
+    except RefusedHostError as e:
+        info(str(e))
+        if is_session_start:
+            print(json.dumps({"systemMessage": str(e)}))
+        return 0
 
     # SessionStart exists only to say, once, that this session goes untraced.
-    if is_session_start_hook_payload(payload):
+    if is_session_start:
         if config is None:
             print(json.dumps({"systemMessage": NO_KEYS_WARNING}))
         return 0
@@ -2857,7 +2909,7 @@ def main() -> int:
         # User-visible, unlike the line above: printed on every firing while the
         # trace user cannot be read or the delivery status is bad (not
         # rate-limited with the probe that produced it), and silent otherwise.
-        warnings = [w for w in (config.user_warning, format_delivery_warning(status, detail)) if w]
+        warnings = [w for w in (config.user_warning, format_delivery_warning(status, detail, config.host)) if w]
         if warnings:
             print(json.dumps({"systemMessage": "\n".join(warnings)}))
 
