@@ -4,6 +4,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 
 class FakeConfig:
@@ -16,8 +19,9 @@ class FakeConfig:
 class RoutedClient:
     """Stand-in for LangfuseClient, installed via monkeypatch so
     process_pending_hurts talks to it instead of the network. Routes are
-    keyed by exact path; a route may be a response, a list of responses
-    consumed in order, or an exception instance to raise."""
+    keyed by path prefix; a route may be a response, a list of responses
+    consumed in order, a function of the full path, or an exception
+    instance to raise."""
 
     def __init__(self, module: Any) -> None:
         self._module = module
@@ -36,6 +40,8 @@ class RoutedClient:
             if path == prefix or path.startswith(prefix):
                 if isinstance(response, list):
                     return response.pop(0) if response else self._module.HttpResponse(status=404, body=None)
+                if callable(response):
+                    return response(path)
                 return response
         return self._module.HttpResponse(status=404, body=None)
 
@@ -76,9 +82,45 @@ def make_record(module: Any, **overrides: Any) -> dict:
     return record
 
 
-def full_success_routes(module: Any, client: RoutedClient, trace_id: str = "tid-123") -> None:
-    client.when_get(f"/api/public/traces/{trace_id}", module.HttpResponse(status=200, body={"id": trace_id}))
-    client.when_get("/api/public/projects", module.HttpResponse(status=200, body={"data": [{"id": "proj-1"}]}))
+OBSERVATIONS_V2 = "/api/public/v2/observations"
+
+
+class FakeV4Observations:
+    """Answers GET /api/public/v2/observations the way a Langfuse v4 project
+    does (ObservationsV2Response in Langfuse's OpenAPI spec): a `data` list
+    of observation rows and a `meta` object whose `cursor` is absent when
+    there is no next page. A trace counts as uploaded once it is in
+    `uploaded`; its rows are only returned for the trace asked for in the
+    `traceId` query parameter."""
+
+    def __init__(self, module: Any, uploaded: set[str] | None = None) -> None:
+        self._module = module
+        self.uploaded = set(uploaded or ())
+        self.queries: list[dict[str, list[str]]] = []
+
+    def __call__(self, path: str) -> Any:
+        query = parse_qs(urlsplit(path).query)
+        self.queries.append(query)
+        trace_id = query.get("traceId", [None])[0]
+        rows = []
+        if trace_id in self.uploaded:
+            rows.append(
+                {
+                    "id": f"obs-{trace_id}",
+                    "traceId": trace_id,
+                    "startTime": "2026-10-23T10:00:00.000Z",
+                    "endTime": "2026-10-23T10:00:05.000Z",
+                    "projectId": "proj-1",
+                    "parentObservationId": None,
+                    "type": "SPAN",
+                }
+            )
+        return self._module.HttpResponse(status=200, body={"data": rows, "meta": {}})
+
+
+def full_success_routes(module: Any, client: RoutedClient, trace_id: str = "tid-123") -> FakeV4Observations:
+    observations = FakeV4Observations(module, {trace_id})
+    client.when_get(OBSERVATIONS_V2, observations)
     client.when_get(
         "/api/public/score-configs",
         module.HttpResponse(
@@ -98,31 +140,45 @@ def full_success_routes(module: Any, client: RoutedClient, trace_id: str = "tid-
             },
         ),
     )
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=200, body={}))
     client.when_post("/api/public/scores", module.HttpResponse(status=201, body={"id": "score-1"}))
-    client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "comment-1"}))
+    return observations
 
 
 # ----------------- happy path -----------------
 
-def test_process_pending_hurts_attaches_and_removes_a_complete_record(
+def test_on_a_v4_project_a_queued_hurt_attaches_its_score_with_the_words_and_leaves_the_queue(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
+    """Langfuse v4 replies only: the trace is found through the v2
+    Observations API, and nothing calls the legacy trace or ingestion API
+    that Langfuse Cloud removes."""
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module)])
+    write_pending(pending_file, [make_record(module, category="redone-work", comment="had to redo the export")])
 
     client = RoutedClient(module)
     full_success_routes(module, client)
     install_fake_client(module, monkeypatch, client)
+    logged: list[str] = []
 
-    attached = module.process_pending_hurts(FakeConfig(), pending_file)
+    attached = module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert attached == 1
     assert json.loads(pending_file.read_text(encoding="utf-8")) == []
+    score_bodies = [body for method, path, body in client.calls if path == "/api/public/scores"]
+    assert len(score_bodies) == 1
+    assert score_bodies[0]["traceId"] == "tid-123"
+    assert score_bodies[0]["name"] == "hurt"
+    assert score_bodies[0]["value"] == "redone-work"
+    assert score_bodies[0]["comment"] == "had to redo the export"
+    paths = [path for _, path, _ in client.calls]
+    assert not any(path.startswith("/api/public/traces") for path in paths)
+    assert "/api/public/ingestion" not in paths
+    assert "/api/public/comments" not in paths
+    assert not any("failed" in line for line in logged)
 
 
-def test_process_pending_hurts_caches_project_and_config_across_records(
+def test_process_pending_hurts_looks_up_the_score_config_once_per_run(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
     module = hurt_annotations_module
@@ -136,16 +192,14 @@ def test_process_pending_hurts_caches_project_and_config_across_records(
     )
 
     client = RoutedClient(module)
-    full_success_routes(module, client, trace_id="tid-1")
-    client.when_get("/api/public/traces/tid-2", module.HttpResponse(status=200, body={"id": "tid-2"}))
+    observations = full_success_routes(module, client, trace_id="tid-1")
+    observations.uploaded.add("tid-2")
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
 
     assert attached == 2
-    project_gets = [c for c in client.calls if c[0] == "GET" and c[1] == "/api/public/projects"]
     config_gets = [c for c in client.calls if c[0] == "GET" and c[1].startswith("/api/public/score-configs")]
-    assert len(project_gets) == 1
     assert len(config_gets) == 1
 
 
@@ -160,7 +214,8 @@ def test_process_pending_hurts_keeps_record_queued_when_trace_not_yet_uploaded(
     write_pending(pending_file, [record])
 
     client = RoutedClient(module)
-    client.when_get("/api/public/traces/tid-123", module.HttpResponse(status=404, body=None))
+    observations = full_success_routes(module, client)
+    observations.uploaded.clear()
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
@@ -170,8 +225,13 @@ def test_process_pending_hurts_keeps_record_queued_when_trace_not_yet_uploaded(
     assert remaining == [record]
     assert not any(method == "POST" for method, _, _ in client.calls)
 
+    # The trace arrives in the project; a later run attaches the hurt.
+    observations.uploaded.add("tid-123")
+    assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == []
 
-def test_process_pending_hurts_keeps_record_queued_on_partial_write_failure(
+
+def test_a_refused_score_is_logged_and_leaves_the_record_queued_as_it_was(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
 ) -> None:
     module = hurt_annotations_module
@@ -181,38 +241,15 @@ def test_process_pending_hurts_keeps_record_queued_on_partial_write_failure(
 
     client = RoutedClient(module)
     full_success_routes(module, client)
-    client.when_post("/api/public/scores", module.HttpResponse(status=500, body=None))
+    client.when_post("/api/public/scores", module.HttpResponse(status=429, body=None))
     install_fake_client(module, monkeypatch, client)
     logged: list[str] = []
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
 
     assert attached == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag", "comment"]}]
-    assert any("hurt score failed" in line and "HTTP 500" in line for line in logged)
-
-
-def test_process_pending_hurts_logs_each_refused_write(
-    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
-) -> None:
-    """The hook's own path logs a refused tag, score and comment write."""
-    module = hurt_annotations_module
-    pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module)])
-
-    client = RoutedClient(module)
-    full_success_routes(module, client)
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=401, body=None))
-    client.when_post("/api/public/scores", module.HttpResponse(status=400, body=None))
-    client.when_post("/api/public/comments", module.HttpResponse(status=503, body=None))
-    install_fake_client(module, monkeypatch, client)
-    logged: list[str] = []
-
-    module.process_pending_hurts(FakeConfig(), pending_file, log=logged.append)
-
-    assert any("hurt tag failed" in line and "HTTP 401" in line for line in logged)
-    assert any("hurt score failed" in line and "HTTP 400" in line for line in logged)
-    assert any("hurt comment failed" in line and "HTTP 503" in line for line in logged)
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == [record]
+    assert any("hurt score failed" in line and "HTTP 429" in line for line in logged)
 
 
 def test_process_pending_hurts_logs_a_refused_score_config_and_keeps_the_record(
@@ -245,53 +282,7 @@ def test_process_pending_hurts_logs_a_refused_score_config_and_keeps_the_record(
     assert any("score-config" in line and "HTTP 400" in line for line in logged)
 
 
-# ----------------- a retry sends only the writes not yet done -----------------
-
-def posts(client: RoutedClient) -> list[str]:
-    return [path for method, path, _ in client.calls if method == "POST" and "score-configs" not in path]
-
-
-def test_retry_after_score_failure_sends_only_the_score(
-    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
-) -> None:
-    module = hurt_annotations_module
-    pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module)])
-    client = RoutedClient(module)
-    full_success_routes(module, client)
-    client.when_post("/api/public/scores", module.HttpResponse(status=500, body=None))
-    install_fake_client(module, monkeypatch, client)
-
-    assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert posts(client) == ["/api/public/ingestion", "/api/public/scores", "/api/public/comments"]
-    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["tag", "comment"]
-
-    client.calls.clear()
-    client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "s"}))
-    assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
-    assert posts(client) == ["/api/public/scores"]
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == []
-
-
-def test_retry_after_comment_failure_sends_only_the_comment(
-    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
-) -> None:
-    module = hurt_annotations_module
-    pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module)])
-    client = RoutedClient(module)
-    full_success_routes(module, client)
-    client.when_post("/api/public/comments", module.HttpResponse(status=500, body=None))
-    install_fake_client(module, monkeypatch, client)
-
-    assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8"))[0]["done"] == ["tag", "score"]
-
-    client.calls.clear()
-    client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "c"}))
-    assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
-    assert posts(client) == ["/api/public/comments"]
-
+# ----------------- a retried score replaces the one sent before -----------------
 
 def test_retried_score_carries_the_same_id_and_timestamp(
     hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
@@ -316,34 +307,37 @@ def test_retried_score_carries_the_same_id_and_timestamp(
         assert body["timestamp"] == "2026-10-01T12:00:00+00:00"
 
 
-def test_rate_limited_write_leaves_the_entry_queued_with_its_progress(
-    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+# ----------------- hurts queued by earlier versions -----------------
+
+@pytest.mark.parametrize(
+    "done",
+    [["tag", "score"], ["score"], ["tag"], ["comment"], ["tag", "comment"]],
+)
+def test_hurt_queued_by_an_earlier_version_gets_one_score_with_the_words_and_leaves_the_queue(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any, done: list[str]
 ) -> None:
+    """Earlier versions recorded tag, score and trace-comment writes in
+    `done`. A score already sent carried no words; it is sent again with the
+    same id and timestamp, so Langfuse replaces it and the trace keeps one
+    hurt score."""
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
-    record = make_record(module)
+    record = make_record(module, id="hurt-old", created="2026-10-20T09:00:00Z", comment="testing 123", done=done)
     write_pending(pending_file, [record])
-    client = RoutedClient(module)
-    full_success_routes(module, client)
-    client.when_post("/api/public/scores", module.HttpResponse(status=429, body=None))
-    install_fake_client(module, monkeypatch, client)
-
-    assert module.process_pending_hurts(FakeConfig(), pending_file) == 0
-    assert json.loads(pending_file.read_text(encoding="utf-8")) == [{**record, "done": ["tag", "comment"]}]
-
-
-def test_entry_with_unusable_done_field_is_treated_as_nothing_done(
-    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
-) -> None:
-    module = hurt_annotations_module
-    pending_file = tmp_path / "hurt_pending.json"
-    write_pending(pending_file, [make_record(module, done="tag")])
     client = RoutedClient(module)
     full_success_routes(module, client)
     install_fake_client(module, monkeypatch, client)
 
     assert module.process_pending_hurts(FakeConfig(), pending_file) == 1
-    assert posts(client) == ["/api/public/ingestion", "/api/public/scores", "/api/public/comments"]
+
+    writes = [(path, body) for method, path, body in client.calls if method == "POST" and "score-configs" not in path]
+    assert len(writes) == 1
+    path, body = writes[0]
+    assert path == "/api/public/scores"
+    assert body["id"] == "hurt-old"
+    assert body["timestamp"] == "2026-10-20T09:00:00+00:00"
+    assert body["comment"] == "testing 123"
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == []
 
 
 def test_process_pending_hurts_keeps_record_queued_when_client_raises(
@@ -357,7 +351,7 @@ def test_process_pending_hurts_keeps_record_queued_when_client_raises(
     write_pending(pending_file, [record])
 
     client = RoutedClient(module)
-    client.when_get("/api/public/traces/tid-123", ConnectionError("network unreachable"))
+    client.when_get(OBSERVATIONS_V2, ConnectionError("network unreachable"))
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)
@@ -403,7 +397,7 @@ def test_process_pending_hurts_drops_expired_unresolvable_record(
     write_pending(pending_file, [record])
 
     client = RoutedClient(module)
-    client.when_get("/api/public/traces/tid-123", module.HttpResponse(status=404, body=None))
+    client.when_get(OBSERVATIONS_V2, FakeV4Observations(module))
     install_fake_client(module, monkeypatch, client)
 
     attached = module.process_pending_hurts(FakeConfig(), pending_file)

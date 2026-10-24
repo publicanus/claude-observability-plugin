@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 
 # ----------------- helpers -----------------
@@ -56,18 +58,77 @@ def score_config_page(module: Any, categories=None, is_archived: bool = False, d
 
 # ----------------- trace_exists -----------------
 
-def test_trace_exists_false_on_404(hurt_annotations_module: Any) -> None:
-    module = hurt_annotations_module
-    client = FakeClient(module)
-    client.when_get("/api/public/traces/tid", module.HttpResponse(status=404, body=None))
-    assert module.trace_exists(client, "tid") is False
+QUEUED = datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 23, 13, 0, tzinfo=timezone.utc)
 
 
-def test_trace_exists_true_on_200(hurt_annotations_module: Any) -> None:
+def v2_observations(module: Any, rows: list[dict], status: int = 200) -> Any:
+    """A reply of GET /api/public/v2/observations, shaped like Langfuse's
+    ObservationsV2Response."""
+    return module.HttpResponse(status=status, body={"data": rows, "meta": {}})
+
+
+def lookup_query(client: FakeClient) -> dict[str, list[str]]:
+    (method, path, _), = client.calls
+    assert method == "GET"
+    assert urlsplit(path).path == "/api/public/v2/observations"
+    return parse_qs(urlsplit(path).query)
+
+
+def test_trace_exists_true_when_v2_observations_return_a_row_of_the_trace(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
-    client.when_get("/api/public/traces/tid", module.HttpResponse(status=200, body={"id": "tid"}))
-    assert module.trace_exists(client, "tid") is True
+    client.when_get(
+        "/api/public/v2/observations",
+        v2_observations(module, [{"id": "obs-1", "traceId": "tid", "startTime": "2026-10-20T08:59:00Z", "type": "SPAN"}]),
+    )
+    assert module.trace_exists(client, "tid", QUEUED, NOW) is True
+
+
+def test_trace_exists_false_when_no_observation_has_arrived(hurt_annotations_module: Any) -> None:
+    module = hurt_annotations_module
+    client = FakeClient(module)
+    client.when_get("/api/public/v2/observations", v2_observations(module, []))
+    assert module.trace_exists(client, "tid", QUEUED, NOW) is False
+
+
+def test_trace_exists_false_and_logged_when_the_lookup_is_refused(hurt_annotations_module: Any) -> None:
+    module = hurt_annotations_module
+    client = FakeClient(module)
+    client.when_get("/api/public/v2/observations", module.HttpResponse(status=400, body={"message": "bad filter"}))
+    logged: list[str] = []
+    assert module.trace_exists(client, "tid", QUEUED, NOW, logged.append) is False
+    assert len(logged) == 1
+    assert "trace lookup" in logged[0] and "HTTP 400" in logged[0]
+
+
+def test_trace_exists_false_and_logged_when_the_reply_has_no_data_list(hurt_annotations_module: Any) -> None:
+    module = hurt_annotations_module
+    client = FakeClient(module)
+    client.when_get("/api/public/v2/observations", module.HttpResponse(status=200, body={"rows": []}))
+    logged: list[str] = []
+    assert module.trace_exists(client, "tid", QUEUED, NOW, logged.append) is False
+    assert len(logged) == 1
+    assert "trace lookup" in logged[0] and "HTTP 200" in logged[0]
+
+
+def test_trace_exists_asks_for_one_row_of_the_trace_in_a_window_around_the_hurt(hurt_annotations_module: Any) -> None:
+    module = hurt_annotations_module
+    client = FakeClient(module)
+    client.when_get("/api/public/v2/observations", v2_observations(module, []))
+
+    module.trace_exists(client, "tid-123", QUEUED, NOW)
+
+    query = lookup_query(client)
+    assert query["traceId"] == ["tid-123"]
+    assert query["limit"] == ["1"]
+    assert query["fields"] == ["core"]
+    start = datetime.fromisoformat(query["fromStartTime"][0].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(query["toStartTime"][0].replace("Z", "+00:00"))
+    # The trace is the session's latest turn: it started before the hurt
+    # was queued, possibly days before when a session was resumed.
+    assert start <= QUEUED - timedelta(days=7)
+    assert end >= NOW
 
 
 # ----------------- score-config idempotency -----------------
@@ -173,30 +234,19 @@ def test_ensure_score_config_ignores_archived_matching_config(hurt_annotations_m
 
 # ----------------- individual writes -----------------
 
-def test_tag_trace_sends_expected_ingestion_event(hurt_annotations_module: Any) -> None:
-    module = hurt_annotations_module
-    client = FakeClient(module)
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=200, body={}))
-
-    assert module.tag_trace(client, "tid-123") is True
-    _, _, body = client.calls[0]
-    event = body["batch"][0]
-    assert event["type"] == "trace-create"
-    assert event["body"] == {"id": "tid-123", "tags": ["hurt"]}
-
-
 def test_post_score_sends_expected_payload(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
     client.when_post("/api/public/scores", module.HttpResponse(status=201, body={"id": "score-1"}))
 
-    assert module.post_score(client, "tid-123", "stalled-loop", "cfg-1") is True
+    assert module.post_score(client, "tid-123", "stalled-loop", "went in circles", "cfg-1") is True
     _, _, body = client.calls[0]
     assert body == {
         "traceId": "tid-123",
         "name": "hurt",
         "dataType": "CATEGORICAL",
         "value": "stalled-loop",
+        "comment": "went in circles",
         "configId": "cfg-1",
     }
 
@@ -207,7 +257,7 @@ def test_post_score_sends_id_and_timestamp_when_given(hurt_annotations_module: A
     client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "hurt-1"}))
 
     module.post_score(
-        client, "tid", "other", "cfg-1", score_id="hurt-1", timestamp="2026-10-01T12:00:00+00:00"
+        client, "tid", "other", "x", "cfg-1", score_id="hurt-1", timestamp="2026-10-01T12:00:00+00:00"
     )
 
     _, _, body = client.calls[0]
@@ -215,39 +265,18 @@ def test_post_score_sends_id_and_timestamp_when_given(hurt_annotations_module: A
     assert body["timestamp"] == "2026-10-01T12:00:00+00:00"
 
 
-def test_post_comment_sends_expected_payload(hurt_annotations_module: Any) -> None:
-    module = hurt_annotations_module
-    client = FakeClient(module)
-    client.when_post("/api/public/comments", module.HttpResponse(status=200, body={"id": "c-1"}))
-
-    assert module.post_comment(client, "proj-1", "tid-123", "went in circles") is True
-    _, _, body = client.calls[0]
-    assert body == {
-        "projectId": "proj-1",
-        "objectType": "TRACE",
-        "objectId": "tid-123",
-        "content": "went in circles",
-    }
-
-
 # ----------------- a refused write is logged -----------------
 
-def test_each_refused_write_logs_its_step_and_status(hurt_annotations_module: Any) -> None:
+def test_a_refused_score_logs_its_status_and_reason(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=401, body={"message": "no auth"}))
     client.when_post("/api/public/scores", module.HttpResponse(status=400, body={"message": "bad value"}))
-    client.when_post("/api/public/comments", module.HttpResponse(status=500, body=None))
     logged: list[str] = []
 
-    assert module.tag_trace(client, "tid", logged.append) is False
-    assert module.post_score(client, "tid", "other", "cfg-1", logged.append) is False
-    assert module.post_comment(client, "proj-1", "tid", "x", logged.append) is False
+    assert module.post_score(client, "tid", "other", "x", "cfg-1", logged.append) is False
 
-    assert len(logged) == 3
-    assert "tag" in logged[0] and "HTTP 401" in logged[0] and "no auth" in logged[0]
-    assert "score" in logged[1] and "HTTP 400" in logged[1] and "bad value" in logged[1]
-    assert "comment" in logged[2] and "HTTP 500" in logged[2]
+    assert len(logged) == 1
+    assert "score" in logged[0] and "HTTP 400" in logged[0] and "bad value" in logged[0]
 
 
 def test_long_error_body_is_cut_short_in_the_log(hurt_annotations_module: Any) -> None:
@@ -256,21 +285,17 @@ def test_long_error_body_is_cut_short_in_the_log(hurt_annotations_module: Any) -
     client.when_post("/api/public/scores", module.HttpResponse(status=400, body={"message": "x" * 5000}))
     logged: list[str] = []
 
-    module.post_score(client, "tid", "other", "cfg-1", logged.append)
+    module.post_score(client, "tid", "other", "x", "cfg-1", logged.append)
 
     assert len(logged) == 1
     assert len(logged[0]) < 400
 
 
-def test_successful_writes_log_nothing(hurt_annotations_module: Any) -> None:
+def test_an_accepted_score_logs_nothing(hurt_annotations_module: Any) -> None:
     module = hurt_annotations_module
     client = FakeClient(module)
-    client.when_post("/api/public/ingestion", module.HttpResponse(status=207, body={}))
     client.when_post("/api/public/scores", module.HttpResponse(status=200, body={"id": "s"}))
-    client.when_post("/api/public/comments", module.HttpResponse(status=201, body={"id": "c"}))
     logged: list[str] = []
 
-    assert module.tag_trace(client, "tid", logged.append) is True
-    assert module.post_score(client, "tid", "other", "cfg-1", logged.append) is True
-    assert module.post_comment(client, "proj-1", "tid", "x", logged.append) is True
+    assert module.post_score(client, "tid", "other", "x", "cfg-1", logged.append) is True
     assert logged == []
