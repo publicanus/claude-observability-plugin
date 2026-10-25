@@ -89,6 +89,14 @@ class LangfuseConfig:
     user_warning: Optional[str] = None
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
+SETUP_COMMAND = "/langfuse-observability:langfuse-setup"
+ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
+
+# The manual steps shown at SessionStart without keys: one text per system. A repo's
+# own text, under the session's directory, wins over the plugin's for that system.
+NO_KEYS_STEPS_DIR = Path(__file__).resolve().parent / "no_keys_steps"
+REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "langfuse-observability" / "no-keys-steps"
+NO_KEYS_STEPS_NAMES = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
 EU_CLOUD_HOST = "https://cloud.langfuse.com"
 # Langfuse Cloud's regions outside the EU, by hostname: https://langfuse.com/docs/data-regions
@@ -323,6 +331,38 @@ def is_session_end_hook_payload(payload: Dict[str, Any]) -> bool:
 def is_session_start_hook_payload(payload: Dict[str, Any]) -> bool:
     hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
     return hook_event_name == "SessionStart"
+
+def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
+    """The setup skill's check: the UserPromptExpansion hook on its command, or the
+    skill's own run of this hook with that event."""
+    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
+    return hook_event_name == "UserPromptExpansion"
+
+
+# ----------------- No-keys message -----------------
+def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
+    """The manual steps for this system, or None on a system with no text.
+
+    cwd: where the repo's own texts are looked up; None means the process's working directory.
+    A text that exists but cannot be read gives a line naming the file instead.
+    """
+    name = NO_KEYS_STEPS_NAMES.get(sys.platform)
+    if name is None:
+        return None
+    base = Path(cwd) if cwd else Path.cwd()
+    repo_text = base / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
+    path = repo_text if repo_text.exists() else NO_KEYS_STEPS_DIR / f"{name}.txt"
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\n")
+    except (OSError, UnicodeDecodeError) as e:
+        return f"Langfuse: cannot read {path}: {e}"
+
+def format_no_keys_message(cwd: Optional[str]) -> str:
+    lines = [NO_KEYS_WARNING, f"To add keys, run {SETUP_COMMAND}, or by hand:"]
+    steps = read_no_keys_steps(cwd)
+    if steps is not None:
+        lines.append(steps)
+    return "\n".join(lines)
 
 
 # ----------------- State file concurrency control -----------------
@@ -2842,18 +2882,29 @@ def main() -> int:
 
     payload = read_hook_payload()
     is_session_start = is_session_start_hook_payload(payload)
+    is_setup_check = is_setup_check_hook_payload(payload)
     try:
         config = get_langfuse_config(payload.get("cwd"))
     except RefusedHostError as e:
         info(str(e))
         if is_session_start:
             print(json.dumps({"systemMessage": str(e)}))
+        elif is_setup_check:
+            print(json.dumps({"decision": "block", "reason": str(e)}))
+        return 0
+
+    # The setup skill reads "no output" as "the hook cannot run", so this always answers.
+    if is_setup_check:
+        if config is None:
+            print(json.dumps({}))
+        else:
+            print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
         return 0
 
     # SessionStart exists only to say, once, that this session goes untraced.
     if is_session_start:
         if config is None:
-            print(json.dumps({"systemMessage": NO_KEYS_WARNING}))
+            print(json.dumps({"systemMessage": format_no_keys_message(payload.get("cwd"))}))
         return 0
 
     if config is None:

@@ -21,9 +21,17 @@ The marketplace command registers the plugin marketplace and refreshes its local
 
 Restart Claude Code after install so the hook configuration is loaded.
 
-Installing without configuration is fine: no field is required at install time, and the hook sends nothing until both API keys are set. Until then, each session starts with one line saying it is not traced; nothing else changes in Claude Code. Configure whenever you have the keys at hand.
+Installing without configuration is fine: no field is required at install time, and the hook sends nothing until both API keys are set. Until then, each session starts with a message saying it is not traced, with the steps to add keys; nothing else changes in Claude Code. Configure whenever you have the keys at hand.
 
-Then configure the plugin from within a Claude Code session. This is a Claude Code slash command, not a shell command:
+To set keys for one repo, run this in a Claude Code session in that repo:
+
+```text
+/langfuse-observability:langfuse-setup
+```
+
+The skill prepares the repo's `.claude/settings.local.json` with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When keys are already set, it says so and changes nothing. When the hook cannot run on the machine, it offers to install uv.
+
+To set keys for every repo on the machine instead, configure the plugin from within a Claude Code session. This is a Claude Code slash command, not a shell command:
 
 ```text
 /plugin configure langfuse-observability@langfuse-observability
@@ -79,7 +87,7 @@ If neither is set up, the hook exits silently — no impact on Claude Code.
 
 A hook reads the session transcript incrementally on every turn (Stop) and at session end (SessionEnd), and emits a Langfuse trace with one span per turn, nested generations per assistant message, and child tool spans for every tool call. Token usage is captured when present.
 
-When no Langfuse keys are set for the repo, the hook sends nothing. At session start (SessionStart) it shows one line saying so: "Langfuse: no keys for this repo, this session is not traced."
+When no Langfuse keys are set for the repo, the hook sends nothing. At session start (SessionStart) it shows a message saying so: the line "Langfuse: no keys for this repo, this session is not traced.", the setup skill's name, and short manual steps for your system (macOS, Linux or Windows). The plugin's steps are in `hooks/no_keys_steps/<system>.txt`. A repo can replace them for one or more systems with its own `.claude/langfuse-observability/no-keys-steps/<system>.txt`, where `<system>` is `macos`, `linux` or `windows`.
 
 A tool span whose call failed carries `level: ERROR` and a `statusMessage` naming the failure class (`Tool call failed`, or `Permission denied` for a denied tool call), so errors and denials are queryable via the Langfuse API without fetching the span's output. Permission denials additionally carry a `denial_kind` metadata field (`user-rejected` or `permission-rule`) distinguishing a user's explicit rejection from an automatic permission-rule block. Successful calls keep the default level.
 

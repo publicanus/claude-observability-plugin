@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts=$(jq -r '[.. | objects | select(.type == "command") | .command] | .[]' hooks/hooks.json \
-            | grep -oE '\$\{CLAUDE_PLUGIN_ROOT\}"?/[A-Za-z0-9_/.-]*\.py' \
+            | grep -oE '\$\{CLAUDE_PLUGIN_ROOT\}"?/[A-Za-z0-9_/.-]*\.(py|sh)' \
             | sed -E 's|.*\}"?/||' | sort -u)
           # An empty match would pass this step while checking nothing.
           test -n "$scripts" || { echo "no plugin-root script paths found in hooks/hooks.json"; exit 1; }
