@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -93,6 +94,20 @@ def test_a_repo_text_wins_for_its_own_system_only(
 
     assert macos == expected_message("Ask Anna for the team keys.")
     assert linux == expected_message(plugin_steps("linux"))
+
+
+def test_a_session_started_in_a_subfolder_finds_the_repo_text_at_the_repo_root(
+    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+):
+    repo = tmp_path / "repo"
+    subfolder = repo / "src" / "app"
+    subfolder.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    write_repo_steps(repo, "linux", b"Ask Anna for the team keys.\n")
+
+    message = session_start_message(hook_module, monkeypatch, capsys, "linux", subfolder)
+
+    assert message == expected_message("Ask Anna for the team keys.")
 
 
 def test_an_input_without_cwd_finds_the_repo_text_in_the_working_directory(

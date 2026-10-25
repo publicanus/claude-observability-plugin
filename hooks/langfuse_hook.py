@@ -93,7 +93,7 @@ SETUP_COMMAND = "/langfuse-observability:langfuse-setup"
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 
 # The manual steps shown at SessionStart without keys: one text per system. A repo's
-# own text, under the session's directory, wins over the plugin's for that system.
+# own text, at the root of its git checkout, wins over the plugin's for that system.
 NO_KEYS_STEPS_DIR = Path(__file__).resolve().parent / "no_keys_steps"
 REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "langfuse-observability" / "no-keys-steps"
 NO_KEYS_STEPS_NAMES = {"darwin": "macos", "linux": "linux", "win32": "windows"}
@@ -324,33 +324,49 @@ def get_session_id_and_transcript_path(payload: Dict[str, Any]) -> Optional[Tupl
 
     return session_id, transcript_path
 
+def hook_event_name(payload: Dict[str, Any]) -> Optional[str]:
+    return payload.get("hook_event_name") or payload.get("hookEventName")
+
 def is_session_end_hook_payload(payload: Dict[str, Any]) -> bool:
-    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
-    return hook_event_name == "SessionEnd"
+    return hook_event_name(payload) == "SessionEnd"
 
 def is_session_start_hook_payload(payload: Dict[str, Any]) -> bool:
-    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
-    return hook_event_name == "SessionStart"
+    return hook_event_name(payload) == "SessionStart"
 
 def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
     """The setup skill's check: the UserPromptExpansion hook on its command, or the
     skill's own run of this hook with that event."""
-    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
-    return hook_event_name == "UserPromptExpansion"
+    return hook_event_name(payload) == "UserPromptExpansion"
 
 
 # ----------------- No-keys message -----------------
+def find_repo_root(cwd: Optional[str]) -> Path:
+    """The root of the git checkout that holds cwd (None: the process's working
+    directory), or that directory itself when it is not in a git checkout or git
+    cannot run."""
+    base = Path(cwd) if cwd else Path.cwd()
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=base, capture_output=True, text=True
+        )
+    except OSError as e:
+        debug(f"git rev-parse --show-toplevel could not run: {type(e).__name__}: {e}")
+        return base
+    if result.returncode != 0:
+        return base
+    return Path(result.stdout.strip())
+
 def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
     """The manual steps for this system, or None on a system with no text.
 
-    cwd: where the repo's own texts are looked up; None means the process's working directory.
+    cwd: the session's directory; the repo's own texts are looked up at the root of
+    its git checkout (see find_repo_root).
     A text that exists but cannot be read gives a line naming the file instead.
     """
     name = NO_KEYS_STEPS_NAMES.get(sys.platform)
     if name is None:
         return None
-    base = Path(cwd) if cwd else Path.cwd()
-    repo_text = base / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
+    repo_text = find_repo_root(cwd) / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
     path = repo_text if repo_text.exists() else NO_KEYS_STEPS_DIR / f"{name}.txt"
     try:
         return path.read_text(encoding="utf-8").rstrip("\n")

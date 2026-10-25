@@ -7,6 +7,8 @@ Set up Langfuse tracing for the repo of this session. Follow the steps in order,
 
 Never ask the developer for a Langfuse key or a Langfuse address in the chat, and never write a key yourself: anything typed in this chat is sent to Langfuse with the session once tracing starts. The developer pastes the keys into the file you open in step 5.
 
+Never read, print or show the settings file, because once the developer has pasted the keys it holds them. To check the setup, tell the developer to start a new session and look for the "not traced" line.
+
 Run the commands in steps 1, 2 and 4 with the Bash tool, also on Windows.
 
 ## 1. Ask the hook
@@ -51,11 +53,11 @@ If it exits non-zero, show its stderr and stop. Otherwise its stdout is a JSON o
 
 ## 5. Open the file
 
-Open the `settings` path in the developer's editor:
+Open the `settings` path in the developer's editor, with the Bash tool. Put the path in single quotes, as in `'<path>'` below, and write each `'` inside the path as `'\''`:
 
-- macOS: `open -t "<path>"`
-- Linux: `xdg-open "<path>"`
-- Windows: `powershell -Command "Invoke-Item -LiteralPath '<path>'"`
+- macOS: `open -t '<path>'`
+- Linux: `xdg-open '<path>'`
+- Windows: `SETTINGS_PATH='<path>' powershell -NoProfile -Command 'Invoke-Item -LiteralPath $env:SETTINGS_PATH'`
 
 If that command fails, give the developer the path and ask them to open the file themselves.
 
