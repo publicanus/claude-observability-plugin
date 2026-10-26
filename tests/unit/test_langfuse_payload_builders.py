@@ -341,3 +341,44 @@ def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_
     assert legacy_denied.kwargs["level"] == "ERROR"
     assert legacy_denied.kwargs["status_message"] == "Permission denied"
     assert legacy_denied.kwargs["metadata"]["denial_kind"] == "user-rejected"
+
+
+def test_late_async_tool_output_reaches_the_sdk_with_secrets_masked(hook_module):
+    result = hook_module.get_tool_result_for_observation(
+        {
+            "content": "Async agent launched successfully.",
+            "final_content": [{"type": "text", "text": "key AKIAIOSFODNN7EXAMPLE"}],
+            "final_timestamp": "2026-01-01T00:00:05.000Z",
+        }
+    )
+
+    assert result.final_output == '[{"type": "text", "text": "key [REDACTED]"}]'
+
+
+def test_text_tool_input_reaches_the_sdk_with_secrets_masked(hook_module):
+    tool_input, _ = hook_module.get_tool_input_for_observation({"input": "aws --key AKIAIOSFODNN7EXAMPLE"})
+
+    assert tool_input == "aws --key [REDACTED]"
+
+
+def test_injected_skill_text_reaches_the_sdk_with_secrets_masked(hook_module, fake_langfuse, monkeypatch):
+    monkeypatch.setattr(hook_module, "CAPTURE_SKILL_CONTENT", True)
+    rows = [
+        {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "uuid": "u1",
+         "message": {"role": "user", "content": "Run the skill."}},
+        {"type": "assistant", "timestamp": "2026-01-01T00:00:01.000Z", "uuid": "a1",
+         "message": {"id": "msg-1", "role": "assistant", "model": "claude-test",
+                     "content": [{"type": "tool_use", "id": "toolu_skill", "name": "Skill",
+                                  "input": {"skill": "example"}}]}},
+        {"type": "user", "isMeta": True, "sourceToolUseID": "toolu_skill",
+         "message": {"role": "user", "content": "Deploy with AKIAIOSFODNN7EXAMPLE"}},
+        {"type": "user", "timestamp": "2026-01-01T00:00:02.000Z", "uuid": "tr1",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "toolu_skill", "content": "Skill result"}]}},
+    ]
+    turn = hook_module.build_turns(rows)[0]
+
+    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+
+    skill = next(o for o in fake_langfuse.observations if o.name == "Tool: Skill")
+    assert skill.output == {"result": "Skill result", "injected_instructions": "Deploy with [REDACTED]"}
