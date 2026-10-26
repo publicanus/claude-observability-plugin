@@ -1,0 +1,7 @@
+1. In the repo root, add this to .claude/settings.local.json (merge it if the file exists), with your keys:
+   {"env": {"LANGFUSE_PUBLIC_KEY": "pk-lf-...", "LANGFUSE_SECRET_KEY": "sk-lf-..."}}
+   For your own Langfuse server, also add "LANGFUSE_BASE_URL": "<its address>".
+2. Keep that file out of git:
+   Add-Content (git rev-parse --git-path info/exclude) '**/.claude/settings.local.json'
+3. Add the line .claude/settings.local.json to .worktreeinclude, and commit .worktreeinclude.
+4. Start a new session.

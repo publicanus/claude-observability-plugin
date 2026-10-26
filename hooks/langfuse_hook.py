@@ -89,6 +89,14 @@ class LangfuseConfig:
     user_warning: Optional[str] = None
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
+SETUP_COMMAND = "/langfuse-observability:langfuse-setup"
+ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
+
+# The manual steps shown at SessionStart without keys: one text per system. A repo's
+# own text, at the root of its git checkout, wins over the plugin's for that system.
+NO_KEYS_STEPS_DIR = Path(__file__).resolve().parent / "no_keys_steps"
+REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "langfuse-observability" / "no-keys-steps"
+NO_KEYS_STEPS_NAMES = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
 EU_CLOUD_HOST = "https://cloud.langfuse.com"
 # Langfuse Cloud's regions outside the EU, by hostname: https://langfuse.com/docs/data-regions
@@ -316,13 +324,61 @@ def get_session_id_and_transcript_path(payload: Dict[str, Any]) -> Optional[Tupl
 
     return session_id, transcript_path
 
+def hook_event_name(payload: Dict[str, Any]) -> Optional[str]:
+    return payload.get("hook_event_name") or payload.get("hookEventName")
+
 def is_session_end_hook_payload(payload: Dict[str, Any]) -> bool:
-    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
-    return hook_event_name == "SessionEnd"
+    return hook_event_name(payload) == "SessionEnd"
 
 def is_session_start_hook_payload(payload: Dict[str, Any]) -> bool:
-    hook_event_name = payload.get("hook_event_name") or payload.get("hookEventName")
-    return hook_event_name == "SessionStart"
+    return hook_event_name(payload) == "SessionStart"
+
+def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
+    """The setup skill's check: the UserPromptExpansion hook on its command, or the
+    skill's own run of this hook with that event."""
+    return hook_event_name(payload) == "UserPromptExpansion"
+
+
+# ----------------- No-keys message -----------------
+def find_repo_root(cwd: Optional[str]) -> Path:
+    """The root of the git checkout that holds cwd (None: the process's working
+    directory), or that directory itself when it is not in a git checkout or git
+    cannot run."""
+    base = Path(cwd) if cwd else Path.cwd()
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=base, capture_output=True, text=True
+        )
+    except OSError as e:
+        debug(f"git rev-parse --show-toplevel could not run: {type(e).__name__}: {e}")
+        return base
+    if result.returncode != 0:
+        return base
+    return Path(result.stdout.strip())
+
+def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
+    """The manual steps for this system, or None on a system with no text.
+
+    cwd: the session's directory; the repo's own texts are looked up at the root of
+    its git checkout (see find_repo_root).
+    A text that exists but cannot be read gives a line naming the file instead.
+    """
+    name = NO_KEYS_STEPS_NAMES.get(sys.platform)
+    if name is None:
+        return None
+    repo_text = find_repo_root(cwd) / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
+    path = repo_text if repo_text.exists() else NO_KEYS_STEPS_DIR / f"{name}.txt"
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\n")
+    except (OSError, UnicodeDecodeError) as e:
+        return f"Langfuse: cannot read {path}: {e}"
+
+def format_no_keys_message(cwd: Optional[str]) -> str:
+    lines = [NO_KEYS_WARNING, f"To add keys, run {SETUP_COMMAND}, or by hand:"]
+    steps = read_no_keys_steps(cwd)
+    if steps is not None:
+        lines.append(steps)
+    return "\n".join(lines)
 
 
 # ----------------- State file concurrency control -----------------
@@ -2842,18 +2898,29 @@ def main() -> int:
 
     payload = read_hook_payload()
     is_session_start = is_session_start_hook_payload(payload)
+    is_setup_check = is_setup_check_hook_payload(payload)
     try:
         config = get_langfuse_config(payload.get("cwd"))
     except RefusedHostError as e:
         info(str(e))
         if is_session_start:
             print(json.dumps({"systemMessage": str(e)}))
+        elif is_setup_check:
+            print(json.dumps({"decision": "block", "reason": str(e)}))
+        return 0
+
+    # The setup skill reads "no output" as "the hook cannot run", so this always answers.
+    if is_setup_check:
+        if config is None:
+            print(json.dumps({}))
+        else:
+            print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
         return 0
 
     # SessionStart exists only to say, once, that this session goes untraced.
     if is_session_start:
         if config is None:
-            print(json.dumps({"systemMessage": NO_KEYS_WARNING}))
+            print(json.dumps({"systemMessage": format_no_keys_message(payload.get("cwd"))}))
         return 0
 
     if config is None:
