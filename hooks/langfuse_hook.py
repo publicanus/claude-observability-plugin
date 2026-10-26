@@ -170,6 +170,24 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
         )
     return result.stdout.strip() or None
 
+def session_dir(cwd: Optional[str]) -> Path:
+    """cwd as a Path; None means the process's working directory."""
+    return Path(cwd) if cwd else Path.cwd()
+
+def git_rev_parse(cwd: Optional[str], *flags: str) -> Optional[str]:
+    """The output of `git rev-parse <flags>` in session_dir(cwd), or None when that
+    folder is not in a git checkout or git cannot run."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", *flags], cwd=session_dir(cwd), capture_output=True, text=True
+        )
+    except OSError as e:
+        debug(f"git rev-parse could not run: {type(e).__name__}: {e}")
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
 def read_repo_name(cwd: Optional[str]) -> str:
     """The name of the repo that holds cwd (None: the process's working directory).
 
@@ -179,13 +197,9 @@ def read_repo_name(cwd: Optional[str]) -> str:
     or without git installed: the name of cwd's own folder.
     Raises subprocess.CalledProcessError when git fails inside a checkout.
     """
-    base = Path(cwd) if cwd else Path.cwd()
-    try:
-        common_dir = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=base, capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+    base = session_dir(cwd)
+    common_dir = git_rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
+    if common_dir is None:
         return base.name
 
     def git(*args: str) -> str:
@@ -381,17 +395,8 @@ def find_repo_root(cwd: Optional[str]) -> Path:
     """The root of the git checkout that holds cwd (None: the process's working
     directory), or that directory itself when it is not in a git checkout or git
     cannot run."""
-    base = Path(cwd) if cwd else Path.cwd()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=base, capture_output=True, text=True
-        )
-    except OSError as e:
-        debug(f"git rev-parse --show-toplevel could not run: {type(e).__name__}: {e}")
-        return base
-    if result.returncode != 0:
-        return base
-    return Path(result.stdout.strip())
+    toplevel = git_rev_parse(cwd, "--show-toplevel")
+    return Path(toplevel) if toplevel is not None else session_dir(cwd)
 
 def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
     """The manual steps for this system, or None on a system with no text.
