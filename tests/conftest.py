@@ -17,6 +17,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "transcripts"
 
+# The attributes of every propagate_attributes context now open, outermost first.
+# Mirrors langfuse v4: every observation created inside a context carries them.
+_open_propagated_attributes: list[dict[str, Any]] = []
+
 
 def _install_langfuse_stubs() -> None:
     langfuse_module = types.ModuleType("langfuse")
@@ -30,8 +34,12 @@ def _install_langfuse_stubs() -> None:
             return "f" * 32
 
     @contextlib.contextmanager
-    def propagate_attributes(**_: Any) -> Iterator[None]:
-        yield
+    def propagate_attributes(**attributes: Any) -> Iterator[None]:
+        _open_propagated_attributes.append(attributes)
+        try:
+            yield
+        finally:
+            _open_propagated_attributes.pop()
 
     langfuse_module.Langfuse = Langfuse
     langfuse_module.propagate_attributes = propagate_attributes
@@ -138,6 +146,9 @@ class FakeObservation:
         self.kwargs = kwargs
         self.output: Any = None
         self.end_time: int | None = None
+        self.propagated: dict[str, Any] = {}
+        for attributes in _open_propagated_attributes:
+            self.propagated.update(attributes)
         # Mirrors Langfuse._get_otel_trace_id: format(trace_id_int, "032x").
         self.trace_id = format(otel_span.get_span_context().trace_id, "032x")
 

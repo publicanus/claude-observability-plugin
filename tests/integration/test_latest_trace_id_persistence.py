@@ -67,7 +67,7 @@ def test_persisted_trace_id_matches_emitted_trace_id_seeded(
     session_id = "session-seeded-pin"
     transcript = write_two_turn_transcript(tmp_path, session_id)
     config = hook_module.LangfuseConfig(
-        "public", "secret", "https://example.test", "user-1", trace_seed="fixed-seed"
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed="fixed-seed"
     )
 
     emitted = hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
@@ -86,7 +86,7 @@ def test_persisted_trace_id_matches_emitted_trace_id_unseeded(
 ):
     session_id = "session-unseeded-pin"
     transcript = write_two_turn_transcript(tmp_path, session_id)
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
 
     emitted = hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
 
@@ -101,7 +101,7 @@ def test_persisted_trace_id_tracks_the_latest_turn_not_the_first(
 ):
     session_id = "session-latest-pin"
     transcript = write_two_turn_transcript(tmp_path, session_id)
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
 
     hook_module.emit_new_turns_from_transcript(fake_langfuse, config, session_id, transcript)
 

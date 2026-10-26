@@ -84,6 +84,8 @@ class LangfuseConfig:
     secret_key: str
     host: str
     user_id: Optional[str]
+    # Every trace carries it as the tag `repo:<name>` and the metadata key `repo`.
+    repo_name: str
     trace_seed: Optional[str] = None
     # Set when a source for the trace user exists but could not be read; shown to the user.
     user_warning: Optional[str] = None
@@ -168,6 +170,39 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
         )
     return result.stdout.strip() or None
 
+def read_repo_name(cwd: Optional[str]) -> str:
+    """The name of the repo that holds cwd (None: the process's working directory).
+
+    With a git remote: the last part of the address of `origin`, else of the first
+    remote `git remote` lists, without a `.git` ending. Without a remote: the name of
+    the main checkout's folder, the same for all its worktrees. Outside a git checkout,
+    or without git installed: the name of cwd's own folder.
+    Raises subprocess.CalledProcessError when git fails inside a checkout.
+    """
+    base = Path(cwd) if cwd else Path.cwd()
+    try:
+        common_dir = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=base, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return base.name
+
+    def git(*args: str) -> str:
+        # stderr is not captured, so git's own error reaches the hook's error output.
+        return subprocess.run(
+            ["git", *args], cwd=base, stdout=subprocess.PIPE, text=True, check=True
+        ).stdout.strip()
+
+    remotes = git("remote").split()
+    if not remotes:
+        return Path(common_dir).parent.name
+    remote = "origin" if "origin" in remotes else remotes[0]
+    address = git("remote", "get-url", remote)
+    # Covers both `host:owner/name` and URL forms; a user or token sits before the last part.
+    last_part = address.rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
+    return last_part.removesuffix(".git")
+
 def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     """The hook's Langfuse settings, or None when no keys are set.
 
@@ -177,6 +212,7 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     The trace user is, in order: LANGFUSE_USER_ID or CC_LANGFUSE_USER_ID (env var or
     plugin userConfig), the Claude login email, `git config user.email` in cwd, or None.
     When a source exists but cannot be read, the user is None and user_warning says why.
+    The repo name is read_repo_name(cwd), and fails as that does.
     """
     host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
     check_host_allowed(host)
@@ -205,6 +241,7 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         secret_key=secret_key,
         host=host,
         user_id=user_id,
+        repo_name=read_repo_name(cwd),
         trace_seed=trace_seed,
         user_warning=user_warning,
     )
@@ -1575,6 +1612,11 @@ def short_session_label(session_id: str, max_len: int = 12) -> str:
 def trace_display_name(session_id: str, turn_num: int) -> str:
     return f"Claude Code - Turn {turn_num} ({short_session_label(session_id)})"
 
+REPO_METADATA_KEY = "repo"
+
+def repo_tag(repo_name: str) -> str:
+    return f"repo:{repo_name}"
+
 def get_trace_tags(
     turn: Turn,
     subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -2212,6 +2254,7 @@ def build_trace_metadata(
     return trace_metadata
 
 def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
+              repo_name: str,
               user_id: Optional[str] = None,
               subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
               trace_seed: Optional[str] = None) -> Optional[str]:
@@ -2225,7 +2268,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     last_assistant_ts = parse_timestamp(last_assistant)
     turn_end_ts = get_turn_end_timestamp(turn)
     trace_metadata = build_trace_metadata(session_id, turn_num, turn, transcript_path, user_text_meta)
-    tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id)
+    tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id) + [repo_tag(repo_name)]
 
     trace_name = trace_display_name(session_id, turn_num)
     root_observation_name = "Conversational Turn"
@@ -2243,6 +2286,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
         user_id=user_id,
         trace_name=trace_name,
         tags=tags,
+        metadata={REPO_METADATA_KEY: repo_name},
     ):
         trace_span = _start_backdated(
             langfuse,
@@ -2316,6 +2360,7 @@ def emit_teammate_turn(
     turn: Turn,
     transcript_path: Path,
     *,
+    repo_name: str,
     user_id: Optional[str] = None,
     launching_tool_use_id: Optional[str] = None,
     ambiguous_name: bool = False,
@@ -2351,7 +2396,7 @@ def emit_teammate_turn(
         "launching_tool_use_id": launching_tool_use_id,
     })
 
-    tags = ["claude-code", f"teammate:{name}"]
+    tags = ["claude-code", f"teammate:{name}", repo_tag(repo_name)]
     if launching_tool_use_id is None:
         tags.append("teammate-unattributed")
     if ambiguous_name:
@@ -2373,6 +2418,7 @@ def emit_teammate_turn(
         user_id=user_id,
         trace_name=trace_name,
         tags=tags,
+        metadata={REPO_METADATA_KEY: repo_name},
     ):
         trace_span = _start_backdated(
             langfuse,
@@ -2537,6 +2583,7 @@ def _emit_one_teammate(
                 teammate_turn_num,
                 turns[index],
                 transcript_path,
+                repo_name=config.repo_name,
                 user_id=config.user_id,
                 launching_tool_use_id=launching_tool_use_id,
                 ambiguous_name=ambiguous,
@@ -2571,6 +2618,7 @@ def emit_ready_turns(
     turns_to_emit: List[Turn],
     session_state: SessionState,
     *,
+    repo_name: str,
     user_id: Optional[str],
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     trace_seed: Optional[str] = None,
@@ -2586,6 +2634,7 @@ def emit_ready_turns(
                 turn_num,
                 turn,
                 transcript_path,
+                repo_name,
                 user_id=user_id,
                 subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 trace_seed=trace_seed,
@@ -2636,6 +2685,7 @@ def emit_new_turns_from_transcript(
                 transcript_path,
                 turns_to_emit,
                 session_state,
+                repo_name=config.repo_name,
                 user_id=config.user_id,
                 subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 trace_seed=config.trace_seed,

@@ -36,7 +36,7 @@ def install_fake_delivery_client(hook_module: Any, monkeypatch: Any, response: F
 
 
 def make_config(hook_module: Any) -> Any:
-    return hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    return hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
 
 
 # ----------------- classify_delivery_health -----------------
@@ -106,8 +106,8 @@ def test_get_delivery_status_caches_within_the_interval(hook_module, isolated_ho
 
 def test_get_delivery_status_rechecks_when_credentials_change(hook_module, isolated_hook_state, monkeypatch):
     install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
-    config_a = hook_module.LangfuseConfig("public-a", "secret-a", "https://example.test", "user-1")
-    config_b = hook_module.LangfuseConfig("public-b", "secret-b", "https://example.test", "user-1")
+    config_a = hook_module.LangfuseConfig("public-a", "secret-a", "https://example.test", "user-1", repo_name="shop")
+    config_b = hook_module.LangfuseConfig("public-b", "secret-b", "https://example.test", "user-1", repo_name="shop")
 
     hook_module.get_delivery_status(config_a)
     hook_module.get_delivery_status(config_b)
@@ -176,9 +176,9 @@ def test_peek_delivery_status_returns_a_verdict_however_stale(hook_module, isola
 
 def test_peek_delivery_status_ignores_a_verdict_for_different_credentials(hook_module, isolated_hook_state, monkeypatch):
     install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
-    hook_module.get_delivery_status(hook_module.LangfuseConfig("old-pub", "old-secret", "https://example.test", "user-1"))
+    hook_module.get_delivery_status(hook_module.LangfuseConfig("old-pub", "old-secret", "https://example.test", "user-1", repo_name="shop"))
 
-    new_config = hook_module.LangfuseConfig("new-pub", "new-secret", "https://example.test", "user-1")
+    new_config = hook_module.LangfuseConfig("new-pub", "new-secret", "https://example.test", "user-1", repo_name="shop")
 
     assert hook_module.peek_delivery_status(new_config) is None
 

@@ -210,7 +210,7 @@ def teammate_extra_assistant_row(session_id: str, agent_id: str, index: int, min
 
 def make_config(hook_module: Any, trace_seed: Optional[str] = None) -> Any:
     return hook_module.LangfuseConfig(
-        "public", "secret", "https://example.test", "user-1", trace_seed
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed=trace_seed
     )
 
 
@@ -313,6 +313,23 @@ def test_emits_teammate_generations_with_token_usage_and_linkage(
     generations = [obs for obs in fake_langfuse.observations if obs.name == "Teammate LLM Call 1"]
     assert generations, "expected a teammate generation"
     assert generations[0].kwargs["usage_details"] == {"input": 100, "output": 50}
+
+
+def test_every_teammate_observation_carries_the_repo(hook_module, fake_langfuse, isolated_hook_state):
+    session_id = "session-test"
+    transcript = isolated_hook_state / "transcript.jsonl"
+    make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
+    write_teammate(transcript, session_id, "abuilder-4", "builder-issue-4", turn_count=2)
+
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, make_config(hook_module), session_id, transcript
+    )
+
+    teammate_observations = [obs for obs in fake_langfuse.observations if obs.name.startswith("Teammate")]
+    assert {obs.name for obs in teammate_observations} >= {"Teammate Turn", "Teammate LLM Call 1"}
+    for obs in teammate_observations:
+        assert obs.propagated["metadata"]["repo"] == "shop", obs.name
+        assert "repo:shop" in obs.propagated["tags"], obs.name
 
 
 def test_delta_emission_across_two_firings(hook_module, fake_langfuse, isolated_hook_state):
