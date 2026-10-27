@@ -74,6 +74,14 @@ With none of these, the trace has no user.
 
 If `~/.claude.json` or the git config exists but cannot be read, the hook does not move on to the next source. The trace has no user, and Claude Code shows a message that names the problem.
 
+### Repo name
+
+Each trace carries the name of its repo, so a Langfuse dashboard can total token use per repo. The name is on the trace as the tag `repo:<name>`, and on the trace and every observation in it as the metadata key `repo`.
+
+The name is the last part of the address of the git remote `origin`, without `.git`: `git@github.com:acme/shop.git` gives `shop`. Without `origin`, the hook uses the first remote that `git remote` lists. Without any remote, the name is the repo's folder name; all worktrees of that repo share the main folder's name. Outside git, it is the session folder's name. The remote's address itself, with any user name or token in it, is never sent.
+
+A fork and its source with the same name, such as `jaap/shop` and `acme/shop`, share one tag.
+
 ## Requirements
 
 One of:

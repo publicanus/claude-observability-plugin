@@ -10,7 +10,7 @@ def test_emit_new_turns_from_completed_async_agent_transcript(
     isolated_hook_state,
 ):
     transcript = fixture_transcript_path("async_agent_completed")
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
 
     emitted = hook_module.emit_new_turns_from_transcript(
         fake_langfuse,
@@ -33,7 +33,7 @@ def test_emit_new_turns_defers_async_agent_until_session_end_flush(
     isolated_hook_state,
 ):
     transcript = fixture_transcript_path("async_agent_deferred")
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
 
     emitted = hook_module.emit_new_turns_from_transcript(
         fake_langfuse,

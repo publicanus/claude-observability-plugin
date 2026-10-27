@@ -77,7 +77,7 @@ def test_seeded_turns_get_individually_predictable_trace_ids(
     transcript = write_two_turn_transcript(tmp_path)
     seed = "5b6e9821-3f0a-4b8f-9d0e-000000000001"
     config = hook_module.LangfuseConfig(
-        "public", "secret", "https://example.test", "user-1", trace_seed=seed
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed=seed
     )
 
     emitted = hook_module.emit_new_turns_from_transcript(
@@ -112,7 +112,7 @@ def test_turn_numbers_continue_across_hook_runs(
     transcript = write_two_turn_transcript(tmp_path)
     seed = "session-abc"
     config = hook_module.LangfuseConfig(
-        "public", "secret", "https://example.test", "user-1", trace_seed=seed
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed=seed
     )
 
     hook_module.emit_new_turns_from_transcript(fake_langfuse, config, "session-seeded", transcript)
@@ -152,7 +152,7 @@ def test_without_seed_trace_ids_stay_auto_generated(
     hook_module, fake_langfuse, isolated_hook_state, tmp_path
 ):
     transcript = write_two_turn_transcript(tmp_path)
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
 
     emitted = hook_module.emit_new_turns_from_transcript(
         fake_langfuse, config, "session-seeded", transcript
@@ -168,7 +168,7 @@ def test_derivation_failure_falls_back_to_auto_generated_trace_id(
 ):
     transcript = write_two_turn_transcript(tmp_path)
     config = hook_module.LangfuseConfig(
-        "public", "secret", "https://example.test", "user-1", trace_seed="session-abc"
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed="session-abc"
     )
 
     def _boom(trace_seed: str, turn_number: int) -> str:
@@ -192,7 +192,7 @@ def test_forced_context_failure_falls_back_to_auto_generated_trace_id(
 ):
     transcript = write_two_turn_transcript(tmp_path)
     config = hook_module.LangfuseConfig(
-        "public", "secret", "https://example.test", "user-1", trace_seed="session-abc"
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed="session-abc"
     )
 
     def _boom(*args: Any, **kwargs: Any) -> Any:

@@ -16,7 +16,7 @@ SECRETS_IN_FIXTURE = [
 
 
 def _emit(hook_module: Any, fake_langfuse: Any, fixture_transcript_path: Any, name: str, session_id: str) -> None:
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1")
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
     emitted = hook_module.emit_new_turns_from_transcript(
         fake_langfuse, config, session_id, fixture_transcript_path(name)
     )
