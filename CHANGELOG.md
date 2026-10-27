@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.6.0...v1.7.0) (2026-10-27)
+
+
+### Features
+
+* **hook:** every trace lists the plugins its turn used, with their versions ([#37](https://github.com/publicanus/claude-observability-plugin/issues/37)) ([#48](https://github.com/publicanus/claude-observability-plugin/issues/48)) ([f2114d6](https://github.com/publicanus/claude-observability-plugin/commit/f2114d63962d1e8362b987bd81b0c90b41af75aa))
+* **hook:** turns that failed to reach Langfuse are sent again later ([#20](https://github.com/publicanus/claude-observability-plugin/issues/20)) ([#49](https://github.com/publicanus/claude-observability-plugin/issues/49)) ([11b7b34](https://github.com/publicanus/claude-observability-plugin/commit/11b7b349314e737dff49cfe414248def4eeee983))
+
+
+### Bug Fixes
+
+* **hook:** two sessions on one Windows machine do not spoil each other's saved state ([#33](https://github.com/publicanus/claude-observability-plugin/issues/33)) ([#45](https://github.com/publicanus/claude-observability-plugin/issues/45)) ([f21d2b6](https://github.com/publicanus/claude-observability-plugin/commit/f21d2b66d9360aabe4725fe283b191cad86dbc35))
+
 ## [1.6.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.5.1...v1.6.0) (2026-10-27)
 
 
