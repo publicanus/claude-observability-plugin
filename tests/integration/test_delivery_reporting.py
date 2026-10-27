@@ -213,9 +213,9 @@ def test_log_on_authentication_rejection(hook_module):
 def test_log_on_unreachable_host(hook_module):
     line = hook_module.format_processed_log(3, 0.05, "sess-1", "unreachable", "https://example.test did not respond")
 
-    assert line.startswith("Delivery failed:")
+    assert line.startswith("Delivery waiting:")
     assert "did not respond" in line
-    assert "3 turn(s)" in line
+    assert "3 turn(s) wait to be sent" in line
     assert "session=sess-1" in line
     assert "Processed" not in line
 
@@ -251,7 +251,8 @@ def test_warning_on_authentication_rejection_is_a_repair_recipe(hook_module):
 def test_warning_on_unreachable_host_is_a_repair_recipe(hook_module):
     warning = hook_module.format_delivery_warning("unreachable", "https://example.test did not respond", "https://example.test")
 
-    assert "no traces are being recorded" in warning
+    assert "wait on this computer and are sent once Langfuse answers again" in warning
+    assert "no traces are being recorded" not in warning
     # Names the host actually tried, not just "unreachable".
     assert "https://example.test did not respond" in warning
     assert "LANGFUSE_BASE_URL" in warning
@@ -346,7 +347,7 @@ def test_main_logs_processed_when_delivery_is_confirmed_healthy(
 
     assert "Processed 1 turns" in log_contents
     assert "Delivery rejected" not in log_contents
-    assert "Delivery failed" not in log_contents
+    assert "Delivery waiting" not in log_contents
     # A working session prints nothing at all — no stray systemMessage.
     assert system_message is None
 
@@ -399,14 +400,14 @@ def test_main_logs_unreachable_instead_of_processed_on_dead_host(
 
     log_contents, system_message = run_main(hook_module, monkeypatch, capsys, fake_langfuse, "sess-unreachable", transcript)
 
-    assert "Delivery failed" in log_contents
+    assert "Delivery waiting" in log_contents
     assert "did not respond" in log_contents
-    assert "1 turn(s) were not delivered" in log_contents
+    assert "1 turn(s) wait to be sent" in log_contents
     assert "Processed 1 turns" not in log_contents
 
     assert system_message is not None
     warning = system_message["systemMessage"]
-    assert "no traces are being recorded" in warning
+    assert "wait on this computer and are sent once Langfuse answers again" in warning
     assert "LANGFUSE_BASE_URL" in warning
     assert "https://cloud.langfuse.com" in warning
     assert "restart Claude Code" in warning

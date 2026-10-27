@@ -116,8 +116,9 @@ def test_at_session_start_a_python3_that_fails_the_check_gets_the_message_and_th
 
 def real_python3(bin_dir: Path) -> dict[str, str]:
     """Puts the Python running these tests on the launcher's PATH as `python3`, and
-    returns the environment it needs to start. That Python has no langfuse package."""
-    write_stub(bin_dir, "python3", f'exec "{Path(sys.executable).as_posix()}" "$@"')
+    returns the environment it needs to start. That Python sees no installed packages,
+    so no langfuse package either."""
+    write_stub(bin_dir, "python3", f'exec "{Path(sys.executable).as_posix()}" -S "$@"')
     # Python on Windows does not start without SYSTEMROOT.
     return {name: os.environ[name] for name in ["SYSTEMROOT"] if name in os.environ}
 
@@ -132,11 +133,32 @@ def test_at_session_start_a_real_python3_without_langfuse_gets_the_message(
     assert_cannot_run_message(result, hook_module.SETUP_COMMAND)
 
 
-def test_at_session_start_a_real_python3_with_langfuse_runs_the_script(bin_dir: Path, tmp_path: Path) -> None:
+def install_fake_langfuse(tmp_path: Path, version: str) -> Path:
+    """A folder holding an empty langfuse package that says it is `version`."""
     packages = tmp_path / "packages"
     (packages / "langfuse").mkdir(parents=True)
     (packages / "langfuse" / "__init__.py").write_text("", encoding="utf-8")
-    env = {**real_python3(bin_dir), "PYTHONPATH": str(packages)}
+    dist_info = packages / f"langfuse-{version}.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: langfuse\nVersion: {version}\n", encoding="utf-8"
+    )
+    return packages
+
+
+def test_at_session_start_a_real_python3_with_a_langfuse_older_than_4_2_gets_the_message(
+    bin_dir: Path, tmp_path: Path, hook_module: Any
+) -> None:
+    env = {**real_python3(bin_dir), "PYTHONPATH": str(install_fake_langfuse(tmp_path, "4.1.0"))}
+
+    result = run_launcher(bin_dir, WARN, env=env)
+
+    assert_cannot_run_message(result, hook_module.SETUP_COMMAND)
+
+
+def test_at_session_start_a_real_python3_with_langfuse_runs_the_script(bin_dir: Path, tmp_path: Path) -> None:
+    # 4.10 is newer than 4.2, though "4.10" sorts before "4.2" as text.
+    env = {**real_python3(bin_dir), "PYTHONPATH": str(install_fake_langfuse(tmp_path, "4.10.0"))}
 
     result = run_launcher(bin_dir, WARN, env=env)
 
