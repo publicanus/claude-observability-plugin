@@ -82,8 +82,12 @@ def _install_langfuse_stubs() -> None:
     sys.modules["opentelemetry.trace"] = trace_module
 
 
-@pytest.fixture(scope="session")
-def hook_module() -> Any:
+def load_hook_module() -> Any:
+    """Loads hooks/langfuse_hook.py with langfuse and opentelemetry stubbed out.
+
+    Replaces sys.modules["langfuse"], ["opentelemetry"] and ["opentelemetry.trace"]
+    with stubs, and registers the hook as sys.modules["langfuse_hook_under_test"].
+    """
     _install_langfuse_stubs()
     module_path = REPO_ROOT / "hooks" / "langfuse_hook.py"
     spec = importlib.util.spec_from_file_location("langfuse_hook_under_test", module_path)
@@ -93,6 +97,11 @@ def hook_module() -> Any:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="session")
+def hook_module() -> Any:
+    return load_hook_module()
 
 
 @pytest.fixture
