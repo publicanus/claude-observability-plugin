@@ -5,7 +5,7 @@
 #   sh run_hook.sh [--warn-if-cannot-run] <script> [args...]
 #
 #   --warn-if-cannot-run  when the hook cannot run on this machine (no uv, and no
-#              python3 that is Python 3.10+ with the langfuse package), print a
+#              python3 that is Python 3.10+ with langfuse 4.2 or later), print a
 #              Claude Code systemMessage that this session is not traced, and
 #              exit 0 without running <script>
 #   <script>   path of the Python script; stdin and [args...] are passed on to it
@@ -14,11 +14,13 @@
 
 CANNOT_RUN_MESSAGE='{"systemMessage": "Langfuse: the hook cannot run on this machine, this session is not traced. It needs uv (on Windows, uv is required). To fix it, run /langfuse-observability:langfuse-setup."}'
 
-# Exit 0 when python3 is Python 3.10+ and the langfuse package is installed.
-# The package is looked up, not imported: an import costs about 0.2 s per session start.
+# Exit 0 when python3 is Python 3.10+ with langfuse 4.2 or later installed.
+# The version is read from the package's metadata, not imported: an import costs
+# about 0.2 s per session start.
 python3_can_run_hook() {
-  python3 -c 'import sys, importlib.util
-sys.exit(sys.version_info < (3, 10) or importlib.util.find_spec("langfuse") is None)' \
+  python3 -c 'import sys, importlib.metadata as metadata
+major, minor = (int(part) for part in metadata.version("langfuse").split(".")[:2])
+sys.exit(sys.version_info < (3, 10) or (major, minor) < (4, 2))' \
     </dev/null >/dev/null 2>&1
 }
 

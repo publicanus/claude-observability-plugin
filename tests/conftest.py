@@ -81,6 +81,32 @@ def _install_langfuse_stubs() -> None:
     sys.modules["opentelemetry"] = opentelemetry_module
     sys.modules["opentelemetry.trace"] = trace_module
 
+    # The hook's WaitingTurnExporter is built on these; the stub client never calls it.
+    export_module = types.ModuleType("opentelemetry.sdk.trace.export")
+
+    class SpanExporter:
+        pass
+
+    class SpanExportResult:
+        SUCCESS = "success"
+        FAILURE = "failure"
+
+    export_module.SpanExporter = SpanExporter
+    export_module.SpanExportResult = SpanExportResult
+    encoder_module = types.ModuleType("opentelemetry.exporter.otlp.proto.common.trace_encoder")
+    encoder_module.encode_spans = lambda spans: None
+    for name in (
+        "opentelemetry.sdk",
+        "opentelemetry.sdk.trace",
+        "opentelemetry.exporter",
+        "opentelemetry.exporter.otlp",
+        "opentelemetry.exporter.otlp.proto",
+        "opentelemetry.exporter.otlp.proto.common",
+    ):
+        sys.modules[name] = types.ModuleType(name)
+    sys.modules["opentelemetry.sdk.trace.export"] = export_module
+    sys.modules["opentelemetry.exporter.otlp.proto.common.trace_encoder"] = encoder_module
+
 
 def load_hook_module() -> Any:
     """Loads hooks/langfuse_hook.py with langfuse and opentelemetry stubbed out.
@@ -238,6 +264,8 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "LOG_FILE", state_dir / "langfuse_hook.log")
     monkeypatch.setattr(hook_module, "HURT_PENDING_FILE", state_dir / "hurt_pending.json")
     monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
+    monkeypatch.setattr(hook_module, "WAITING_DIR", state_dir / "langfuse_waiting")
+    monkeypatch.setattr(hook_module, "WAITING_LOCK_FILE", state_dir / "langfuse_waiting.lock")
     # The trace-user lookup reads ~/.claude.json and git config, and the plugin
     # versions come from Claude Code's installed_plugins.json; keep all off the
     # real machine. The chdir covers a payload without a cwd, where git

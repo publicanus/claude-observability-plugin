@@ -39,16 +39,14 @@ not silent.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib import error as urlerror
-from urllib import request as urlrequest
 from urllib.parse import urlencode
+
+from langfuse_client import HttpResponse, LangfuseClient
 
 CATEGORIES = (
     "correction-repeated",
@@ -69,52 +67,6 @@ PENDING_MAX_AGE_DAYS = 30
 # turn, which started before the hurt was queued — days before when an old
 # session is resumed — so the range reaches this far back from that moment.
 TRACE_LOOKBACK_DAYS = 30
-
-
-# ----------------- Minimal Langfuse REST client -----------------
-
-@dataclass
-class HttpResponse:
-    status: int
-    body: Any
-
-
-class LangfuseClient:
-    """Talks to the handful of REST endpoints a hurt annotation needs, using
-    this hook's own resolved LangfuseConfig (public_key/secret_key/host) —
-    never a second, independently-resolved credential source."""
-
-    def __init__(self, config: Any, *, timeout: float = 30) -> None:
-        self._config = config
-        self._timeout = timeout
-
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> HttpResponse:
-        url = self._config.host.rstrip("/") + path
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urlrequest.Request(url, data=data, method=method)
-        req.add_header("Content-Type", "application/json")
-        credentials = f"{self._config.public_key}:{self._config.secret_key}".encode("utf-8")
-        req.add_header("Authorization", "Basic " + base64.b64encode(credentials).decode("ascii"))
-        try:
-            with urlrequest.urlopen(req, timeout=self._timeout) as resp:
-                raw = resp.read()
-                parsed = json.loads(raw) if raw else None
-                return HttpResponse(status=resp.status, body=parsed)
-        except urlerror.HTTPError as exc:
-            raw = exc.read()
-            try:
-                parsed = json.loads(raw) if raw else None
-            except json.JSONDecodeError:
-                parsed = None
-            return HttpResponse(status=exc.code, body=parsed)
-        except Exception:
-            return HttpResponse(status=0, body=None)
-
-    def get(self, path: str) -> HttpResponse:
-        return self._request("GET", path)
-
-    def post(self, path: str, body: dict) -> HttpResponse:
-        return self._request("POST", path, body)
 
 
 Log = Optional[Callable[[str], None]]

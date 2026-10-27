@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "langfuse>=4.0,<5",
+#   "langfuse>=4.2,<5",
 # ]
 # ///
 """
@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import hashlib
+import importlib.metadata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -32,6 +33,8 @@ from urllib.parse import urlsplit
 try:
     from langfuse import Langfuse, propagate_attributes
     from opentelemetry import trace as otel_trace_api
+    from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
+    from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 except Exception:
     sys.exit(0)
 
@@ -53,12 +56,21 @@ INSTALLED_PLUGINS_FILE = Path.home() / ".claude" / "plugins" / "installed_plugin
 HURT_PENDING_FILE = STATE_DIR / "hurt_pending.json"
 HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
 
+# Trace data that waits until Langfuse has accepted it, and the lock the one
+# background sender holds while it sends.
+WAITING_DIR = STATE_DIR / "langfuse_waiting"
+WAITING_LOCK_FILE = STATE_DIR / "langfuse_waiting.lock"
+WAITING_LOCK_TIMEOUT_S = 60.0
+SEND_WAITING_FLAG = "--send-waiting"
+
 # Importable as a sibling of this file regardless of how it was invoked
 # (uv run --script puts the script's own directory on sys.path[0] already,
 # but the test harness loads this file via importlib without doing so).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hurt_annotations import LangfuseClient, process_pending_hurts  # noqa: E402
+from hurt_annotations import process_pending_hurts  # noqa: E402
+from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
+from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 
 
 # ----------------- Configuration -----------------
@@ -345,12 +357,32 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         plugin_versions=read_plugin_versions(find_main_checkout(cwd) or session_dir(cwd)),
     )
 
+class WaitingTurnExporter(SpanExporter):
+    """Stores each batch of spans in WAITING_DIR for the background sender; sends nothing."""
+
+    def __init__(self, config: LangfuseConfig) -> None:
+        self._target = Target(config.host, config.public_key, config.secret_key)
+
+    def export(self, spans: Any) -> Any:
+        body = encode_spans(spans).SerializePartialToString()
+        try:
+            write_waiting_batch(WAITING_DIR, self._target, body)
+        except OSError as e:
+            info(f"could not store {len(spans)} span(s) to send: {type(e).__name__}: {e}")
+            return SpanExportResult.FAILURE
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+
 def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
     try:
         return Langfuse(
             public_key=config.public_key,
             secret_key=config.secret_key,
             host=config.host,
+            span_exporter=WaitingTurnExporter(config),
         )
     except Exception:
         return None
@@ -1669,7 +1701,7 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
         raise RuntimeError(
             f"Langfuse SDK {sdk_version} is missing _otel_tracer or "
             f"_create_observation_from_otel_span. This hook targets SDK 4.x; "
-            f"pin with `pip install \"langfuse>=4.0,<5\"` or update the hook script."
+            f"pin with `pip install \"langfuse>=4.2,<5\"` or update the hook script."
         )
     start_ns = to_otel_nanoseconds(start_time)
     if parent_otel_span is not None:
@@ -2964,13 +2996,10 @@ def emit_new_turns_from_transcript(
 
 
 # ----------------- Delivery health -----------------
-# langfuse.flush() (below) cannot tell a rejected keypair from a genuinely
-# successful send: the OTel BatchSpanProcessor swallows the exporter's
-# per-batch SpanExportResult and force_flush() returns True regardless of
-# outcome. The only cheap, reliable signal is hitting the REST endpoint the
-# SDK itself authenticates against — reusing hurt_annotations.LangfuseClient
-# (already a dependency-free REST client keyed on this hook's own resolved
-# credentials) rather than the SDK's blocking, retrying auth_check().
+# The hook itself only stores turns; the background sender sends them. So the
+# hook learns whether Langfuse takes these keys from one REST call on the
+# endpoint the SDK authenticates against, made with LangfuseClient rather than
+# the SDK's blocking, retrying auth_check().
 
 DELIVERY_HEALTH_STATE_KEY = "_delivery_health"
 # Re-verified at most this often: a blocking round trip on every
@@ -3000,7 +3029,7 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
     response = LangfuseClient(config, timeout=5).get("/api/public/projects")
     if response.status == 200:
         return "ok", ""
-    if response.status in (401, 403):
+    if keys_rejected(response.status):
         return "rejected", f"HTTP {response.status} from {config.host}"
     if response.status == 0:
         return "unreachable", f"{config.host} did not respond"
@@ -3109,7 +3138,7 @@ def format_processed_log(emitted: int, dur: float, session_id: str, status: str,
         )
     if emitted > 0 and status == "unreachable":
         return (
-            f"Delivery failed: {detail}; {emitted} turn(s) were not delivered "
+            f"Delivery waiting: {detail}; {emitted} turn(s) wait to be sent "
             f"(session={session_id})."
         )
     return f"Processed {emitted} turns in {dur:.2f}s (session={session_id})"
@@ -3155,8 +3184,8 @@ def format_delivery_warning(status: str, detail: str, host: str) -> Optional[str
         )
     if status == "unreachable":
         return (
-            f"Langfuse tracing is broken: {detail} — no traces are being "
-            "recorded. Check LANGFUSE_BASE_URL: unset defaults to "
+            f"Langfuse cannot be reached: {detail}. The turns wait on this "
+            "computer and are sent once Langfuse answers again. Check LANGFUSE_BASE_URL: unset defaults to "
             f"{EU_CLOUD_HOST}, and a self-hosted Langfuse needs its own "
             "address.\n"
             "Fix the value or your network/VPN access to that host, then "
@@ -3170,7 +3199,7 @@ def flush_and_shutdown_langfuse_client(langfuse: Optional[Langfuse]) -> None:
     if langfuse is None:
         return
 
-    # Cap flush+shutdown at 5s so a slow/unreachable Langfuse can't stall Claude Code.
+    # Cap flush+shutdown at 5 s, so a stuck write to disk cannot stall Claude Code.
     try:
         def _flush_and_shutdown():
             try:
@@ -3218,9 +3247,15 @@ def main() -> int:
             print(json.dumps({"systemMessage": format_no_keys_message(payload.get("cwd"))}))
         return 0
 
-    if config is None:
-        return 0
+    if config is not None:
+        trace_this_run(config, payload, start)
+    start_waiting_turns_sender()
+    return 0
 
+
+def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float) -> None:
+    """Attaches pending /hurt notes, stores this run's new turns to be sent, and
+    reports the delivery status in the log and, when it is bad, to the user."""
     # Runs on every firing, independent of this run's hook_context/payload —
     # the pending queue is global to the machine, not scoped to this session,
     # so a healthy hook run in any project can drain hurts left behind by a
@@ -3238,14 +3273,14 @@ def main() -> int:
 
     hook_context = get_session_id_and_transcript_path(payload)
     if hook_context is None:
-        return 0
+        return
 
     session_id, transcript_path = hook_context
     flush_deferred_agent_turns = is_session_end_hook_payload(payload)
 
     langfuse = create_langfuse_client(config)
     if langfuse is None:
-        return 0
+        return
 
     try:
         emitted = emit_new_turns_from_transcript(
@@ -3255,6 +3290,9 @@ def main() -> int:
             transcript_path,
             flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
+        # Stores the turns on disk now: a SessionEnd hook can be stopped during
+        # the delivery check below, and the turn position is already saved.
+        langfuse.flush()
 
         dur = time.time() - start
         # Nothing was even attempted to be sent, so "Processed 0" needs no
@@ -3275,18 +3313,46 @@ def main() -> int:
         if warnings:
             print(json.dumps({"systemMessage": "\n".join(warnings)}))
 
-        return 0
+        return
 
     except TimeoutError as e:
         debug(f"lock timeout, skipping: {e}")
-        return 0
+        return
 
     except Exception as e:
         debug(f"Unexpected failure: {e}")
-        return 0
+        return
 
     finally:
         flush_and_shutdown_langfuse_client(langfuse)
 
+
+def start_waiting_turns_sender() -> None:
+    """Starts this script with SEND_WAITING_FLAG in the background, when trace data waits."""
+    if not waiting_files(WAITING_DIR):
+        return
+    try:
+        start_sender([sys.executable, str(Path(__file__).resolve()), SEND_WAITING_FLAG])
+    except OSError as e:
+        info(f"could not start the sender of waiting turns: {type(e).__name__}: {e}")
+
+
+def send_waiting_turns_main() -> int:
+    """Sends the trace data in WAITING_DIR, as the only sender on this machine."""
+    try:
+        with FileLock(WAITING_LOCK_FILE, timeout_s=WAITING_LOCK_TIMEOUT_S):
+            sent = send_waiting_turns(WAITING_DIR, importlib.metadata.version("langfuse"), info)
+    except TimeoutError as e:
+        info(f"another sender kept the waiting turns busy: {e}")
+        return 0
+    except Exception as e:
+        # The sender's stderr goes nowhere, so the log is the only place this shows.
+        info(f"the sender of waiting turns stopped: {type(e).__name__}: {e}")
+        return 1
+    if sent:
+        info(f"Sent {sent} waiting batch(es) to Langfuse")
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(send_waiting_turns_main() if sys.argv[1:] == [SEND_WAITING_FLAG] else main())

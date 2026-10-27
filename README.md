@@ -97,7 +97,7 @@ If that file exists but cannot be read, the hook stops with an error that names 
 One of:
 
 - [uv](https://docs.astral.sh/uv/) (recommended) on `PATH`. The hook uses `uv run --script` and installs the Langfuse SDK from the script metadata automatically.
-- Python 3.10+ as `python3` with `langfuse>=4.0,<5` installed in that Python environment. This is only used as a fallback when `uv` is not on `PATH`.
+- Python 3.10+ as `python3` with `langfuse>=4.2,<5` installed in that Python environment. This is only used as a fallback when `uv` is not on `PATH`.
 
 If neither is set up, each session start shows a message that the session is not traced. Claude Code works as usual.
 
@@ -106,6 +106,8 @@ On Windows, install [Git for Windows](https://gitforwindows.org/) and uv. The ho
 ## How it works
 
 A hook reads the session transcript incrementally on every turn (Stop) and at session end (SessionEnd), and emits a Langfuse trace with one span per turn, nested generations per assistant message, and child tool spans for every tool call. Token usage is captured when present.
+
+The hook does not send the traces itself. It stores them in `~/.claude/state/langfuse_waiting/`, and a background process sends them and deletes each one once Langfuse has accepted it. When Langfuse cannot be reached or answers with an error, the traces wait there, and the next turn in any session on the computer sends them, each at the time it happened. Each waiting file holds a copy of its repo's Langfuse keys, so that a session in another repo can send it. When Langfuse rejects the keys, the traces are dropped.
 
 When no Langfuse keys are set for the repo, the hook sends nothing. At session start (SessionStart) it shows a message saying so: the line "Langfuse: no keys for this repo, this session is not traced.", the setup skill's name, and short manual steps for your system (macOS, Linux or Windows). The plugin's steps are in `hooks/no_keys_steps/<system>.txt`. A repo can replace them for one or more systems with its own `.claude/langfuse-observability/no-keys-steps/<system>.txt` at the repo root, where `<system>` is `macos`, `linux` or `windows`.
 
@@ -284,7 +286,7 @@ claude plugin uninstall langfuse-observability
 - Nothing in Langfuse: check `~/.claude/state/langfuse_hook.log` (enable `CC_LANGFUSE_DEBUG`).
 - Desktop chat has no traces: regular Claude Desktop Chat mode is not hook-backed. Use the `claude` CLI or Claude Code GUI Code mode.
 - Hook not firing: confirm with `claude plugin list` that langfuse-observability is enabled; restart Claude Code.
-- langfuse import errors (no uv): install uv, or ensure the `python3` on your PATH is Python 3.10+ and has `langfuse>=4.0,<5` installed.
+- langfuse import errors (no uv): install uv, or ensure the `python3` on your PATH is Python 3.10+ and has `langfuse>=4.2,<5` installed.
 
 ## License
 
