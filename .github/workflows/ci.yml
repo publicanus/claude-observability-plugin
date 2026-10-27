@@ -65,28 +65,5 @@ jobs:
       # The suite drives the hook over recorded transcript fixtures — no Langfuse
       # keys, no network. This job deliberately holds no secrets, so a test that
       # starts reaching for a real credential or a real host fails here.
-      - name: TEMP line-ending evidence
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          git config --show-origin --get-all core.autocrlf || echo "core.autocrlf not set"
-          git ls-files --eol hooks/run_hook.sh
-          which sh
-          stubbin="$(cygpath -u "$RUNNER_TEMP")/stubbin"
-          mkdir -p "$stubbin"
-          cat > "$stubbin/uv" <<'STUB'
-          #!/bin/sh
-          for a in "$@"; do printf '%s' "$a" | od -c | head -2; done
-          STUB
-          chmod +x "$stubbin/uv"
-          set +e
-          echo "--- checkout copy, uv stub"
-          PATH="$stubbin:/usr/bin" /usr/bin/sh hooks/run_hook.sh /x.py last; echo "exit=$?"
-          echo "--- checkout copy, no uv or python3"
-          PATH=/nonexistent /usr/bin/sh hooks/run_hook.sh /x.py; echo "exit=$?"
-          echo "--- LF copy, uv stub"
-          tr -d '\r' < hooks/run_hook.sh > "$stubbin/lf.sh"
-          PATH="$stubbin:/usr/bin" /usr/bin/sh "$stubbin/lf.sh" /x.py last; echo "exit=$?"
-
       - name: pytest
         run: uv run --python ${{ matrix.python }} --frozen pytest
