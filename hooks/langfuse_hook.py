@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -256,14 +257,16 @@ def read_installed_plugins() -> Dict[str, List[Dict[str, Any]]]:
 # Claude Code uses a plugin's local setting over its project setting, and that over its user one.
 INSTALL_SCOPES_MOST_SPECIFIC_FIRST = ("local", "project", "user")
 REPO_INSTALL_SCOPES = ("local", "project")
+VERSION_PATTERN = re.compile(r"[0-9.]+")  # digits and dots only, as 8.9.0
 
 def plugin_version(raw: Any) -> Optional[str]:
     """An install's version as a trace shows it: cut at the first dash, as `8.9.0` from
-    `8.9.0-0ae331d8a58b`; None when it does not start with a digit, such as a bare commit
-    hash, `unknown` or no version at all."""
-    if not isinstance(raw, str) or not raw[:1].isdigit():
+    `8.9.0-0ae331d8a58b`; None when that part is not made of digits and dots only, such
+    as a bare commit hash, `unknown` or no version at all."""
+    if not isinstance(raw, str):
         return None
-    return raw.split("-", 1)[0]
+    version = raw.split("-", 1)[0]
+    return version if VERSION_PATTERN.fullmatch(version) else None
 
 def install_counts_for(install: Dict[str, Any], project_dir: Path) -> bool:
     """Whether an install applies to a session in project_dir: a user install always

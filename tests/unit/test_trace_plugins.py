@@ -76,10 +76,10 @@ def test_the_local_install_counts_over_the_project_install_of_the_same_repo(
 
 @pytest.mark.parametrize(
     "version",
-    ["dbd4588f9e10", "unknown", None],
-    ids=["bare-commit-hash", "unknown", "missing"],
+    ["dbd4588f9e10", "41f619d61b99", "unknown", None],
+    ids=["bare-commit-hash", "bare-commit-hash-starting-with-a-digit", "unknown", "missing"],
 )
-def test_a_version_that_does_not_start_with_a_digit_counts_as_no_version(
+def test_a_version_not_made_of_digits_and_dots_counts_as_no_version(
     hook_module, isolated_hook_state, tmp_path, version
 ):
     repo = tmp_path / "shop"
