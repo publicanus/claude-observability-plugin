@@ -1863,6 +1863,34 @@ def describe_plugins(plugins: List[Any], plugin_versions: Dict[str, Optional[str
         entries.append(entry)
     return entries
 
+# ---- The component that did an observation's work ----
+SESSION_COMPONENT = "session"
+
+@dataclass(frozen=True)
+class Component:
+    """What did an observation's work: SESSION_COMPONENT for the main session's own
+    work, else an agent type, which can be None when the agent's meta file has none."""
+    name: Any
+    plugin: Optional[str]
+    version: Optional[str]
+
+def component_of(name: Any, plugin_versions: Dict[str, Optional[str]]) -> Component:
+    """The component named name, with the plugin its name gives and that plugin's
+    version from plugin_versions; plugin and version are None where it has none."""
+    plugin = plugin_of(name)
+    return Component(name, plugin, plugin_versions.get(plugin) if plugin else None)
+
+def component_kwargs(component: Component, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """The metadata and version arguments of an observation of component's work:
+    metadata with "component" added, and "plugin" where it has one; "version" only
+    where its plugin has one."""
+    kwargs: Dict[str, Any] = {"metadata": {**metadata, "component": component.name}}
+    if component.plugin is not None:
+        kwargs["metadata"]["plugin"] = component.plugin
+    if component.version is not None:
+        kwargs["version"] = component.version
+    return kwargs
+
 def short_session_label(session_id: str, max_len: int = 12) -> str:
     """Return a compact session label for trace names."""
     sid = session_id.strip()
@@ -2039,6 +2067,8 @@ def emit_single_tool_observation(
     turn: Turn,
     assistant_timestamp: Optional[datetime],
     tool_use: Dict[str, Any],
+    component: Component,
+    plugin_versions: Dict[str, Optional[str]],
     subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]],
     pending_subagents: List[Dict[str, Any]],
     pending_async_tool_results: List[Dict[str, Any]],
@@ -2073,7 +2103,7 @@ def emit_single_tool_observation(
         start_time=tool_use_timestamp,
         parent_otel_span=parent_otel_span,
         input=tool_input,
-        metadata=tool_metadata,
+        **component_kwargs(component, tool_metadata),
         **({"level": tool_level, "status_message": tool_status_message} if tool_level else {}),
     )
     tool_span.update(output=tool_output)
@@ -2093,6 +2123,7 @@ def emit_single_tool_observation(
                 parent_otel_span,
                 subagent,
                 tool_use_timestamp,
+                plugin_versions,
             )
 
     tool_end_timestamp = _get_latest_timestamp(tool_result.result_timestamp, tool_use_timestamp)
@@ -2130,6 +2161,8 @@ def emit_tool_observation_batch(
     turn: Turn,
     assistant_message: Dict[str, Any],
     tool_uses: List[Dict[str, Any]],
+    component: Component,
+    plugin_versions: Dict[str, Optional[str]],
     subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]],
     pending_subagents: List[Dict[str, Any]],
     pending_async_tool_results: List[Dict[str, Any]],
@@ -2146,6 +2179,8 @@ def emit_tool_observation_batch(
             turn,
             assistant_timestamp,
             tool_use,
+            component,
+            plugin_versions,
             subagent_transcripts_by_tool_use_id,
             pending_subagents,
             pending_async_tool_results,
@@ -2265,6 +2300,7 @@ def emit_generation_observation(
     assistant_index: int,
     start_timestamp: Optional[datetime],
     generation_kwargs: Dict[str, Any],
+    component: Component,
 ) -> Any:
     # An assistant message without a usage record is not a billable LLM call;
     # emitting it as a generation would poison downstream token metering, which
@@ -2278,6 +2314,7 @@ def emit_generation_observation(
         metadata["model"] = kwargs.pop("model", None)
         metadata["usage_missing"] = True
         kwargs["metadata"] = metadata
+    kwargs.update(component_kwargs(component, kwargs["metadata"]))
     return _start_backdated(
         langfuse,
         name=f"{generation_prefix} {assistant_index + 1}",
@@ -2289,9 +2326,13 @@ def emit_generation_observation(
 
 def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn,
                            start_timestamp: Optional[datetime],
+                           component: Component,
+                           plugin_versions: Dict[str, Optional[str]],
                            generation_prefix: str = "LLM Call",
                            subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[datetime]:
-    """Emit a turn's generations and tool observations under an existing span."""
+    """Emit a turn's generations and tool observations under an existing span, as
+    component's work. An agent a tool call launched is emitted as the work of its own
+    agent type, with its version from plugin_versions."""
     user_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(turn.user_msg)))
     previous_timestamp = start_timestamp
     previous_tool_results: List[Dict[str, Any]] = []
@@ -2312,6 +2353,7 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
                     parent_otel_span,
                     ready_subagent["subagent"],
                     ready_subagent.get("display_start_timestamp") or ready_subagent.get("start_timestamp"),
+                    plugin_versions,
                 )
                 latest_end_timestamp = _get_latest_timestamp(latest_end_timestamp, subagent_end_timestamp)
 
@@ -2337,6 +2379,7 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
             assistant_index=assistant_index,
             start_timestamp=generation_start_timestamp,
             generation_kwargs=generation_kwargs,
+            component=component,
         )
         update_pending_subagent_display_start_after_launch_response(
             pending_subagents,
@@ -2350,6 +2393,8 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
             turn,
             assistant_message,
             tool_uses,
+            component,
+            plugin_versions,
             subagent_transcripts_by_tool_use_id,
             pending_subagents,
             pending_async_tool_results,
@@ -2383,6 +2428,7 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
             parent_otel_span,
             pending_subagent["subagent"],
             pending_subagent.get("display_start_timestamp") or pending_subagent.get("start_timestamp"),
+            plugin_versions,
         )
         latest_end_timestamp = _get_latest_timestamp(latest_end_timestamp, subagent_end_timestamp)
 
@@ -2390,7 +2436,8 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
 
 def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
                                subagent: Dict[str, Any],
-                               start_timestamp: Optional[datetime]) -> Optional[datetime]:
+                               start_timestamp: Optional[datetime],
+                               plugin_versions: Dict[str, Optional[str]]) -> Optional[datetime]:
     path = subagent.get("path")
     if not isinstance(path, Path):
         return start_timestamp
@@ -2410,6 +2457,7 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
     last_assistant = last_turn.assistant_msgs[-1]
     subagent_output_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
 
+    component = component_of(subagent.get("agent_type"), plugin_versions)
     description = subagent.get("description")
     subagent_name = f"Subagent: {description}" if isinstance(description, str) and description else "Subagent"
     subagent_span = _start_backdated(
@@ -2419,12 +2467,12 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
         start_time=subagent_start_timestamp,
         parent_otel_span=parent_otel_span,
         input={"role": "user", "content": subagent_input_text},
-        metadata={
+        **component_kwargs(component, {
             "agent_type": subagent.get("agent_type"),
             "description": description,
             "transcript_path": get_short_transcript_path_for_metadata(path),
             "user_text": subagent_input_meta,
-        },
+        }),
     )
 
     latest_end_timestamp = subagent_start_timestamp
@@ -2435,6 +2483,8 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
             subagent_span._otel_span,
             turn,
             previous_start_timestamp,
+            component,
+            plugin_versions,
             generation_prefix="Subagent LLM Call",
             subagent_transcripts_by_tool_use_id=None,
         )
@@ -2532,6 +2582,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id) + [repo_tag(repo_name)]
 
     trace_name = trace_display_name(session_id, turn_num)
+    session = component_of(SESSION_COMPONENT, plugin_versions)
     root_observation_name = "Conversational Turn"
 
     # Opt-in deterministic trace ids: fail open to the auto-generated id.
@@ -2556,13 +2607,15 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
             start_time=user_ts,
             forced_trace_id=forced_trace_id,
             input={"role": "user", "content": user_text},
-            metadata=trace_metadata,
+            **component_kwargs(session, trace_metadata),
         )
         obs_end_ts = emit_turn_observations(
             langfuse,
             trace_span._otel_span,
             turn,
             user_ts,
+            session,
+            plugin_versions,
             subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
         )
         trace_span.update(output={"role": "assistant", "content": final_assistant_text})
@@ -2673,6 +2726,7 @@ def emit_teammate_turn(
         tags += collect_skill_tags(turn)
 
     trace_name = teammate_trace_display_name(name, teammate_turn_num, session_id)
+    teammate_component = component_of(teammate.get("agent_type"), plugin_versions)
 
     forced_trace_id: Optional[str] = None
     if trace_seed:
@@ -2695,13 +2749,15 @@ def emit_teammate_turn(
             start_time=user_ts,
             forced_trace_id=forced_trace_id,
             input={"role": "user", "content": user_text},
-            metadata=trace_metadata,
+            **component_kwargs(teammate_component, trace_metadata),
         )
         obs_end_ts = emit_turn_observations(
             langfuse,
             trace_span._otel_span,
             turn,
             user_ts,
+            teammate_component,
+            plugin_versions,
             generation_prefix="Teammate LLM Call",
             # Agents a teammate launches get no spans of their own here. Where
             # Claude Code writes their transcripts is not checked.

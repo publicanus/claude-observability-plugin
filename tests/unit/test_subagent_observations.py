@@ -25,6 +25,7 @@ def test_subagent_observations_skip_malformed_jsonl_lines(
             "agent_type": "general-purpose",
         },
         None,
+        {},
     )
 
     assert end_timestamp.isoformat() == "2026-01-01T00:02:04.500000+00:00"
