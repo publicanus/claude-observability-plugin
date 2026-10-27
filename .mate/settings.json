@@ -1,0 +1,11 @@
+{
+  "tracker": {
+    "kind": "github",
+    "location": "publicanus/claude-observability-plugin"
+  },
+  "environment": "Python 3.10 or later (requires-python >=3.10; CI tests 3.10 and 3.13), managed with uv (uv.lock, no package build). Run the tests with: uv run --frozen pytest (tests/unit and tests/integration). Cut each work item's branch from origin/main inside the worktree the session runs in; never create or remove a worktree.",
+  "branches": {
+    "base": "main"
+  },
+  "design": "A comment on the work item's GitHub issue."
+}
