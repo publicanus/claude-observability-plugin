@@ -4,6 +4,7 @@ uv when it is on the PATH, else python3, else a silent exit.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,13 +20,17 @@ ARGS = ["--project-dir", "/repo with space"]
 def write_stub(bin_dir: Path, name: str) -> None:
     """A program that prints its own name and then each argument on its own line."""
     stub = bin_dir / name
-    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" {name} "$@"\n', encoding="utf-8")
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" {name} "$@"\n', encoding="utf-8", newline="\n")
     stub.chmod(0o755)
 
 
 def run_launcher(bin_dir: Path) -> subprocess.CompletedProcess:
+    """Runs the launcher as the hooks do, with the `sh` on the PATH (on Windows,
+    the one Git for Windows provides), and with `bin_dir` as the launcher's only PATH."""
+    sh = shutil.which("sh")
+    assert sh is not None, "no sh on the PATH; on Windows, install Git for Windows"
     return subprocess.run(
-        ["/bin/sh", str(LAUNCHER), SCRIPT, *ARGS],
+        [sh, str(LAUNCHER), SCRIPT, *ARGS],
         env={"PATH": str(bin_dir)},
         capture_output=True,
         text=True,
