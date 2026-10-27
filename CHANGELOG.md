@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.6.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.5.1...v1.6.0) (2026-10-27)
+
+
+### Features
+
+* a setup skill and per-OS session-start steps help developers put Langfuse keys in a repo ([#32](https://github.com/publicanus/claude-observability-plugin/issues/32)) ([d089bc4](https://github.com/publicanus/claude-observability-plugin/commit/d089bc462f6f5ab4acfbc0e852da51b90441b6c2))
+* **hook:** each trace carries its repo name, so token use can be totalled per repo ([#35](https://github.com/publicanus/claude-observability-plugin/issues/35)) ([b774a56](https://github.com/publicanus/claude-observability-plugin/commit/b774a567b211c94408720f13b107373269fdadb2))
+* **hook:** secrets show in Langfuse as [REDACTED], not as the secret ([#23](https://github.com/publicanus/claude-observability-plugin/issues/23)) ([#40](https://github.com/publicanus/claude-observability-plugin/issues/40)) ([f99494b](https://github.com/publicanus/claude-observability-plugin/commit/f99494b1827991584fb543089dad988cb1682142))
+* **hook:** session start says when the hook cannot run on this machine ([#21](https://github.com/publicanus/claude-observability-plugin/issues/21)) ([#42](https://github.com/publicanus/claude-observability-plugin/issues/42)) ([62368ea](https://github.com/publicanus/claude-observability-plugin/commit/62368eadda85b88b040dd4e3a7b408d60bbdeb72))
+
 ## [1.5.1](https://github.com/publicanus/claude-observability-plugin/compare/v1.5.0...v1.5.1) (2026-10-24)
 
 
