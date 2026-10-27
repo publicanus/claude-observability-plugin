@@ -87,11 +87,11 @@ def test_the_gate_matches_only_the_setup_skill():
 
 
 def test_every_hook_entry_runs_through_the_launcher():
-    commands = [
-        hook["command"]
-        for entries in load_hooks().values()
-        for entry in entries
-        for hook in entry["hooks"]
-    ]
+    commands = {
+        event: {hook["command"] for entry in entries for hook in entry["hooks"]}
+        for event, entries in load_hooks().items()
+    }
+    session_start_command = LAUNCHER_COMMAND.replace("run_hook.sh ", "run_hook.sh --warn-if-cannot-run ", 1)
 
-    assert commands and set(commands) == {LAUNCHER_COMMAND}
+    assert commands.pop("SessionStart") == {session_start_command}
+    assert commands and all(event_commands == {LAUNCHER_COMMAND} for event_commands in commands.values())

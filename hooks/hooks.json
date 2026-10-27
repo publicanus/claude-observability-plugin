@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/hooks/run_hook.sh \"${CLAUDE_PLUGIN_ROOT}\"/hooks/langfuse_hook.py"
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/hooks/run_hook.sh --warn-if-cannot-run \"${CLAUDE_PLUGIN_ROOT}\"/hooks/langfuse_hook.py"
           }
         ]
       }

@@ -89,7 +89,7 @@ One of:
 - [uv](https://docs.astral.sh/uv/) (recommended) on `PATH`. The hook uses `uv run --script` and installs the Langfuse SDK from the script metadata automatically.
 - Python 3.10+ as `python3` with `langfuse>=4.0,<5` installed in that Python environment. This is only used as a fallback when `uv` is not on `PATH`.
 
-If neither is set up, the hook exits silently — no impact on Claude Code.
+If neither is set up, each session start shows a message that the session is not traced. Claude Code works as usual.
 
 On Windows, install [Git for Windows](https://gitforwindows.org/) and uv. The hook starts through `sh`, which Git for Windows provides, and uv is the only supported way to run it there.
 
