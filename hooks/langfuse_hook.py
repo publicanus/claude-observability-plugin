@@ -1775,18 +1775,24 @@ def plugin_of(component: Any) -> Optional[str]:
     return plugin if separator and plugin else None
 
 def plugins_in_rows(rows: List[Dict[str, Any]]) -> List[Any]:
-    """The plugins the rows name: each row's attributionPlugin and the plugin of each
-    skill the rows ran. Entries can be None or repeat."""
+    """The plugins the rows name: each row's attributionPlugin, the plugin of each skill
+    the rows ran, and the plugin of each agent an Agent or Task call in the rows asked
+    for. Entries can be None or repeat."""
     plugins: List[Any] = [row.get("attributionPlugin") for row in rows if isinstance(row, dict)]
     plugins += [plugin_of(skill) for skill in skills_in_rows(rows)]
+    for row in rows:
+        for tool_use in get_tool_use_blocks(get_content_from_row(row)):
+            tool_input = tool_use.get("input")
+            if tool_use.get("name") in ("Agent", "Task") and isinstance(tool_input, dict):
+                plugins.append(plugin_of(tool_input.get("subagent_type")))
     return plugins
 
 def plugins_in_launched_agents(
     rows: List[Dict[str, Any]],
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
 ) -> List[Any]:
-    """The plugins of the agents that tool calls in the rows launched, at any depth, and
-    the plugins_in_rows of each of their transcripts. Entries can be None or repeat."""
+    """The plugins_in_rows of the transcript of each agent that tool calls in the rows
+    launched, at any depth. Entries can be None or repeat."""
     plugins: List[Any] = []
     pending = get_launched_subagents(rows, subagent_transcripts_by_tool_use_id)
     seen_paths = set()
@@ -1797,7 +1803,6 @@ def plugins_in_launched_agents(
         if not isinstance(path, Path) or path in seen_paths:
             continue
         seen_paths.add(path)
-        plugins.append(plugin_of(subagent.get("agent_type")))
         subagent_rows = read_subagent_jsonl(path) or []
         plugins += plugins_in_rows(subagent_rows)
         pending += get_launched_subagents(subagent_rows, subagent_transcripts_by_tool_use_id)
@@ -2666,8 +2671,8 @@ def emit_teammate_turn(
             turn,
             user_ts,
             generation_prefix="Teammate LLM Call",
-            # Nested subagents launched by a teammate live under the teammate's
-            # own transcript stem, not the parent's; they are out of scope here.
+            # Agents a teammate launches get no spans of their own here. Where
+            # Claude Code writes their transcripts is not checked.
             subagent_transcripts_by_tool_use_id=None,
         )
         trace_span.update(output={"role": "assistant", "content": final_assistant_text})
