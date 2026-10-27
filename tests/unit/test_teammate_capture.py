@@ -528,3 +528,27 @@ def test_unattributed_teammate_emitted_with_tag(
     assert teammate_tag_sets, "expected a teammate trace with tags"
     assert "teammate-unattributed" in teammate_tag_sets[0]
     assert "teammate:orphan-teammate" in teammate_tag_sets[0]
+
+
+def test_teammate_prompt_and_reply_reach_the_sdk_with_secrets_masked(
+    hook_module, fake_langfuse, isolated_hook_state
+):
+    session_id = "session-test"
+    transcript = isolated_hook_state / "transcript.jsonl"
+    make_parent_transcript(transcript, session_id, [("builder-issue-4", "toolu_4")])
+    teammate_jsonl = write_teammate(transcript, session_id, "abuilder-4", "builder-issue-4", turn_count=2)
+    rows = teammate_turn_rows(session_id, "abuilder-4", 1, minute=1) + teammate_turn_rows(
+        session_id, "abuilder-4", 2, minute=2
+    )
+    rows[0]["message"]["content"] = "Deploy with AKIAIOSFODNN7EXAMPLE"
+    rows[1]["message"]["content"] = [{"type": "text", "text": "Used xoxb-FAKE-test-token"}]
+    _write_jsonl(teammate_jsonl, rows)
+
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, make_config(hook_module), session_id, transcript
+    )
+
+    teammate_turns = teammate_turn_observations(fake_langfuse)
+    assert len(teammate_turns) == 1
+    assert teammate_turns[0].kwargs["input"] == {"role": "user", "content": "Deploy with [REDACTED]"}
+    assert teammate_turns[0].output == {"role": "assistant", "content": "Used [REDACTED]"}

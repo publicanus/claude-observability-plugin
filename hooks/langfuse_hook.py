@@ -54,6 +54,7 @@ HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
 # but the test harness loads this file via importlib without doing so).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import LangfuseClient, process_pending_hurts  # noqa: E402
+from secret_masking import mask_secrets  # noqa: E402
 
 
 # ----------------- Configuration -----------------
@@ -672,6 +673,17 @@ def truncate_text(s: str, max_chars: int = MAX_CHARS) -> Tuple[str, Dict[str, An
         return s, {"truncated": False, "orig_len": orig_len}
     head = s[:max_chars]
     return head, {"truncated": True, "orig_len": orig_len, "kept_len": len(head), "sha256": hashlib.sha256(s.encode("utf-8")).hexdigest()}
+
+def mask_and_truncate(s: str) -> Tuple[str, Dict[str, Any]]:
+    """The text of an observation's input or output: secrets masked, then cut to MAX_CHARS."""
+    return truncate_text(mask_secrets(s))
+
+def mask_and_truncate_tool_result(raw: Any) -> Tuple[str, Dict[str, Any]]:
+    """A tool's output as text: secrets masked, a non-string written as JSON, then cut to MAX_CHARS."""
+    masked = mask_secrets(raw)
+    # The JSON text is not masked again: a password value would run on into its closing quote.
+    text = masked if isinstance(masked, str) else json.dumps(masked, ensure_ascii=False)
+    return truncate_text(text)
 
 def get_tool_use_blocks(content: Any) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -1693,16 +1705,14 @@ def get_tool_input_for_observation(tool_use: Dict[str, Any]) -> Tuple[Any, Optio
         else {}
     )
     if isinstance(tool_input_raw, str):
-        return truncate_text(tool_input_raw)
-    return tool_input_raw, None
+        return mask_and_truncate(tool_input_raw)
+    return mask_secrets(tool_input_raw), None
 
 def get_tool_result_for_observation(tool_result_entry: Any) -> ToolResultForObservation:
     if not isinstance(tool_result_entry, dict):
         return ToolResultForObservation()
 
-    output_raw = tool_result_entry.get("content")
-    output_str = output_raw if isinstance(output_raw, str) else json.dumps(output_raw, ensure_ascii=False)
-    output, output_meta = truncate_text(output_str)
+    output, output_meta = mask_and_truncate_tool_result(tool_result_entry.get("content"))
     result_timestamp = parse_timestamp(tool_result_entry.get("timestamp"))
     is_error = bool(tool_result_entry.get("is_error"))
     tool_denial_kind = tool_result_entry.get("tool_denial_kind")
@@ -1717,12 +1727,7 @@ def get_tool_result_for_observation(tool_result_entry: Any) -> ToolResultForObse
             tool_denial_kind=tool_denial_kind,
         )
 
-    final_output_str = (
-        final_output_raw
-        if isinstance(final_output_raw, str)
-        else json.dumps(final_output_raw, ensure_ascii=False)
-    )
-    final_output, _ = truncate_text(final_output_str)
+    final_output, _ = mask_and_truncate_tool_result(final_output_raw)
     final_result_timestamp = parse_timestamp(tool_result_entry.get("final_timestamp"))
     return ToolResultForObservation(
         output=output,
@@ -1802,7 +1807,7 @@ def emit_single_tool_observation(
     if CAPTURE_SKILL_CONTENT:
         injected = turn.injected_by_tool_id.get(tool_use_id) if tool_use_id else None
         if injected:
-            injected_trunc, _ = truncate_text(injected)
+            injected_trunc, _ = mask_and_truncate(injected)
             tool_output = {"result": tool_result.output, "injected_instructions": injected_trunc}
 
     subagent = (
@@ -1983,7 +1988,7 @@ def build_generation_kwargs(
     ready_async_tool_results: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     assistant_text_raw = extract_text_from_content(get_content_from_row(assistant_message))
-    assistant_text, assistant_text_meta = truncate_text(assistant_text_raw)
+    assistant_text, assistant_text_meta = mask_and_truncate(assistant_text_raw)
     tool_uses = get_tool_use_blocks(get_content_from_row(assistant_message))
 
     generation_kwargs: Dict[str, Any] = dict(
@@ -2040,7 +2045,7 @@ def emit_turn_observations(langfuse: Langfuse, parent_otel_span: Any, turn: Turn
                            generation_prefix: str = "LLM Call",
                            subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[datetime]:
     """Emit a turn's generations and tool observations under an existing span."""
-    user_text, _ = truncate_text(extract_text_from_content(get_content_from_row(turn.user_msg)))
+    user_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(turn.user_msg)))
     previous_timestamp = start_timestamp
     previous_tool_results: List[Dict[str, Any]] = []
     pending_async_tool_results: List[Dict[str, Any]] = []
@@ -2152,11 +2157,11 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
 
     first_turn = turns[0]
     subagent_start_timestamp = start_timestamp or parse_timestamp(first_turn.user_msg)
-    subagent_input_text, subagent_input_meta = truncate_text(extract_text_from_content(get_content_from_row(first_turn.user_msg)))
+    subagent_input_text, subagent_input_meta = mask_and_truncate(extract_text_from_content(get_content_from_row(first_turn.user_msg)))
 
     last_turn = turns[-1]
     last_assistant = last_turn.assistant_msgs[-1]
-    subagent_output_text, _ = truncate_text(extract_text_from_content(get_content_from_row(last_assistant)))
+    subagent_output_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
 
     description = subagent.get("description")
     subagent_name = f"Subagent: {description}" if isinstance(description, str) and description else "Subagent"
@@ -2264,10 +2269,10 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
               subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
               trace_seed: Optional[str] = None) -> Optional[str]:
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
-    user_text, user_text_meta = truncate_text(user_text_raw)
+    user_text, user_text_meta = mask_and_truncate(user_text_raw)
 
     last_assistant = turn.assistant_msgs[-1]
-    final_assistant_text, _ = truncate_text(extract_text_from_content(get_content_from_row(last_assistant)))
+    final_assistant_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
 
     user_ts = parse_timestamp(turn.user_msg)
     last_assistant_ts = parse_timestamp(last_assistant)
@@ -2383,10 +2388,10 @@ def emit_teammate_turn(
     name = teammate.get("name") or "teammate"
     agent_id = teammate.get("agent_id") or name
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
-    user_text, user_text_meta = truncate_text(user_text_raw)
+    user_text, user_text_meta = mask_and_truncate(user_text_raw)
 
     last_assistant = turn.assistant_msgs[-1]
-    final_assistant_text, _ = truncate_text(extract_text_from_content(get_content_from_row(last_assistant)))
+    final_assistant_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
 
     user_ts = parse_timestamp(turn.user_msg)
     last_assistant_ts = parse_timestamp(last_assistant)
