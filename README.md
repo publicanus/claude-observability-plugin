@@ -91,6 +91,8 @@ One of:
 
 If neither is set up, the hook exits silently — no impact on Claude Code.
 
+On Windows, install [Git for Windows](https://gitforwindows.org/) and uv. The hook starts through `sh`, which Git for Windows provides, and uv is the only supported way to run it there.
+
 ## How it works
 
 A hook reads the session transcript incrementally on every turn (Stop) and at session end (SessionEnd), and emits a Langfuse trace with one span per turn, nested generations per assistant message, and child tool spans for every tool call. Token usage is captured when present.

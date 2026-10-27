@@ -48,10 +48,11 @@ jobs:
           done
 
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         # The floor requires-python declares, and a current release. The hook runs
         # on whatever interpreter the user's machine offers, so the floor is the
         # gate that matters.
