@@ -212,6 +212,14 @@ the endpoint you configure. If the companion mate-hurt plugin is installed, this
 also includes any queued `/hurt` annotation's category and operator-written
 comment, sent to the same endpoint (see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt)).
 
+Before any data leaves your machine, eight kinds of secret are replaced by
+`[REDACTED]` in every input and output: a key that starts with `sk-`, an AWS access
+key (`AKIA…`), a JSON Web Token, the value after `password=` (also `DB_PASSWORD=` and
+other names that end in `password`), a GitHub token (`ghp_…`), a Slack token (such as
+`xoxb-…`), a private-key block, and the token after `Authorization: Bearer`. Other
+kinds of secret are sent as they are. So are the metadata, such as the project folder
+and the git branch, and the `/hurt` comment.
+
 For how Langfuse Cloud handles data it receives, see the Langfuse privacy policy:
 https://langfuse.com/privacy . When using a self-hosted Langfuse instance, your data
 stays within your own infrastructure.
