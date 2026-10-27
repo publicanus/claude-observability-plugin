@@ -1,0 +1,8 @@
+{
+  "enabledPlugins": {
+    "mate-core@mate-marketplace": true,
+    "langfuse-observability@mate-marketplace": true,
+    "mate-hurt@mate-marketplace": true,
+    "pymate@mate-marketplace": true
+  }
+}
