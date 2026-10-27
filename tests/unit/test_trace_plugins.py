@@ -300,3 +300,44 @@ def test_a_teammate_trace_lists_the_plugins_its_own_turn_used(
         {"name": "mate-core", "version": "8.9.0"},
         {"name": "pymate", "version": "7.1.0"},
     ]]
+
+
+def test_a_teammate_trace_lists_the_plugins_of_the_agents_its_turn_launched(
+    hook_module, isolated_hook_state, fake_langfuse
+):
+    transcript = isolated_hook_state / "transcript.jsonl"
+    write_jsonl(transcript, [
+        user_row("Spawn the team."),
+        assistant_row("a1", [
+            tool_use("toolu_mate", "Agent", {"name": "builder", "subagent_type": "mate-core:developer", "prompt": "go"}),
+        ]),
+    ])
+    write_subagent(
+        transcript, "builder-hash",
+        {"agentType": "mate-core:developer", "name": "builder", "taskKind": "in_process_teammate"},
+        [
+            user_row("Build.", uuid="t-user"),
+            assistant_row("t1", [
+                tool_use("toolu_t_agent", "Agent", {"subagent_type": "bashmate:developer", "prompt": "lint"}),
+            ]),
+        ],
+    )
+    write_subagent(
+        transcript, "linter",
+        {"agentType": "bashmate:developer", "toolUseId": "toolu_t_agent"},
+        [
+            user_row("Lint.", uuid="l-user"),
+            assistant_row("l1", [tool_use("toolu_l_skill", "Skill", {"skill": "pymate:lint"})]),
+        ],
+    )
+    config = make_config(hook_module, {"mate-core": "8.9.0", "bashmate": "2.0.0", "pymate": "7.1.0"})
+
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, config, "session-1", transcript, flush_deferred_agent_turns=True
+    )
+
+    assert trace_plugins(fake_langfuse, "Teammate Turn") == [[
+        {"name": "bashmate", "version": "2.0.0"},
+        {"name": "mate-core", "version": "8.9.0"},
+        {"name": "pymate", "version": "7.1.0"},
+    ]]

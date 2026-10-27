@@ -1793,7 +1793,7 @@ def plugins_in_launched_agents(
     while pending:
         subagent = pending.pop()
         path = subagent.get("path")
-        # A fork's transcript repeats its parent's rows, the call that launched it included.
+        # A fork's transcript repeats the row with the call that launched it.
         if not isinstance(path, Path) or path in seen_paths:
             continue
         seen_paths.add(path)
@@ -1801,6 +1801,17 @@ def plugins_in_launched_agents(
         subagent_rows = read_subagent_jsonl(path) or []
         plugins += plugins_in_rows(subagent_rows)
         pending += get_launched_subagents(subagent_rows, subagent_transcripts_by_tool_use_id)
+    return plugins
+
+def plugins_used_in_turn(
+    turn: Turn,
+    subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]],
+) -> List[Any]:
+    """The plugins_in_rows of the turn and the plugins_in_launched_agents of its rows.
+    Entries can be None or repeat."""
+    plugins = plugins_in_rows(turn.rows)
+    if subagent_transcripts_by_tool_use_id:
+        plugins += plugins_in_launched_agents(turn.rows, subagent_transcripts_by_tool_use_id)
     return plugins
 
 def describe_plugins(plugins: List[Any], plugin_versions: Dict[str, Optional[str]]) -> List[Dict[str, str]]:
@@ -2478,10 +2489,9 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     last_assistant_ts = parse_timestamp(last_assistant)
     turn_end_ts = get_turn_end_timestamp(turn)
     trace_metadata = build_trace_metadata(session_id, turn_num, turn, transcript_path, user_text_meta)
-    used_plugins = plugins_in_rows(turn.rows)
-    if subagent_transcripts_by_tool_use_id:
-        used_plugins += plugins_in_launched_agents(turn.rows, subagent_transcripts_by_tool_use_id)
-    trace_metadata[PLUGINS_METADATA_KEY] = describe_plugins(used_plugins, plugin_versions)
+    trace_metadata[PLUGINS_METADATA_KEY] = describe_plugins(
+        plugins_used_in_turn(turn, subagent_transcripts_by_tool_use_id), plugin_versions
+    )
     tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id) + [repo_tag(repo_name)]
 
     trace_name = trace_display_name(session_id, turn_num)
@@ -2576,6 +2586,7 @@ def emit_teammate_turn(
     *,
     repo_name: str,
     plugin_versions: Dict[str, Optional[str]],
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     user_id: Optional[str] = None,
     launching_tool_use_id: Optional[str] = None,
     ambiguous_name: bool = False,
@@ -2610,7 +2621,9 @@ def emit_teammate_turn(
         "agent_type": teammate.get("agent_type"),
         "launching_tool_use_id": launching_tool_use_id,
         PLUGINS_METADATA_KEY: describe_plugins(
-            plugins_in_rows(turn.rows) + [plugin_of(teammate.get("agent_type"))], plugin_versions
+            plugins_used_in_turn(turn, subagent_transcripts_by_tool_use_id)
+            + [plugin_of(teammate.get("agent_type"))],
+            plugin_versions,
         ),
     })
 
@@ -2667,6 +2680,7 @@ def emit_teammate_transcripts(
     session_id: str,
     transcript_path: Path,
     state: Dict[str, Any],
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     *,
     flush_deferred_agent_turns: bool = False,
 ) -> int:
@@ -2695,6 +2709,7 @@ def emit_teammate_transcripts(
                 teammate,
                 name_to_tool_use_id,
                 ambiguous_names,
+                subagent_transcripts_by_tool_use_id,
                 flush=flush_deferred_agent_turns,
             )
         except Exception as e:
@@ -2711,6 +2726,7 @@ def _emit_one_teammate(
     teammate: Dict[str, Any],
     name_to_tool_use_id: Dict[str, str],
     ambiguous_names: set,
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     *,
     flush: bool,
 ) -> int:
@@ -2803,6 +2819,7 @@ def _emit_one_teammate(
                 transcript_path,
                 repo_name=config.repo_name,
                 plugin_versions=config.plugin_versions,
+                subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 user_id=config.user_id,
                 launching_tool_use_id=launching_tool_use_id,
                 ambiguous_name=ambiguous,
@@ -2931,6 +2948,7 @@ def emit_new_turns_from_transcript(
                 session_id,
                 transcript_path,
                 state,
+                subagent_transcripts_by_tool_use_id,
                 flush_deferred_agent_turns=flush_deferred_agent_turns,
             )
         except Exception as e:
