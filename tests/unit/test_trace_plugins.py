@@ -1,6 +1,9 @@
 """Pins the plugin list every trace carries in its metadata key `plugins`: each plugin
 the turn used, with the version of its install for the session's repo, so a plugin's
-maintainer can compare plugins version against version.
+maintainer can compare plugins version against version. Also pins the component each
+observation names in its metadata, with that component's plugin and the plugin's
+version. No observation sets Langfuse's own version field: Langfuse would copy it onto
+the trace.
 
 The version tests write a fake Claude Code installed_plugins.json in the test's home
 folder (see isolated_hook_state); the git checkouts they use are real, in a temp folder.
@@ -374,3 +377,121 @@ def test_an_agent_call_names_its_plugin_where_the_agent_transcript_cannot_be_fou
         {"name": "bashmate", "version": "2.0.0"},
         {"name": "mate-core", "version": "8.9.0"},
     ]]
+
+
+# ----------------- The component each observation names -----------------
+
+def component_fields(observation: Any) -> Dict[str, Any]:
+    """The component, plugin and plugin version an observation's metadata shows, a key
+    it lacks left out; and its Langfuse version field under "version", where set."""
+    metadata = observation.kwargs["metadata"]
+    fields = {key: metadata[key] for key in ("component", "plugin", "plugin_version") if key in metadata}
+    if "version" in observation.kwargs:
+        fields["version"] = observation.kwargs["version"]
+    return fields
+
+
+def components_by_name(fake_langfuse: Any) -> Dict[str, Dict[str, Any]]:
+    return {obs.name: component_fields(obs) for obs in fake_langfuse.observations}
+
+
+def test_each_observation_names_the_session_or_the_agent_that_did_its_work(
+    hook_module, isolated_hook_state, fake_langfuse
+):
+    transcript = isolated_hook_state / "transcript.jsonl"
+    write_jsonl(transcript, [
+        user_row("Build it."),
+        assistant_row("a1", [
+            tool_use("toolu_dev", "Agent", {"subagent_type": "pymate:developer", "prompt": "go"}),
+        ]),
+    ])
+    write_subagent(
+        transcript, "dev",
+        {"agentType": "pymate:developer", "toolUseId": "toolu_dev"},
+        [
+            user_row("Go.", uuid="d-user"),
+            assistant_row("d1", [tool_use("toolu_d_read", "Read", {"file_path": "x"})]),
+        ],
+    )
+    config = make_config(hook_module, {"pymate": "7.1.0"})
+
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, "session-1", transcript)
+
+    session = {"component": "session"}
+    developer = {"component": "pymate:developer", "plugin": "pymate", "plugin_version": "7.1.0"}
+    assert components_by_name(fake_langfuse) == {
+        "Conversational Turn": session,
+        "LLM Call 1": session,
+        "Tool: Agent": session,
+        "Subagent": developer,
+        "Subagent LLM Call 1": developer,
+        "Tool: Read": developer,
+    }
+
+
+@pytest.mark.parametrize(
+    ("agent_type", "plugin_versions", "expected"),
+    [
+        ("general-purpose", {}, {"component": "general-purpose"}),
+        ("document-skills:writer", {"document-skills": None},
+         {"component": "document-skills:writer", "plugin": "document-skills"}),
+    ],
+    ids=["agent-type-without-plugin", "plugin-without-version"],
+)
+def test_an_agent_shows_only_the_plugin_and_version_it_has(
+    hook_module, isolated_hook_state, fake_langfuse, agent_type, plugin_versions, expected
+):
+    transcript = isolated_hook_state / "transcript.jsonl"
+    write_jsonl(transcript, [
+        user_row("Look."),
+        assistant_row("a1", [tool_use("toolu_agent", "Agent", {"subagent_type": agent_type, "prompt": "go"})]),
+    ])
+    write_subagent(
+        transcript, "agent",
+        {"agentType": agent_type, "toolUseId": "toolu_agent"},
+        [user_row("Go.", uuid="s-user"), assistant_row("s1", [text("Looked.")])],
+    )
+    config = make_config(hook_module, plugin_versions)
+
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, "session-1", transcript)
+
+    components = components_by_name(fake_langfuse)
+    assert components["Subagent"] == expected
+    assert components["Subagent LLM Call 1"] == expected
+
+
+def test_each_observation_of_a_teammate_trace_names_the_teammate_agent_type(
+    hook_module, isolated_hook_state, fake_langfuse
+):
+    transcript = isolated_hook_state / "transcript.jsonl"
+    write_jsonl(transcript, [
+        user_row("Spawn the team."),
+        assistant_row("a1", [
+            tool_use("toolu_mate", "Agent", {"name": "builder", "subagent_type": "mate-core:developer", "prompt": "go"}),
+        ]),
+    ])
+    write_subagent(
+        transcript, "builder-hash",
+        {"agentType": "mate-core:developer", "name": "builder", "taskKind": "in_process_teammate"},
+        [
+            user_row("Build.", uuid="t-user"),
+            assistant_row("t1", [tool_use("toolu_t_read", "Read", {"file_path": "x"})]),
+        ],
+    )
+    config = make_config(hook_module, {"mate-core": "8.9.0"})
+
+    hook_module.emit_new_turns_from_transcript(
+        fake_langfuse, config, "session-1", transcript, flush_deferred_agent_turns=True
+    )
+
+    teammate_observations = {
+        name: fields
+        for name, fields in components_by_name(fake_langfuse).items()
+        if name in ("Teammate Turn", "Teammate LLM Call 1", "Tool: Read")
+    }
+    developer = {"component": "mate-core:developer", "plugin": "mate-core", "plugin_version": "8.9.0"}
+    assert teammate_observations == {
+        "Teammate Turn": developer,
+        "Teammate LLM Call 1": developer,
+        "Tool: Read": developer,
+    }

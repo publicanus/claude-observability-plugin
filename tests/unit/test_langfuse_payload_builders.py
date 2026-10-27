@@ -223,7 +223,9 @@ def test_async_final_result_reaches_generation_input_despite_tool_batch(
     ]
     turn = hook_module.build_turns(rows)[0]
 
-    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+    hook_module.emit_turn_observations(
+        fake_langfuse, None, turn, None, hook_module.component_of(hook_module.SESSION_COMPONENT, {}), {}
+    )
 
     generation_inputs = [
         observation.kwargs.get("input")
@@ -251,7 +253,9 @@ def test_assistant_message_without_usage_emits_a_span_not_a_generation(hook_modu
     ]
     turn = hook_module.build_turns(rows)[0]
 
-    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+    hook_module.emit_turn_observations(
+        fake_langfuse, None, turn, None, hook_module.component_of(hook_module.SESSION_COMPONENT, {}), {}
+    )
 
     llm_calls = [o for o in fake_langfuse.observations if o.kwargs.get("metadata", {}).get("assistant_index") == 0]
     assert len(llm_calls) == 1
@@ -309,7 +313,9 @@ def test_tool_observations_carry_error_level_and_permission_denial_signals(hook_
     ]
     turn = hook_module.build_turns(rows)[0]
 
-    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+    hook_module.emit_turn_observations(
+        fake_langfuse, None, turn, None, hook_module.component_of(hook_module.SESSION_COMPONENT, {}), {}
+    )
 
     tools_by_id = {
         observation.kwargs["metadata"]["tool_id"]: observation
@@ -378,7 +384,9 @@ def test_injected_skill_text_reaches_the_sdk_with_secrets_masked(hook_module, fa
     ]
     turn = hook_module.build_turns(rows)[0]
 
-    hook_module.emit_turn_observations(fake_langfuse, None, turn, None)
+    hook_module.emit_turn_observations(
+        fake_langfuse, None, turn, None, hook_module.component_of(hook_module.SESSION_COMPONENT, {}), {}
+    )
 
     skill = next(o for o in fake_langfuse.observations if o.name == "Tool: Skill")
     assert skill.output == {"result": "Skill result", "injected_instructions": "Deploy with [REDACTED]"}

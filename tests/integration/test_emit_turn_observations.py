@@ -18,6 +18,8 @@ def test_emit_turn_observations_creates_generation_tool_and_subagent_observation
         parent_span,
         turns[0],
         hook_module.parse_timestamp(turns[0].user_msg),
+        hook_module.component_of(hook_module.SESSION_COMPONENT, {}),
+        {},
         subagent_transcripts_by_tool_use_id=subagents,
     )
 
@@ -51,6 +53,8 @@ def test_nested_subagents_document_current_non_recursive_emission_behavior(
         parent_span,
         turns[0],
         hook_module.parse_timestamp(turns[0].user_msg),
+        hook_module.component_of(hook_module.SESSION_COMPONENT, {}),
+        {},
         subagent_transcripts_by_tool_use_id=subagents,
     )
 

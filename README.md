@@ -92,6 +92,12 @@ The version comes from Claude Code's `~/.claude/plugins/installed_plugins.json`.
 
 If that file exists but cannot be read, the hook stops with an error that names the file, and the session is not traced until the file is fixed.
 
+### Component
+
+Each observation names the component that did its work, so a plugin's maintainer can measure each agent version against version. The component is in the observation's metadata key `component`: `session` for the main session's own work, and the agent's type, such as `pymate:developer`, for an agent and everything in it, its model calls included. Every observation of a teammate's trace names the teammate's agent type.
+
+Where the component names a plugin, the metadata key `plugin` holds that plugin, such as `pymate`, and the metadata key `plugin_version` holds the plugin's version, by the rule above. A plugin with no version has no `plugin_version` key. The main session's own work, and an agent whose type names no plugin, such as `general-purpose`, have neither key. Langfuse's own version field stays empty, on observations and traces alike.
+
 ## Requirements
 
 One of:
