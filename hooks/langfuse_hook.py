@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 
@@ -425,6 +425,47 @@ def format_no_keys_message(cwd: Optional[str]) -> str:
 
 
 # ----------------- State file concurrency control -----------------
+def _retry_until(attempt: Callable[[], bool], timeout_s: float) -> bool:
+    """Calls attempt() until it returns True, every 0.05 s; False once timeout_s has passed."""
+    deadline = time.time() + timeout_s
+    while not attempt():
+        if time.time() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    # Every process locks and unlocks the same first byte, whatever the file's length:
+    # msvcrt.locking works from the current position, and "a+" opens at the end.
+    def _try_lock(fh) -> bool:
+        fh.seek(0)
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        except PermissionError:
+            return False
+        return True
+
+    def _unlock(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(fh) -> bool:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _unlock(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 class FileLock:
     def __init__(self, path: Path, timeout_s: float = 2.0):
         self.path = path
@@ -434,25 +475,11 @@ class FileLock:
     def __enter__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         self._fh = open(self.path, "a+", encoding="utf-8")
-        self.acquired = False
         try:
-            import fcntl  # Unix only
-        except ImportError:
-            # No fcntl available (e.g. Windows) — proceed without lock.
-            return self
-        deadline = time.time() + self.timeout_s
-        try:
-            while True:
-                try:
-                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self.acquired = True
-                    return self
-                except BlockingIOError:
-                    if time.time() > deadline:
-                        raise TimeoutError(
-                            f"could not acquire {self.path} within {self.timeout_s}s"
-                        )
-                    time.sleep(0.05)
+            if not _retry_until(lambda: _try_lock(self._fh), self.timeout_s):
+                raise TimeoutError(
+                    f"could not acquire {self.path} within {self.timeout_s}s"
+                )
         except BaseException:
             # __exit__ is not called when __enter__ raises — close the fh
             # we just opened so it doesn't leak.
@@ -461,17 +488,13 @@ class FileLock:
             except Exception:
                 pass
             raise
+        return self
 
     def __exit__(self, exc_type, exc, tb):
         try:
-            import fcntl
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try:
+            _unlock(self._fh)
+        finally:
             self._fh.close()
-        except Exception:
-            pass
 
 
 # ----------------- State file reading and writing -----------------
@@ -559,6 +582,10 @@ def update_teammate_progress(global_state: Dict[str, Any], key: str, progress: T
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
+# A run saves twice under the state lock, and both tries together must stay well
+# under the 2 s another session waits for that lock.
+STATE_SAVE_TIMEOUT_S = 0.5
+
 def save_hook_state(state: Dict[str, Any]) -> None:
     try:
         # Drop session entries older than 30 days to keep the file bounded.
@@ -578,8 +605,22 @@ def save_hook_state(state: Dict[str, Any]) -> None:
                 del state[k]
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         tmp = STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, STATE_FILE)
+        content = json.dumps(state, indent=2, sort_keys=True)
+
+        def write_and_replace() -> bool:
+            # PermissionError: another process, such as a virus scanner, has a file open.
+            try:
+                tmp.write_text(content, encoding="utf-8")
+                os.replace(tmp, STATE_FILE)
+            except PermissionError:
+                return False
+            return True
+
+        if not _retry_until(write_and_replace, STATE_SAVE_TIMEOUT_S):
+            info(
+                f"could not save {STATE_FILE}: it stayed in use for {STATE_SAVE_TIMEOUT_S}s; "
+                "this run's turns will be sent again on the next run"
+            )
     except Exception as e:
         debug(f"save_hook_state failed: {e}")
 

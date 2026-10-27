@@ -124,6 +124,8 @@ Langfuse API to discover the trace ID of a run. Setting `CC_LANGFUSE_TRACE_SEED`
 trace IDs predictable: any system that knows the seed can compute the trace ID of each
 turn **before** the trace exists.
 
+The seed also keeps a turn from showing up twice in Langfuse when the hook could not save its progress and sends that turn again on a later run.
+
 With the seed set, the trace ID for turn `N` (1-based, counted per session across hook
 runs) is derived as:
 
