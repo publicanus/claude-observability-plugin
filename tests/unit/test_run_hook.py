@@ -114,16 +114,34 @@ def test_at_session_start_a_python3_that_fails_the_check_gets_the_message_and_th
     assert_cannot_run_message(result, hook_module.SETUP_COMMAND)
 
 
+def real_python3(bin_dir: Path) -> dict[str, str]:
+    """Puts the Python running these tests on the launcher's PATH as `python3`, and
+    returns the environment it needs to start. That Python has no langfuse package."""
+    write_stub(bin_dir, "python3", f'exec "{Path(sys.executable).as_posix()}" "$@"')
+    # Python on Windows does not start without SYSTEMROOT.
+    return {name: os.environ[name] for name in ["SYSTEMROOT"] if name in os.environ}
+
+
 def test_at_session_start_a_real_python3_without_langfuse_gets_the_message(
     bin_dir: Path, hook_module: Any
 ) -> None:
-    write_stub(bin_dir, "python3", f'exec "{Path(sys.executable).as_posix()}" "$@"')
-    # Python on Windows does not start without SYSTEMROOT.
-    env = {name: os.environ[name] for name in ["SYSTEMROOT"] if name in os.environ}
+    env = real_python3(bin_dir)
 
     result = run_launcher(bin_dir, WARN, env=env)
 
     assert_cannot_run_message(result, hook_module.SETUP_COMMAND)
+
+
+def test_at_session_start_a_real_python3_with_langfuse_runs_the_script(bin_dir: Path, tmp_path: Path) -> None:
+    packages = tmp_path / "packages"
+    (packages / "langfuse").mkdir(parents=True)
+    (packages / "langfuse" / "__init__.py").write_text("", encoding="utf-8")
+    env = {**real_python3(bin_dir), "PYTHONPATH": str(packages)}
+
+    result = run_launcher(bin_dir, WARN, env=env)
+
+    assert result.stdout == ""
+    assert "some_script.py" in result.stderr  # Python could not open the script, so it tried to run it
 
 
 def test_at_session_start_a_python3_that_passes_the_check_runs_the_script(bin_dir: Path) -> None:
