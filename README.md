@@ -96,7 +96,7 @@ If that file exists but cannot be read, the hook stops with an error that names 
 
 Each observation names the component that did its work, so a plugin's maintainer can measure each agent version against version. The component is in the observation's metadata key `component`: `session` for the main session's own work, and the agent's type, such as `pymate:developer`, for an agent and everything in it, its model calls included. Every observation of a teammate's trace names the teammate's agent type.
 
-Where the component names a plugin, the metadata key `plugin` holds that plugin, such as `pymate`, and the observation's own version field holds the plugin's version, by the rule above. A plugin with no version leaves the version field empty. The main session's own work, and an agent whose type names no plugin, such as `general-purpose`, have no `plugin` key and no version.
+Where the component names a plugin, the metadata key `plugin` holds that plugin, such as `pymate`, and the metadata key `plugin_version` holds the plugin's version, by the rule above. A plugin with no version has no `plugin_version` key. The main session's own work, and an agent whose type names no plugin, such as `general-purpose`, have neither key. Langfuse's own version field stays empty, on observations and traces alike.
 
 ## Requirements
 

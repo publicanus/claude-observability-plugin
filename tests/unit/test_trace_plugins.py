@@ -1,8 +1,9 @@
 """Pins the plugin list every trace carries in its metadata key `plugins`: each plugin
 the turn used, with the version of its install for the session's repo, so a plugin's
 maintainer can compare plugins version against version. Also pins the component each
-observation names in its metadata, with that component's plugin and, in the
-observation's version field, the plugin's version.
+observation names in its metadata, with that component's plugin and the plugin's
+version. No observation sets Langfuse's own version field: Langfuse would copy it onto
+the trace.
 
 The version tests write a fake Claude Code installed_plugins.json in the test's home
 folder (see isolated_hook_state); the git checkouts they use are real, in a temp folder.
@@ -381,9 +382,10 @@ def test_an_agent_call_names_its_plugin_where_the_agent_transcript_cannot_be_fou
 # ----------------- The component each observation names -----------------
 
 def component_fields(observation: Any) -> Dict[str, Any]:
-    """The component, plugin and version an observation shows; a key it lacks is left out."""
+    """The component, plugin and plugin version an observation's metadata shows, a key
+    it lacks left out; and its Langfuse version field under "version", where set."""
     metadata = observation.kwargs["metadata"]
-    fields = {key: metadata[key] for key in ("component", "plugin") if key in metadata}
+    fields = {key: metadata[key] for key in ("component", "plugin", "plugin_version") if key in metadata}
     if "version" in observation.kwargs:
         fields["version"] = observation.kwargs["version"]
     return fields
@@ -416,7 +418,7 @@ def test_each_observation_names_the_session_or_the_agent_that_did_its_work(
     hook_module.emit_new_turns_from_transcript(fake_langfuse, config, "session-1", transcript)
 
     session = {"component": "session"}
-    developer = {"component": "pymate:developer", "plugin": "pymate", "version": "7.1.0"}
+    developer = {"component": "pymate:developer", "plugin": "pymate", "plugin_version": "7.1.0"}
     assert components_by_name(fake_langfuse) == {
         "Conversational Turn": session,
         "LLM Call 1": session,
@@ -487,7 +489,7 @@ def test_each_observation_of_a_teammate_trace_names_the_teammate_agent_type(
         for name, fields in components_by_name(fake_langfuse).items()
         if name in ("Teammate Turn", "Teammate LLM Call 1", "Tool: Read")
     }
-    developer = {"component": "mate-core:developer", "plugin": "mate-core", "version": "8.9.0"}
+    developer = {"component": "mate-core:developer", "plugin": "mate-core", "plugin_version": "8.9.0"}
     assert teammate_observations == {
         "Teammate Turn": developer,
         "Teammate LLM Call 1": developer,

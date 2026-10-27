@@ -1880,16 +1880,17 @@ def component_of(name: Any, plugin_versions: Dict[str, Optional[str]]) -> Compon
     plugin = plugin_of(name)
     return Component(name, plugin, plugin_versions.get(plugin) if plugin else None)
 
-def component_kwargs(component: Component, metadata: Dict[str, Any]) -> Dict[str, Any]:
-    """The metadata and version arguments of an observation of component's work:
-    metadata with "component" added, and "plugin" where it has one; "version" only
-    where its plugin has one."""
-    kwargs: Dict[str, Any] = {"metadata": {**metadata, "component": component.name}}
+def component_metadata(component: Component, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """The metadata of an observation of component's work: metadata with "component"
+    added, "plugin" where it has a plugin, and "plugin_version" where that plugin has a
+    version."""
+    # Not the observation's version field: Langfuse copies a span's version onto its trace.
+    with_component: Dict[str, Any] = {**metadata, "component": component.name}
     if component.plugin is not None:
-        kwargs["metadata"]["plugin"] = component.plugin
+        with_component["plugin"] = component.plugin
     if component.version is not None:
-        kwargs["version"] = component.version
-    return kwargs
+        with_component["plugin_version"] = component.version
+    return with_component
 
 def short_session_label(session_id: str, max_len: int = 12) -> str:
     """Return a compact session label for trace names."""
@@ -2103,7 +2104,7 @@ def emit_single_tool_observation(
         start_time=tool_use_timestamp,
         parent_otel_span=parent_otel_span,
         input=tool_input,
-        **component_kwargs(component, tool_metadata),
+        metadata=component_metadata(component, tool_metadata),
         **({"level": tool_level, "status_message": tool_status_message} if tool_level else {}),
     )
     tool_span.update(output=tool_output)
@@ -2314,7 +2315,7 @@ def emit_generation_observation(
         metadata["model"] = kwargs.pop("model", None)
         metadata["usage_missing"] = True
         kwargs["metadata"] = metadata
-    kwargs.update(component_kwargs(component, kwargs["metadata"]))
+    kwargs["metadata"] = component_metadata(component, kwargs["metadata"])
     return _start_backdated(
         langfuse,
         name=f"{generation_prefix} {assistant_index + 1}",
@@ -2467,7 +2468,7 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
         start_time=subagent_start_timestamp,
         parent_otel_span=parent_otel_span,
         input={"role": "user", "content": subagent_input_text},
-        **component_kwargs(component, {
+        metadata=component_metadata(component, {
             "agent_type": subagent.get("agent_type"),
             "description": description,
             "transcript_path": get_short_transcript_path_for_metadata(path),
@@ -2607,7 +2608,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
             start_time=user_ts,
             forced_trace_id=forced_trace_id,
             input={"role": "user", "content": user_text},
-            **component_kwargs(session, trace_metadata),
+            metadata=component_metadata(session, trace_metadata),
         )
         obs_end_ts = emit_turn_observations(
             langfuse,
@@ -2749,7 +2750,7 @@ def emit_teammate_turn(
             start_time=user_ts,
             forced_trace_id=forced_trace_id,
             input={"role": "user", "content": user_text},
-            **component_kwargs(teammate_component, trace_metadata),
+            metadata=component_metadata(teammate_component, trace_metadata),
         )
         obs_end_ts = emit_turn_observations(
             langfuse,
