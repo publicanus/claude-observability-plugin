@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -43,6 +44,9 @@ LOCK_FILE = STATE_DIR / "langfuse_state.lock"
 
 # Claude Code's own account file; its oauthAccount.emailAddress is the login email.
 CLAUDE_JSON_FILE = Path.home() / ".claude.json"
+
+# Claude Code's record of each plugin's installs on this machine, with their scope and version.
+INSTALLED_PLUGINS_FILE = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 # mate-hurt's local queue of /hurt annotations pending attachment — see
 # hurt_annotations.py for the consumer side of this contract.
@@ -90,6 +94,8 @@ class LangfuseConfig:
     trace_seed: Optional[str] = None
     # Set when a source for the trace user exists but could not be read; shown to the user.
     user_warning: Optional[str] = None
+    # read_plugin_versions for the session's repo; every trace lists the plugins it used with these.
+    plugin_versions: Dict[str, Optional[str]] = field(default_factory=dict)
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
 SETUP_COMMAND = "/langfuse-observability:langfuse-setup"
@@ -189,6 +195,13 @@ def git_rev_parse(cwd: Optional[str], *flags: str) -> Optional[str]:
         return None
     return result.stdout.strip()
 
+def find_main_checkout(cwd: Optional[str]) -> Optional[Path]:
+    """The main checkout of the git repo that holds cwd (None: the process's working
+    directory), the same for all its worktrees; None outside a git checkout or
+    without git installed."""
+    common_dir = git_rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
+    return Path(common_dir).parent if common_dir is not None else None
+
 def read_repo_name(cwd: Optional[str]) -> str:
     """The name of the repo that holds cwd (None: the process's working directory).
 
@@ -199,8 +212,8 @@ def read_repo_name(cwd: Optional[str]) -> str:
     Raises subprocess.CalledProcessError when git fails inside a checkout.
     """
     base = session_dir(cwd)
-    common_dir = git_rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
-    if common_dir is None:
+    main_checkout = find_main_checkout(cwd)
+    if main_checkout is None:
         return base.name
 
     def git(*args: str) -> str:
@@ -211,12 +224,80 @@ def read_repo_name(cwd: Optional[str]) -> str:
 
     remotes = git("remote").split()
     if not remotes:
-        return Path(common_dir).parent.name
+        return main_checkout.name
     remote = "origin" if "origin" in remotes else remotes[0]
     address = git("remote", "get-url", remote)
     # Covers both `host:owner/name` and URL forms; a user or token sits before the last part.
     last_part = address.rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
     return last_part.removesuffix(".git")
+
+class PluginsFileError(Exception):
+    """INSTALLED_PLUGINS_FILE exists but cannot be read, or does not hold the shape Claude Code writes."""
+
+def read_installed_plugins() -> Dict[str, List[Dict[str, Any]]]:
+    """The installs of each plugin, keyed `<plugin>@<marketplace>`, from INSTALLED_PLUGINS_FILE.
+
+    {} when the file does not exist. Raises PluginsFileError when it cannot be read or
+    parsed, or when it holds no `plugins` object of install lists.
+    """
+    try:
+        data = json.loads(INSTALLED_PLUGINS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise PluginsFileError(f"cannot read the installed plugins from {INSTALLED_PLUGINS_FILE}: {e}") from e
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        raise PluginsFileError(f"{INSTALLED_PLUGINS_FILE} holds no `plugins` object")
+    for key, installs in plugins.items():
+        if not isinstance(installs, list) or not all(isinstance(install, dict) for install in installs):
+            raise PluginsFileError(f"{INSTALLED_PLUGINS_FILE}: the installs of {key} are not a list of objects")
+    return plugins
+
+# Claude Code uses a plugin's local setting over its project setting, and that over its user one.
+INSTALL_SCOPES_MOST_SPECIFIC_FIRST = ("local", "project", "user")
+REPO_INSTALL_SCOPES = ("local", "project")
+VERSION_PATTERN = re.compile(r"[0-9.]+")  # digits and dots only, as 8.9.0
+
+def plugin_version(raw: Any) -> Optional[str]:
+    """An install's version as a trace shows it: cut at the first dash, as `8.9.0` from
+    `8.9.0-0ae331d8a58b`; None when that part is not made of digits and dots only, such
+    as a bare commit hash, `unknown` or no version at all."""
+    if not isinstance(raw, str):
+        return None
+    version = raw.split("-", 1)[0]
+    return version if VERSION_PATTERN.fullmatch(version) else None
+
+def install_counts_for(install: Dict[str, Any], project_dir: Path) -> bool:
+    """Whether an install applies to a session in project_dir: a user install always
+    does, a local or project install only when it was made for project_dir."""
+    scope = install.get("scope")
+    if scope == "user":
+        return True
+    project_path = install.get("projectPath")
+    return (
+        scope in REPO_INSTALL_SCOPES
+        and isinstance(project_path, str)
+        and Path(project_path).resolve() == project_dir.resolve()
+    )
+
+def read_plugin_versions(project_dir: Path) -> Dict[str, Optional[str]]:
+    """The version of each plugin installed for a session in project_dir, by plugin name.
+
+    project_dir: the repo's main checkout, or the session folder outside git.
+    The install that counts is the plugin's install for project_dir, local before
+    project, else its user (machine-wide) install; its version is plugin_version().
+    A plugin with no install that counts is left out.
+    Fails as read_installed_plugins does.
+    """
+    versions: Dict[str, Optional[str]] = {}
+    for key, installs in read_installed_plugins().items():
+        counting = [install for install in installs if install_counts_for(install, project_dir)]
+        if not counting:
+            continue
+        winner = min(counting, key=lambda install: INSTALL_SCOPES_MOST_SPECIFIC_FIRST.index(install["scope"]))
+        versions[key.split("@", 1)[0]] = plugin_version(winner.get("version"))
+    return versions
 
 def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     """The hook's Langfuse settings, or None when no keys are set.
@@ -227,7 +308,9 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     The trace user is, in order: LANGFUSE_USER_ID or CC_LANGFUSE_USER_ID (env var or
     plugin userConfig), the Claude login email, `git config user.email` in cwd, or None.
     When a source exists but cannot be read, the user is None and user_warning says why.
-    The repo name is read_repo_name(cwd), and fails as that does.
+    The repo name is read_repo_name(cwd), and fails as that does. The plugin versions
+    are read_plugin_versions() for the repo's main checkout, or for cwd outside git,
+    and fail as that does.
     """
     host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
     check_host_allowed(host)
@@ -259,6 +342,7 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         repo_name=read_repo_name(cwd),
         trace_seed=trace_seed,
         user_warning=user_warning,
+        plugin_versions=read_plugin_versions(find_main_checkout(cwd) or session_dir(cwd)),
     )
 
 def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
@@ -1600,17 +1684,19 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
     )
 
 # ---- Trace naming and tags ----
-def add_skill_tags_from_rows(rows: List[Dict[str, Any]], names: List[str], prefix: str) -> None:
-    """Collect '<prefix><name>' tags for every skill trail in the rows.
+def skills_in_rows(rows: List[Dict[str, Any]]) -> List[str]:
+    """The names of the skills the rows ran, each once, in the order first seen.
 
     Skills leave two different transcript trails: a tool_use block named
     "Skill" when Claude invokes the skill itself, and a top-level
     attributionSkill field on assistant rows when the user invokes it as a
     slash command (which never produces a Skill tool_use block).
     """
+    skills: List[str] = []
+
     def add_skill(skill: Any) -> None:
-        if isinstance(skill, str) and skill and f"{prefix}{skill}" not in names:
-            names.append(f"{prefix}{skill}")
+        if isinstance(skill, str) and skill and skill not in skills:
+            skills.append(skill)
 
     for row in rows:
         if not isinstance(row, dict):
@@ -1621,6 +1707,30 @@ def add_skill_tags_from_rows(rows: List[Dict[str, Any]], names: List[str], prefi
                 continue
             tool_input = tool_use.get("input")
             add_skill(tool_input.get("skill") if isinstance(tool_input, dict) else None)
+    return skills
+
+
+def add_skill_tags_from_rows(rows: List[Dict[str, Any]], names: List[str], prefix: str) -> None:
+    """Add a '<prefix><name>' tag to names for every skill the rows ran, each once."""
+    for skill in skills_in_rows(rows):
+        tag = f"{prefix}{skill}"
+        if tag not in names:
+            names.append(tag)
+
+
+def get_launched_subagents(
+    rows: List[Dict[str, Any]],
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """The entries of subagent_transcripts_by_tool_use_id that tool calls in the rows launched."""
+    subagents: List[Dict[str, Any]] = []
+    for row in rows:
+        for tool_use in get_tool_use_blocks(get_content_from_row(row)):
+            tool_use_id = str(tool_use.get("id") or "")
+            subagent = subagent_transcripts_by_tool_use_id.get(tool_use_id) if tool_use_id else None
+            if isinstance(subagent, dict):
+                subagents.append(subagent)
+    return subagents
 
 
 def collect_skill_tags(turn: Turn) -> List[str]:
@@ -1643,19 +1753,83 @@ def collect_subagent_skill_tags(
     if not subagent_transcripts_by_tool_use_id:
         return []
     names: List[str] = []
-    for assistant_message in turn.assistant_msgs:
-        for tool_use in get_tool_use_blocks(get_content_from_row(assistant_message)):
-            tool_use_id = str(tool_use.get("id") or "")
-            subagent = subagent_transcripts_by_tool_use_id.get(tool_use_id) if tool_use_id else None
-            if not isinstance(subagent, dict):
-                continue
-            path = subagent.get("path")
-            if not isinstance(path, Path):
-                continue
-            rows = read_subagent_jsonl(path)
-            if rows:
-                add_skill_tags_from_rows(rows, names, "subagent-skill:")
+    for subagent in get_launched_subagents(turn.assistant_msgs, subagent_transcripts_by_tool_use_id):
+        path = subagent.get("path")
+        if not isinstance(path, Path):
+            continue
+        rows = read_subagent_jsonl(path)
+        if rows:
+            add_skill_tags_from_rows(rows, names, "subagent-skill:")
     return names
+
+
+# ---- Plugins a trace used ----
+PLUGINS_METADATA_KEY = "plugins"
+
+def plugin_of(component: Any) -> Optional[str]:
+    """The plugin an agent, skill or command name comes from, as `mate-core` from
+    `mate-core:build`; None for a name without a plugin, such as `general-purpose`."""
+    if not isinstance(component, str):
+        return None
+    plugin, separator, _ = component.partition(":")
+    return plugin if separator and plugin else None
+
+def plugins_in_rows(rows: List[Dict[str, Any]]) -> List[Any]:
+    """The plugins the rows name: each row's attributionPlugin, the plugin of each skill
+    the rows ran, and the plugin of each agent an Agent or Task call in the rows asked
+    for. Entries can be None or repeat."""
+    plugins: List[Any] = [row.get("attributionPlugin") for row in rows if isinstance(row, dict)]
+    plugins += [plugin_of(skill) for skill in skills_in_rows(rows)]
+    for row in rows:
+        for tool_use in get_tool_use_blocks(get_content_from_row(row)):
+            tool_input = tool_use.get("input")
+            if tool_use.get("name") in ("Agent", "Task") and isinstance(tool_input, dict):
+                plugins.append(plugin_of(tool_input.get("subagent_type")))
+    return plugins
+
+def plugins_in_launched_agents(
+    rows: List[Dict[str, Any]],
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
+) -> List[Any]:
+    """The plugins_in_rows of the transcript of each agent that tool calls in the rows
+    launched, at any depth. Entries can be None or repeat."""
+    plugins: List[Any] = []
+    pending = get_launched_subagents(rows, subagent_transcripts_by_tool_use_id)
+    seen_paths = set()
+    while pending:
+        subagent = pending.pop()
+        path = subagent.get("path")
+        # A fork's transcript repeats the row with the call that launched it.
+        if not isinstance(path, Path) or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        subagent_rows = read_subagent_jsonl(path) or []
+        plugins += plugins_in_rows(subagent_rows)
+        pending += get_launched_subagents(subagent_rows, subagent_transcripts_by_tool_use_id)
+    return plugins
+
+def plugins_used_in_turn(
+    turn: Turn,
+    subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]],
+) -> List[Any]:
+    """The plugins_in_rows of the turn and the plugins_in_launched_agents of its rows.
+    Entries can be None or repeat."""
+    plugins = plugins_in_rows(turn.rows)
+    if subagent_transcripts_by_tool_use_id:
+        plugins += plugins_in_launched_agents(turn.rows, subagent_transcripts_by_tool_use_id)
+    return plugins
+
+def describe_plugins(plugins: List[Any], plugin_versions: Dict[str, Optional[str]]) -> List[Dict[str, str]]:
+    """The trace's plugin list: each plugin named in plugins once, sorted by name, as
+    {"name", "version"}, without "version" when plugin_versions has none for it."""
+    entries: List[Dict[str, str]] = []
+    for name in sorted({plugin for plugin in plugins if isinstance(plugin, str) and plugin}):
+        entry = {"name": name}
+        version = plugin_versions.get(name)
+        if version is not None:
+            entry["version"] = version
+        entries.append(entry)
+    return entries
 
 def short_session_label(session_id: str, max_len: int = 12) -> str:
     """Return a compact session label for trace names."""
@@ -2306,6 +2480,7 @@ def build_trace_metadata(
 
 def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
               repo_name: str,
+              plugin_versions: Dict[str, Optional[str]],
               user_id: Optional[str] = None,
               subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
               trace_seed: Optional[str] = None) -> Optional[str]:
@@ -2319,6 +2494,9 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     last_assistant_ts = parse_timestamp(last_assistant)
     turn_end_ts = get_turn_end_timestamp(turn)
     trace_metadata = build_trace_metadata(session_id, turn_num, turn, transcript_path, user_text_meta)
+    trace_metadata[PLUGINS_METADATA_KEY] = describe_plugins(
+        plugins_used_in_turn(turn, subagent_transcripts_by_tool_use_id), plugin_versions
+    )
     tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id) + [repo_tag(repo_name)]
 
     trace_name = trace_display_name(session_id, turn_num)
@@ -2412,6 +2590,8 @@ def emit_teammate_turn(
     transcript_path: Path,
     *,
     repo_name: str,
+    plugin_versions: Dict[str, Optional[str]],
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     user_id: Optional[str] = None,
     launching_tool_use_id: Optional[str] = None,
     ambiguous_name: bool = False,
@@ -2445,6 +2625,11 @@ def emit_teammate_turn(
         "team_name": teammate.get("team_name"),
         "agent_type": teammate.get("agent_type"),
         "launching_tool_use_id": launching_tool_use_id,
+        PLUGINS_METADATA_KEY: describe_plugins(
+            plugins_used_in_turn(turn, subagent_transcripts_by_tool_use_id)
+            + [plugin_of(teammate.get("agent_type"))],
+            plugin_versions,
+        ),
     })
 
     tags = ["claude-code", f"teammate:{name}", repo_tag(repo_name)]
@@ -2486,8 +2671,8 @@ def emit_teammate_turn(
             turn,
             user_ts,
             generation_prefix="Teammate LLM Call",
-            # Nested subagents launched by a teammate live under the teammate's
-            # own transcript stem, not the parent's; they are out of scope here.
+            # Agents a teammate launches get no spans of their own here. Where
+            # Claude Code writes their transcripts is not checked.
             subagent_transcripts_by_tool_use_id=None,
         )
         trace_span.update(output={"role": "assistant", "content": final_assistant_text})
@@ -2500,6 +2685,7 @@ def emit_teammate_transcripts(
     session_id: str,
     transcript_path: Path,
     state: Dict[str, Any],
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     *,
     flush_deferred_agent_turns: bool = False,
 ) -> int:
@@ -2528,6 +2714,7 @@ def emit_teammate_transcripts(
                 teammate,
                 name_to_tool_use_id,
                 ambiguous_names,
+                subagent_transcripts_by_tool_use_id,
                 flush=flush_deferred_agent_turns,
             )
         except Exception as e:
@@ -2544,6 +2731,7 @@ def _emit_one_teammate(
     teammate: Dict[str, Any],
     name_to_tool_use_id: Dict[str, str],
     ambiguous_names: set,
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     *,
     flush: bool,
 ) -> int:
@@ -2635,6 +2823,8 @@ def _emit_one_teammate(
                 turns[index],
                 transcript_path,
                 repo_name=config.repo_name,
+                plugin_versions=config.plugin_versions,
+                subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 user_id=config.user_id,
                 launching_tool_use_id=launching_tool_use_id,
                 ambiguous_name=ambiguous,
@@ -2670,6 +2860,7 @@ def emit_ready_turns(
     session_state: SessionState,
     *,
     repo_name: str,
+    plugin_versions: Dict[str, Optional[str]],
     user_id: Optional[str],
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     trace_seed: Optional[str] = None,
@@ -2686,6 +2877,7 @@ def emit_ready_turns(
                 turn,
                 transcript_path,
                 repo_name,
+                plugin_versions,
                 user_id=user_id,
                 subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 trace_seed=trace_seed,
@@ -2737,6 +2929,7 @@ def emit_new_turns_from_transcript(
                 turns_to_emit,
                 session_state,
                 repo_name=config.repo_name,
+                plugin_versions=config.plugin_versions,
                 user_id=config.user_id,
                 subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 trace_seed=config.trace_seed,
@@ -2760,6 +2953,7 @@ def emit_new_turns_from_transcript(
                 session_id,
                 transcript_path,
                 state,
+                subagent_transcripts_by_tool_use_id,
                 flush_deferred_agent_turns=flush_deferred_agent_turns,
             )
         except Exception as e:

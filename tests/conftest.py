@@ -238,12 +238,16 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "LOG_FILE", state_dir / "langfuse_hook.log")
     monkeypatch.setattr(hook_module, "HURT_PENDING_FILE", state_dir / "hurt_pending.json")
     monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
-    # The trace-user lookup reads ~/.claude.json and git config; keep both off
-    # the real machine. The chdir covers a payload without a cwd, where git
+    # The trace-user lookup reads ~/.claude.json and git config, and the plugin
+    # versions come from Claude Code's installed_plugins.json; keep all off the
+    # real machine. The chdir covers a payload without a cwd, where git
     # runs in the hook's own directory.
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(hook_module, "CLAUDE_JSON_FILE", home / ".claude.json")
+    monkeypatch.setattr(
+        hook_module, "INSTALLED_PLUGINS_FILE", home / ".claude" / "plugins" / "installed_plugins.json"
+    )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")

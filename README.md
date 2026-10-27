@@ -82,6 +82,16 @@ The name is the last part of the address of the git remote `origin`, without `.g
 
 A fork and its source with the same name, such as `jaap/shop` and `acme/shop`, share one tag.
 
+### Plugins
+
+Each trace lists the plugins its turn used, with their versions, so a plugin's maintainer can compare plugins version against version. The list is in the trace's metadata key `plugins`, sorted by name, for example `[{"name": "mate-core", "version": "8.9.0"}, {"name": "document-skills"}]`.
+
+A plugin counts as used when an agent, skill or command from it ran in the turn or in one of the turn's agents, at any depth. A teammate's trace lists the plugins of its own turn, its own agent's plugin included. A plugin used only through its hooks is not listed, because the transcript does not say which plugin a hook came from.
+
+The version comes from Claude Code's `~/.claude/plugins/installed_plugins.json`. The plugin's install for this repo counts, a local install before a project install; else its machine-wide install counts. A session in a worktree uses the installs of the repo's main checkout. The version is cut at its first dash, so `8.9.0-0ae331d8a58b` shows as `8.9.0`. Only a version made of digits and dots up to that dash counts; anything else, such as a bare commit hash or `unknown`, is no version, and the plugin is listed without one.
+
+If that file exists but cannot be read, the hook stops with an error that names the file, and the session is not traced until the file is fixed.
+
 ## Requirements
 
 One of:
