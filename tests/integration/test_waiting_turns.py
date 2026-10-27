@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import pytest
+from waiting_turns import send_waiting_turns
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 
@@ -47,14 +48,23 @@ class FakeLangfuse:
     """Answers the delivery probe with 200 and each trace upload with `status`,
     after `delay_s`. Records every trace upload as (headers, body)."""
 
-    def __init__(self, port: int, status: int = 200, delay_s: float = 0.0) -> None:
+    def __init__(
+        self,
+        port: int,
+        status: int = 200,
+        delay_s: float = 0.0,
+        on_probe: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.status = status
         self.delay_s = delay_s
+        self.on_probe = on_probe
         self.uploads: List[tuple[Dict[str, str], bytes]] = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                if fake.on_probe is not None:
+                    fake.on_probe()
                 self._answer(200, b'{"data": []}')
 
             def do_POST(self) -> None:
@@ -433,3 +443,45 @@ def test_waiting_turns_hold_secrets_only_masked(machine: Machine, tmp_path: Path
     for body in bodies:
         for secret in SECRETS_IN_FIXTURE:
             assert secret.encode("utf-8") not in body, f"{secret!r} is in a waiting turn"
+
+
+def test_the_turns_are_on_disk_before_the_delivery_check_starts(machine: Machine, servers: Any) -> None:
+    port = free_port()
+    on_disk_at_probe: List[bool] = []
+    servers(port, on_probe=lambda: on_disk_at_probe.append(bool(machine.waiting_files())))
+    transcript = machine.tmp_path / "transcript.jsonl"
+    append_rows(transcript, turn_rows("s-probe", 1))
+
+    machine.run_hook("SessionEnd", "s-probe", transcript, port)
+
+    assert on_disk_at_probe == [True]
+
+
+def test_a_waiting_file_that_cannot_be_read_does_not_hold_back_the_others(
+    machine: Machine, servers: Any
+) -> None:
+    port = free_port()
+    server = servers(port)
+    machine.waiting_dir.mkdir(parents=True)
+    broken = machine.waiting_dir / "0000-empty.json"
+    broken.write_text("", encoding="utf-8")
+    body = b"a batch"
+    (machine.waiting_dir / "0001-good.json").write_text(
+        json.dumps(
+            {
+                "host": f"http://127.0.0.1:{port}",
+                "public_key": KEYS_A[0],
+                "secret_key": KEYS_A[1],
+                "body": base64.b64encode(body).decode("ascii"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    log: List[str] = []
+
+    sent = send_waiting_turns(machine.waiting_dir, "4.2.0", log.append)
+
+    assert sent == 1
+    assert [upload_body for _, upload_body in server.uploads] == [body]
+    assert machine.waiting_files() == [broken]
+    assert any("0000-empty.json" in line for line in log)

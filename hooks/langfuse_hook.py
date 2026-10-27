@@ -68,7 +68,7 @@ SEND_WAITING_FLAG = "--send-waiting"
 # but the test harness loads this file via importlib without doing so).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import process_pending_hurts  # noqa: E402
-from langfuse_client import LangfuseClient  # noqa: E402
+from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 
@@ -2996,13 +2996,10 @@ def emit_new_turns_from_transcript(
 
 
 # ----------------- Delivery health -----------------
-# langfuse.flush() (below) cannot tell a rejected keypair from a genuinely
-# successful send: the OTel BatchSpanProcessor swallows the exporter's
-# per-batch SpanExportResult and force_flush() returns True regardless of
-# outcome. The only cheap, reliable signal is hitting the REST endpoint the
-# SDK itself authenticates against — reusing langfuse_client.LangfuseClient
-# (already a dependency-free REST client keyed on this hook's own resolved
-# credentials) rather than the SDK's blocking, retrying auth_check().
+# The hook itself only stores turns; the background sender sends them. So the
+# hook learns whether Langfuse takes these keys from one REST call on the
+# endpoint the SDK authenticates against, made with LangfuseClient rather than
+# the SDK's blocking, retrying auth_check().
 
 DELIVERY_HEALTH_STATE_KEY = "_delivery_health"
 # Re-verified at most this often: a blocking round trip on every
@@ -3032,7 +3029,7 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
     response = LangfuseClient(config, timeout=5).get("/api/public/projects")
     if response.status == 200:
         return "ok", ""
-    if response.status in (401, 403):
+    if keys_rejected(response.status):
         return "rejected", f"HTTP {response.status} from {config.host}"
     if response.status == 0:
         return "unreachable", f"{config.host} did not respond"
@@ -3202,7 +3199,7 @@ def flush_and_shutdown_langfuse_client(langfuse: Optional[Langfuse]) -> None:
     if langfuse is None:
         return
 
-    # Cap flush+shutdown at 5s so a slow/unreachable Langfuse can't stall Claude Code.
+    # Cap flush+shutdown at 5 s, so a stuck write to disk cannot stall Claude Code.
     try:
         def _flush_and_shutdown():
             try:
@@ -3293,6 +3290,9 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
             transcript_path,
             flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
+        # Stores the turns on disk now: a SessionEnd hook can be stopped during
+        # the delivery check below, and the turn position is already saved.
+        langfuse.flush()
 
         dur = time.time() - start
         # Nothing was even attempted to be sent, so "Processed 0" needs no
@@ -3345,6 +3345,10 @@ def send_waiting_turns_main() -> int:
     except TimeoutError as e:
         info(f"another sender kept the waiting turns busy: {e}")
         return 0
+    except Exception as e:
+        # The sender's stderr goes nowhere, so the log is the only place this shows.
+        info(f"the sender of waiting turns stopped: {type(e).__name__}: {e}")
+        return 1
     if sent:
         info(f"Sent {sent} waiting batch(es) to Langfuse")
     return 0

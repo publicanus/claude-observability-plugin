@@ -27,6 +27,11 @@ class HttpResponse:
     body: Any
 
 
+def keys_rejected(status: int) -> bool:
+    """True when Langfuse answered that it does not accept the keys."""
+    return status in (401, 403)
+
+
 def _parse_json(raw: bytes) -> Any:
     try:
         return json.loads(raw) if raw else None

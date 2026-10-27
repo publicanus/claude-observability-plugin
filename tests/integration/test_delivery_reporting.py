@@ -13,7 +13,7 @@ class FakeResponse:
 
 
 class FakeDeliveryClient:
-    """Stand-in for hurt_annotations.LangfuseClient: returns a canned
+    """Stand-in for langfuse_client.LangfuseClient: returns a canned
     response to every GET instead of making a real request."""
 
     calls: list[str] = []
