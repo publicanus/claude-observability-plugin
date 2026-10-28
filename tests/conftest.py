@@ -266,6 +266,7 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
     monkeypatch.setattr(hook_module, "WAITING_DIR", state_dir / "langfuse_waiting")
     monkeypatch.setattr(hook_module, "WAITING_LOCK_FILE", state_dir / "langfuse_waiting.lock")
+    monkeypatch.setattr(hook_module, "WORK_ITEMS_DIR", state_dir / "langfuse_work_items")
     # The trace-user lookup reads ~/.claude.json and git config, and the plugin
     # versions come from Claude Code's installed_plugins.json; keep all off the
     # real machine. The chdir covers a payload without a cwd, where git

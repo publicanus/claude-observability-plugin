@@ -1,0 +1,21 @@
+#!/bin/sh
+# Names the work item this Claude Code session works on, so that each of its
+# traces from this turn on carries the tag work-item:<id>. Run it from a Bash
+# tool call; Claude Code puts it on the PATH while this plugin is enabled.
+#
+#   langfuse-work-item set <id>
+#   langfuse-work-item clear
+#
+#   <id>         the work item, such as 37 or PROJ-12; no whitespace or control
+#                characters
+#   clear        removes the named item, so the branch pattern applies again
+#   CLAUDE_CODE_SESSION_ID  the session, which Claude Code sets in Bash tool calls
+#   needs        uv on the PATH, or python3 3.10+ with langfuse 4.2 or later
+#   stdout       nothing
+#   exit         0 when recorded; 2 when the arguments or CLAUDE_CODE_SESSION_ID
+#                are wrong or missing; 1 when it cannot be recorded or cannot run
+#                on this machine; on 1 or 2, one line on stderr
+#   writes       one line to ~/.claude/state/langfuse_work_items/<session>.jsonl
+
+root="${0%/*}/.."
+exec sh "$root/hooks/run_hook.sh" --fail-if-cannot-run "$root/hooks/langfuse_hook.py" --work-item "$@"
