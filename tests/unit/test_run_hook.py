@@ -1,6 +1,6 @@
 """Pins hooks/run_hook.sh, the one place that decides how the hook's Python runs:
-uv when it is on the PATH, else python3, else a silent exit; and, at session start,
-the message that the hook cannot run on this machine.
+uv when it is on the PATH, else python3, else a silent exit; at session start,
+the message that the hook cannot run on this machine; and, for a command, the error.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "hooks" / "run_hook.sh"
 HOOK_SCRIPT = REPO_ROOT / "hooks" / "langfuse_hook.py"
 WARN = "--warn-if-cannot-run"
+FAIL = "--fail-if-cannot-run"
 KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-test", "LANGFUSE_SECRET_KEY": "sk-lf-test"}
 SCRIPT = "/plugin/hooks/some_script.py"
 ARGS = ["--project-dir", "/repo with space"]
@@ -102,6 +103,15 @@ def test_at_session_start_without_uv_or_python3_it_says_the_hook_cannot_run(
 
     assert_cannot_run_message(result, hook_module.SETUP_COMMAND)
     assert list(json.loads(result.stdout)) == ["systemMessage"]
+
+
+def test_for_a_command_without_uv_or_python3_it_fails_with_a_line_on_stderr(bin_dir: Path, hook_module: Any) -> None:
+    result = run_launcher(bin_dir, FAIL)
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"langfuse-work-item: cannot run: needs uv or a suitable python3; run {hook_module.SETUP_COMMAND}\n"
+    )
 
 
 def test_at_session_start_a_python3_that_fails_the_check_gets_the_message_and_the_script_does_not_run(
