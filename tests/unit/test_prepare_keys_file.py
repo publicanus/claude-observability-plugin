@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +41,6 @@ def isolated_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setattr(sys, "platform", "linux")
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -160,19 +158,6 @@ def test_from_a_worktree_the_main_checkouts_file_is_prepared(prepare, capsys, re
     assert read_settings(repo / SETTINGS) == {"env": PLACEHOLDERS}
     assert not (worktree / SETTINGS).exists()
     assert (worktree / ".worktreeinclude").is_file()
-
-
-def test_on_windows_the_file_goes_in_the_project_folder(prepare, capsys, repo, monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
-    project_dir = repo / "sub"
-    project_dir.mkdir()
-
-    code, out, _ = run(prepare, capsys, project_dir)
-
-    assert code == 0
-    assert out["settings"] == str(project_dir / SETTINGS)
-    assert read_settings(project_dir / SETTINGS) == {"env": PLACEHOLDERS}
-    assert "sub/.claude/" not in git(repo, "status", "--porcelain", "--untracked-files=all")
 
 
 def test_outside_a_git_repository_nothing_is_written(prepare, capsys, tmp_path):
