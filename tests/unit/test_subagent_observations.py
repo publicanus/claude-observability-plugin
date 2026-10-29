@@ -16,15 +16,18 @@ def test_subagent_observations_skip_malformed_jsonl_lines(
         encoding="utf-8",
     )
 
-    end_timestamp = hook_module.emit_subagent_observations(
+    end_timestamp = hook_module.emit_agent_run_of_call(
         fake_langfuse,
         None,
-        {
+        "toolu_agent",
+        None,
+        None,
+        {},
+        {"toolu_agent": {
             "path": malformed_path,
             "description": "Summarize docs",
             "agent_type": "general-purpose",
-        },
-        None,
+        }},
         {},
     )
 
