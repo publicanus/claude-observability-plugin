@@ -283,6 +283,26 @@ def test_a_state_file_that_is_not_json_queues_nothing_and_says_why(
     assert not pending_file.exists()
 
 
+def test_without_a_state_file_or_keys_it_names_the_missing_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pending_paths: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pending_file, _ = pending_paths
+    session_id = "abc-123"
+    projects_dir = tmp_path / "projects"
+    make_transcript(projects_dir, "-Users-op-myrepo", session_id)
+    monkeypatch.setattr(hurt, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(hurt, "STATE_FILE", tmp_path / "never-written" / "langfuse_state.json")
+
+    exit_code = hurt.run(["--category", "other", "--comment", "x"], env={"CLAUDE_CODE_SESSION_ID": session_id})
+
+    assert exit_code == 1
+    assert "no LANGFUSE_* or CC_LANGFUSE_* keys" in capsys.readouterr().out
+    assert not pending_file.exists()
+
+
 # ----------------- out-of-taxonomy rejection -----------------
 
 def test_out_of_taxonomy_category_rejected() -> None:

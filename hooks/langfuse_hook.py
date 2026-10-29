@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 
@@ -82,7 +82,7 @@ STATE_MAX_AGE = timedelta(days=30)
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
-from settings_file import SettingsFileError, load_settings  # noqa: E402
+from settings_file import SettingsFileError, load_settings, read_keys  # noqa: E402
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
 
@@ -326,14 +326,6 @@ def read_plugin_versions(project_dir: Path) -> Dict[str, Optional[str]]:
         winner = min(counting, key=lambda install: INSTALL_SCOPES_MOST_SPECIFIC_FIRST.index(install["scope"]))
         versions[key.split("@", 1)[0]] = plugin_version(winner.get("version"))
     return versions
-
-def read_keys(lookup: Callable[[str], str]) -> Tuple[str, str]:
-    """The public and secret key, each under its LANGFUSE_ name or else its
-    CC_LANGFUSE_ name; lookup returns "" for a name it does not hold."""
-    return (
-        lookup("LANGFUSE_PUBLIC_KEY") or lookup("CC_LANGFUSE_PUBLIC_KEY"),
-        lookup("LANGFUSE_SECRET_KEY") or lookup("CC_LANGFUSE_SECRET_KEY"),
-    )
 
 def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     """The hook's Langfuse settings, or None when no keys are set.
@@ -3633,8 +3625,8 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
     # Runs on every firing, independent of this run's hook_context/payload —
     # the pending queue is global to the machine, not scoped to this session,
     # so a healthy hook run in any project can drain hurts left behind by a
-    # session whose hook never runs again (see mate-hurt's known Windows
-    # silent-failure mode). Never allowed to block turn emission below.
+    # session whose hook never runs again. Never allowed to block turn
+    # emission below.
     try:
         with FileLock(HURT_PENDING_LOCK_FILE):
             attached = process_pending_hurts(config, HURT_PENDING_FILE, log=info)

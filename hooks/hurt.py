@@ -34,6 +34,7 @@ from typing import Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import CATEGORIES, load_pending_hurts, save_pending_hurts  # noqa: E402
+from settings_file import read_keys  # noqa: E402
 from state_files import (  # noqa: E402
     HURT_PENDING_FILE,
     HURT_PENDING_LOCK_FILE,
@@ -78,8 +79,7 @@ def find_transcript_path(session_id: str, projects_dir: Path = PROJECTS_DIR) -> 
 def langfuse_keys_set(env: Mapping[str, str]) -> bool:
     """True when both Langfuse keys are set, as the hook needs to run. Only
     presence is checked — the values are never printed."""
-    public_key = env.get("LANGFUSE_PUBLIC_KEY") or env.get("CC_LANGFUSE_PUBLIC_KEY")
-    secret_key = env.get("LANGFUSE_SECRET_KEY") or env.get("CC_LANGFUSE_SECRET_KEY")
+    public_key, secret_key = read_keys(lambda name: env.get(name) or "")
     return bool(public_key and secret_key)
 
 
