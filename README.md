@@ -106,7 +106,7 @@ A pattern that is not a valid regular expression, or has no group, is refused: t
 
 Each trace lists the plugins its turn used, with their versions, so a plugin's maintainer can compare plugins version against version. The list is in the trace's metadata key `plugins`, sorted by name, for example `[{"name": "mate-core", "version": "8.9.0"}, {"name": "document-skills"}]`.
 
-A plugin counts as used when an agent, skill or command from it ran in the turn or in one of the turn's agents, at any depth. A teammate's trace lists the plugins of its own turn, its own agent's plugin included. A plugin used only through its hooks is not listed, because the transcript does not say which plugin a hook came from.
+A plugin counts as used when an agent, skill or command from it ran in the turn or in one of the agent rounds the turn started, at any depth (see [Agent runs](#agent-runs)). A teammate's trace lists the plugins of its own turn, its own agent's plugin included. A plugin used only through its hooks is not listed, because the transcript does not say which plugin a hook came from.
 
 The version comes from Claude Code's `~/.claude/plugins/installed_plugins.json`. The plugin's install for this repo counts, a local install before a project install; else its machine-wide install counts. A session in a worktree uses the installs of the repo's main checkout. The version is cut at its first dash, so `8.9.0-0ae331d8a58b` shows as `8.9.0`. Only a version made of digits and dots up to that dash counts; anything else, such as a bare commit hash or `unknown`, is no version, and the plugin is listed without one.
 
@@ -117,6 +117,14 @@ If that file exists but cannot be read, the hook stops with an error that names 
 Each observation names the component that did its work, so a plugin's maintainer can measure each agent version against version. The component is in the observation's metadata key `component`: `session` for the main session's own work, and the agent's type, such as `pymate:developer`, for an agent and everything in it, its model calls included. Every observation of a teammate's trace names the teammate's agent type.
 
 Where the component names a plugin, the metadata key `plugin` holds that plugin, such as `pymate`, and the metadata key `plugin_version` holds the plugin's version, by the rule above. A plugin with no version has no `plugin_version` key. The main session's own work, and an agent whose type names no plugin, such as `general-purpose`, have neither key. Langfuse's own version field stays empty, on observations and traces alike.
+
+### Agent runs
+
+Each round of an agent is a run of its own, in the trace of the turn that started the round, so a plugin's maintainer can count an agent's rounds and see what each one cost. A round is the agent's work for one message: the prompt it was launched with, or one message the main session sent it with `SendMessage`. A message to an agent that is still busy ends the running round where the message arrives, and starts the next one.
+
+A run is the observation `Subagent: <description>`, with the metadata key `round` holding its number from 1. A round after the first is named `Subagent: <description> - round <n>`. A turn that continues an agent waits for the round before its trace is sent: until a task notification for its `SendMessage` call, or until the agent hands back its report, whichever comes first. At session end the trace is sent anyway, with the round's work up to then.
+
+When the agent's transcript holds no start of the round that a `SendMessage` call started, at or after the call, the trace is sent without that run, and the hook log `~/.claude/state/langfuse_hook.log` holds a line `No run for SendMessage call <id>: agent <agent id> has no round <n> that starts at or after the call`. An agent that another agent continues gets no runs of its own for those rounds.
 
 ## Requirements
 
