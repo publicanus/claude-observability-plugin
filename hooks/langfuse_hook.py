@@ -77,6 +77,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
+from settings_file import SettingsFileError, load_settings  # noqa: E402
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
 
@@ -540,21 +541,10 @@ def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
 # ----------------- Setup check -----------------
 REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
 
-class SettingsFileError(Exception):
-    """A repo's REPO_SETTINGS_FILE exists but cannot be read as Claude Code settings."""
-
 def settings_file_holds_keys(path: Path) -> bool:
     """True when the settings file at path has both keys, not empty, in its env
     block; False when the file does not exist. Raises SettingsFileError."""
-    if not path.exists():
-        return False
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as e:
-        raise SettingsFileError(f"cannot read {path} as JSON: {e}") from e
-    env = settings.get("env", {}) if isinstance(settings, dict) else None
-    if not isinstance(env, dict):
-        raise SettingsFileError(f'{path} has no JSON object as its "env"')
+    env = load_settings(path).get("env", {})
     public_key, secret_key = read_keys(lambda name: env.get(name) or "")
     return bool(public_key and secret_key)
 

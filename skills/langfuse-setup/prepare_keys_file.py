@@ -30,6 +30,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# The plugin's hooks folder, so its shared modules import however this script is run.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hooks"))
+from settings_file import SettingsFileError, load_settings  # noqa: E402
+
 SETTINGS = Path(".claude") / "settings.local.json"
 EXCLUDE_LINE = "**/.claude/settings.local.json"
 WORKTREEINCLUDE_LINE = ".claude/settings.local.json"
@@ -60,20 +64,6 @@ def main_checkout(project_dir: Path) -> Path:
         if line.startswith("worktree "):
             return Path(line[len("worktree "):])
     raise SetupError(f"`git worktree list` named no checkout for {project_dir}")
-
-
-def load_settings(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as e:
-        raise SetupError(f"cannot read {path} as JSON: {e}") from e
-    if not isinstance(data, dict):
-        raise SetupError(f"{path} does not hold a JSON object")
-    if not isinstance(data.get("env", {}), dict):
-        raise SetupError(f'the "env" in {path} is not a JSON object')
-    return data
 
 
 def is_ignored(root: Path) -> bool:
@@ -163,7 +153,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = prepare(args.project_dir.resolve())
-    except SetupError as e:
+    except (SetupError, SettingsFileError) as e:
         print(f"prepare_keys_file: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))

@@ -16,7 +16,7 @@ Run the commands in steps 1, 2 and 4 with the Bash tool, also on Windows.
 Run:
 
 ```
-printf '%s' '{"hook_event_name":"UserPromptExpansion"}' | sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/langfuse_hook.py"
+cd "${CLAUDE_PROJECT_DIR}" && printf '%s' '{"hook_event_name":"UserPromptExpansion"}' | sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/langfuse_hook.py"
 ```
 
 Note its exit code, its stdout and its stderr.
