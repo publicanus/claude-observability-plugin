@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.7.0...v2.0.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* the plugin is now mate-record, installed with `claude plugin install mate-record@mate-marketplace`. The commands are /mate-record:langfuse-setup and /mate-record:hurt. A repo's own no-keys steps now live in .claude/mate-record/no-keys-steps/. Do not uninstall langfuse-observability or mate-hurt: a later mate-core release brings mate-record in, and mate-marketplace then moves each install over to mate-record.
+
+### Features
+
+* **hook:** each observation names its component, plugin and version ([#44](https://github.com/publicanus/claude-observability-plugin/issues/44)) ([#50](https://github.com/publicanus/claude-observability-plugin/issues/50)) ([4425d19](https://github.com/publicanus/claude-observability-plugin/commit/4425d19731508a6160224d131f936f68e72d06e8))
+* **hook:** each round of a continued agent is a run of its own ([#53](https://github.com/publicanus/claude-observability-plugin/issues/53)) ([#59](https://github.com/publicanus/claude-observability-plugin/issues/59)) ([f58e74c](https://github.com/publicanus/claude-observability-plugin/commit/f58e74c059bb8d963fb2ba37140437467752c86c))
+* **hook:** each trace names its work item ([#46](https://github.com/publicanus/claude-observability-plugin/issues/46)) ([#54](https://github.com/publicanus/claude-observability-plugin/issues/54)) ([f108b07](https://github.com/publicanus/claude-observability-plugin/commit/f108b07f65a7f687ff5e426d3415620a8def36a5))
+* the plugin becomes mate-record and ships /hurt ([#52](https://github.com/publicanus/claude-observability-plugin/issues/52)) ([#61](https://github.com/publicanus/claude-observability-plugin/issues/61)) ([87efe6c](https://github.com/publicanus/claude-observability-plugin/commit/87efe6c0c9cdb06d9e51b649bdae38bea98e4820))
+
+
+### Bug Fixes
+
+* **setup:** only the repo's own keys file counts as configured ([#55](https://github.com/publicanus/claude-observability-plugin/issues/55)) ([#58](https://github.com/publicanus/claude-observability-plugin/issues/58)) ([788d954](https://github.com/publicanus/claude-observability-plugin/commit/788d954f99f8347a800ad7eaacc680ccdcf77a46))
+
 ## [1.7.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.6.0...v1.7.0) (2026-10-27)
 
 
