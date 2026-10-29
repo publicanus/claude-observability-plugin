@@ -150,6 +150,11 @@ def agent_says(uuid: str, value: str, seconds: float, **fields: Any) -> Dict[str
     return assistant_row(uuid, [text(value)], seconds, **fields)
 
 
+def agent_reports(uuid: str, value: str, seconds: float) -> Dict[str, Any]:
+    """The agent's last message of a round: its report, handed back with SubagentHandback."""
+    return assistant_row(uuid, [text(value), tool_use(f"toolu_{uuid}", "SubagentHandback", {"message": value})], seconds)
+
+
 # ----------------- The usual session -----------------
 # Turn 1 launches the agent, turns 2 and 3 each send it one message. The agent's
 # rounds have 2, 1 and 2 assistant messages.
@@ -176,14 +181,14 @@ def round_1() -> List[Dict[str, Any]]:
     return [
         agent_prompt("Research the topic.", 1.5),
         agent_says("agent-1a", "Round 1, first.", 10),
-        agent_says("agent-1b", "Round 1, report.", 20),
+        agent_reports("agent-1b", "Round 1, report.", 20),
     ]
 
 
 def round_2() -> List[Dict[str, Any]]:
     return [
         coordinator_row("agent-coord-2", "Message for round 2.", 101.5),
-        agent_says("agent-2a", "Round 2, report.", 110),
+        agent_reports("agent-2a", "Round 2, report.", 110),
     ]
 
 
@@ -191,7 +196,7 @@ def round_3() -> List[Dict[str, Any]]:
     return [
         coordinator_row("agent-coord-3", "Message for round 3.", 201.5),
         agent_says("agent-3a", "Round 3, first.", 210),
-        agent_says("agent-3b", "Round 3, report.", 220),
+        agent_reports("agent-3b", "Round 3, report.", 220),
     ]
 
 
@@ -342,7 +347,7 @@ def test_a_message_to_a_busy_agent_ends_the_launch_run_where_it_arrived(
         tool_result_row("agent-sleep-result", "toolu_sleep", "done", 25, {"stdout": ""}),
         queued_message_row("agent-queued", "Also say BANANA.", 25.1),
         agent_says("agent-2a", "Round 2, first.", 26),
-        agent_says("agent-2b", "Round 2, BANANA.", 30),
+        agent_reports("agent-2b", "Round 2, BANANA.", 30),
     )
     continued_agent.add_main(
         user_row("main-user-1", "Launch the researcher.", 0),
@@ -462,7 +467,7 @@ def test_a_message_turn_waits_for_its_round_and_then_shows_all_of_it(
     )
     assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
 
-    continued_agent.add_agent(agent_says("agent-2b", "Round 2, report.", 120))
+    continued_agent.add_agent(agent_reports("agent-2b", "Round 2, report.", 120))
     continued_agent.add_main(notification("main-note-2", SEND_2, "Round 2 done.", 130))
 
     assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
@@ -574,4 +579,40 @@ def test_a_request_copy_in_the_transcript_adds_no_tool_call_and_no_run(
     assert [run_summary(trace) for trace in traces(fake_langfuse)] == [
         [(f"Subagent: {DESCRIPTION}", 1, ["Round 1, first.", "Round 1, report."])],
         [(f"Subagent: {DESCRIPTION} - round 2", 2, ["Round 2, report."])],
+    ]
+
+
+def test_a_hand_back_that_ends_an_earlier_round_leaves_a_later_round_waiting(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(
+        *round_1(),
+        coordinator_row("agent-coord-2", "Message for round 2.", 101.5),
+        agent_reports("agent-2a", "Round 2, report.", 105),
+        coordinator_row("agent-coord-3", "Message for round 3.", 110.3),
+        agent_says("agent-3a", "Round 3, first.", 115),
+    )
+    continued_agent.add_main(
+        *launch_turn(),
+        notification("main-note-1", LAUNCH, "Round 1 done.", 30),
+        user_row("main-user-2", "Ask it twice.", 100),
+        send_call("main-send-2", SEND_2, "Message for round 2.", 101),
+        send_result("main-send-result-2", SEND_2, 102),
+        send_call("main-send-3", SEND_3, "Message for round 3.", 110),
+        send_result("main-send-result-3", SEND_3, 110.5),
+        hand_back("main-hand-back-2", "ROUND 2 REPORT", 111),
+        agent_says("main-sent", "Sent both.", 112),
+    )
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+
+    continued_agent.add_agent(agent_reports("agent-3b", "Round 3, report.", 120))
+    continued_agent.add_main(
+        hand_back("main-hand-back-3", "ROUND 3 REPORT", 121),
+        agent_says("main-done", "Both are in.", 122),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+    assert run_summary(traces(fake_langfuse)[1]) == [
+        (f"Subagent: {DESCRIPTION} - round 2", 2, ["Round 2, report."]),
+        (f"Subagent: {DESCRIPTION} - round 3", 3, ["Round 3, first.", "Round 3, report."]),
     ]

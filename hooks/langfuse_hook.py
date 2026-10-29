@@ -1054,6 +1054,35 @@ def hand_back_agent_id(row: Dict[str, Any]) -> Optional[str]:
     agent_id = origin.get("senderTaskId")
     return agent_id if isinstance(agent_id, str) and agent_id else None
 
+@dataclass
+class AgentCalls:
+    """A launched agent's transcript, and each call that launched or continued it with
+    the round that call started."""
+    path: Any
+    rounds_by_call_id: Dict[str, int]
+
+def calls_ended_by_hand_back(row: Dict[str, Any], agent_calls: Dict[str, AgentCalls]) -> List[str]:
+    """The calls whose round the hand-back row ends: the round holding the agent's last
+    SubagentHandback call at or before the row, and every earlier round. Empty when the
+    row is no hand-back, or its agent's transcript holds no such call."""
+    agent_id = hand_back_agent_id(row)
+    calls = agent_calls.get(agent_id) if agent_id else None
+    hand_back_time = parse_timestamp(row)
+    if calls is None or hand_back_time is None or not isinstance(calls.path, Path):
+        return []
+    agent_rows = read_jsonl_rows(calls.path) or []
+    round_starts = agent_round_starts(agent_rows)
+    ended_round = 0
+    for index, agent_row in enumerate(agent_rows):
+        handed_back = any(
+            tool_use.get("name") == "SubagentHandback"
+            for tool_use in get_tool_use_blocks(get_content_from_row(agent_row))
+        )
+        call_time = parse_timestamp(agent_row)
+        if handed_back and call_time is not None and call_time <= hand_back_time:
+            ended_round = sum(1 for start in round_starts if start <= index)
+    return [call_id for call_id, round_number in calls.rounds_by_call_id.items() if round_number <= ended_round]
+
 def _find_pending_agent_turn(
     session_state: SessionState,
     tool_use_id: str,
@@ -1077,12 +1106,13 @@ def resolve_deferred_agent_turns(
     rows: List[Dict[str, Any]],
     session_state: SessionState,
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
-    agent_call_ids: Optional[Dict[str, List[str]]] = None,
+    agent_calls: Optional[Dict[str, AgentCalls]] = None,
 ) -> Tuple[List[List[Dict[str, Any]]], List[Dict[str, Any]]]:
     """Move task-notification rows from the batch to their deferred turns, and copy
-    each hand-back row to every deferred turn that waits for a call to its agent.
+    each hand-back row to every deferred turn that waits for a call whose round it
+    ends (calls_ended_by_hand_back).
 
-    agent_call_ids maps an agent's id to the calls that launched or continued it.
+    agent_calls maps an agent's id to its AgentCalls.
     Deferred rows are never spliced into the batch (a user row mid-batch would
     cut the current turn in half); resolved turns are returned for isolated
     assembly. Notifications matching a tool_use in the batch stay there, and
@@ -1102,15 +1132,15 @@ def resolve_deferred_agent_turns(
                 pending_tool_use_ids.remove(tool_use_id)
                 pending_turn.setdefault("resolved_tool_use_ids", []).append(tool_use_id)
 
-    def route_hand_back(row: Dict[str, Any], agent_id: str) -> None:
-        calls_to_agent = (agent_call_ids or {}).get(agent_id, [])
+    def route_hand_back(row: Dict[str, Any]) -> None:
+        ended_calls = calls_ended_by_hand_back(row, agent_calls or {})
         for pending_turn in session_state.pending_agent_turns:
             if not isinstance(pending_turn, dict) or not isinstance(pending_turn.get("rows"), list):
                 continue
             pending_tool_use_ids = pending_turn.get("pending_tool_use_ids")
             if not isinstance(pending_tool_use_ids, list):
                 continue
-            waiting_calls = [tool_use_id for tool_use_id in calls_to_agent if tool_use_id in pending_tool_use_ids]
+            waiting_calls = [tool_use_id for tool_use_id in ended_calls if tool_use_id in pending_tool_use_ids]
             if waiting_calls:
                 route_to_pending_turn(pending_turn, row, waiting_calls)
 
@@ -1128,9 +1158,8 @@ def resolve_deferred_agent_turns(
         route_to_pending_turn(pending_turn, row, [tool_use_id])
 
     for row in rows:
-        handing_back_agent_id = hand_back_agent_id(row)
-        if handing_back_agent_id is not None:
-            route_hand_back(row, handing_back_agent_id)
+        if hand_back_agent_id(row) is not None:
+            route_hand_back(row)
             remaining_rows.append(row)
             continue
         if not is_task_notification_row(row):
@@ -1332,20 +1361,19 @@ def set_final_result(tool_result_entry: Dict[str, Any], content: Any, row: Dict[
 def add_hand_back_row(
     row: Dict[str, Any],
     state: TurnAssemblyState,
-    agent_call_ids: Optional[Dict[str, List[str]]] = None,
+    agent_calls: Optional[Dict[str, AgentCalls]] = None,
 ) -> bool:
-    """Take a hand-back row: each call of the current turn to its agent that has no
-    final result yet gets the hand-back as its final result. agent_call_ids maps an
-    agent's id to the calls that launched or continued it."""
-    agent_id = hand_back_agent_id(row)
-    if agent_id is None:
+    """Take a hand-back row: each call of the current turn whose round it ends
+    (calls_ended_by_hand_back) and that has no final result yet gets the hand-back as
+    its final result. agent_calls maps an agent's id to its AgentCalls."""
+    if hand_back_agent_id(row) is None:
         return False
 
     if state.current_turn_user_row is None:
         return True
 
     report = extract_text_from_content(get_content_from_row(row))
-    for tool_use_id in (agent_call_ids or {}).get(agent_id, []):
+    for tool_use_id in calls_ended_by_hand_back(row, agent_calls or {}):
         tool_result_entry = state.tool_results_by_id.get(tool_use_id)
         if isinstance(tool_result_entry, dict) and tool_result_entry.get("final_content") is None:
             set_final_result(tool_result_entry, report, row)
@@ -1466,7 +1494,7 @@ def add_assistant_row(row: Dict[str, Any], state: TurnAssemblyState) -> None:
 def build_turns(
     rows: List[Dict[str, Any]],
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
-    agent_call_ids: Optional[Dict[str, List[str]]] = None,
+    agent_calls: Optional[Dict[str, AgentCalls]] = None,
 ) -> List[Turn]:
     """
     Groups incremental transcript rows into turns:
@@ -1474,15 +1502,14 @@ def build_turns(
     Uses:
     - assistant rows merged by message.id (all content blocks concatenated)
     - tool results dedupe by tool_use_id (latest wins)
-    agent_call_ids maps an agent's id to the calls that launched or continued it, for
-    its hand-back rows.
+    agent_calls maps an agent's id to its AgentCalls, for its hand-back rows.
     """
     turns: List[Turn] = []
     state = TurnAssemblyState()
 
     for row in rows:
         # A hand-back row is also isMeta, so it goes before the injected-context check.
-        if add_hand_back_row(row, state, agent_call_ids):
+        if add_hand_back_row(row, state, agent_calls):
             continue
 
         if add_injected_context_row(row, state):
@@ -1526,10 +1553,10 @@ def get_new_turns_from_transcript(
 ) -> Tuple[List[Turn], SessionState]:
     rows, session_state = read_new_jsonl(transcript_path, session_state)
     task_id_to_tool_use_id = get_task_id_to_tool_use_id(subagent_transcripts_by_tool_use_id)
-    agent_call_ids = get_agent_call_ids(subagent_transcripts_by_tool_use_id or {}, continued_rounds or {})
+    agent_calls = get_agent_calls(subagent_transcripts_by_tool_use_id or {}, continued_rounds or {})
 
     deferred_turn_row_lists, rows = resolve_deferred_agent_turns(
-        rows, session_state, task_id_to_tool_use_id, agent_call_ids
+        rows, session_state, task_id_to_tool_use_id, agent_calls
     )
 
     if flush_deferred_agent_turns and session_state.pending_agent_turns:
@@ -1547,9 +1574,9 @@ def get_new_turns_from_transcript(
     # rows are always chronologically older than anything in the batch).
     turns: List[Turn] = []
     for deferred_turn_rows in deferred_turn_row_lists:
-        turns.extend(build_turns(deferred_turn_rows, task_id_to_tool_use_id, agent_call_ids))
+        turns.extend(build_turns(deferred_turn_rows, task_id_to_tool_use_id, agent_calls))
     if rows:
-        turns.extend(build_turns(rows, task_id_to_tool_use_id, agent_call_ids))
+        turns.extend(build_turns(rows, task_id_to_tool_use_id, agent_calls))
 
     return turns, session_state
 
@@ -1706,20 +1733,23 @@ def get_continued_rounds_by_tool_use_id(
         continued_rounds[call_id] = {"subagent": agents_by_id[agent_id], "round": last_round_by_agent_id[agent_id]}
     return continued_rounds
 
-def get_agent_call_ids(
+def get_agent_calls(
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     continued_rounds: Dict[str, Dict[str, Any]],
-) -> Dict[str, List[str]]:
-    """Map each launched agent's id to the call that launched it and the calls in
-    continued_rounds that continued it."""
-    call_ids: Dict[str, List[str]] = {}
-    launches = list(subagent_transcripts_by_tool_use_id.items())
-    continuations = [(tool_use_id, continued["subagent"]) for tool_use_id, continued in continued_rounds.items()]
-    for tool_use_id, subagent in launches + continuations:
+) -> Dict[str, AgentCalls]:
+    """Map each launched agent's id to its AgentCalls: the call that launched it
+    (round 1) and the calls in continued_rounds that continued it."""
+    agent_calls: Dict[str, AgentCalls] = {}
+    launches = [(tool_use_id, subagent, 1) for tool_use_id, subagent in subagent_transcripts_by_tool_use_id.items()]
+    continuations = [
+        (tool_use_id, continued["subagent"], continued["round"]) for tool_use_id, continued in continued_rounds.items()
+    ]
+    for tool_use_id, subagent, round_number in launches + continuations:
         agent_id = subagent.get("agent_id")
         if isinstance(agent_id, str) and agent_id:
-            call_ids.setdefault(agent_id, []).append(tool_use_id)
-    return call_ids
+            calls = agent_calls.setdefault(agent_id, AgentCalls(subagent.get("path"), {}))
+            calls.rounds_by_call_id[tool_use_id] = round_number
+    return agent_calls
 
 @dataclass
 class AgentRun:
