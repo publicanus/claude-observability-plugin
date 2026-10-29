@@ -39,7 +39,7 @@ Note its exit code, its stdout and its stderr.
    - macOS and Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
 5. Run `~/.local/bin/uv --version` (on Windows: `"$HOME/.local/bin/uv.exe" --version`) and show the result.
-6. Tell the developer to restart Claude Code from a new terminal and run `/langfuse-observability:langfuse-setup` again. Stop.
+6. Tell the developer to restart Claude Code from a new terminal and run `/mate-record:langfuse-setup` again. Stop.
 
 ## 4. Prepare the file
 

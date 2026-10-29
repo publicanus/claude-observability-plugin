@@ -1,9 +1,9 @@
-# Langfuse Observability Plugin for Claude Code
+# mate-record: Langfuse tracing and /hurt for Claude Code
 
-> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `langfuse-observability` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). Three behavioral differences from upstream:
+> This is Spire's maintained fork of [langfuse/claude-observability-plugin](https://github.com/langfuse/claude-observability-plugin), installed as `mate-record` via the [mate marketplace](https://github.com/publicanus/mate-marketplace). Three behavioral differences from upstream:
 >
 > 1. This fork captures named teammate agents (subagents spawned with a `name:`, Claude Code's agent-teams feature) — upstream drops them silently, so a teammate-heavy session can do most of its work invisibly to Langfuse. Documented upstream as [langfuse/claude-observability-plugin#28](https://github.com/langfuse/claude-observability-plugin/issues/28).
-> 2. This fork attaches pending `/hurt` annotations (from the companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin) onto their target traces — see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt) below. This is mate-ecosystem-specific and not expected to be upstreamed.
+> 2. This fork has a `/mate-record:hurt` command, and attaches the annotations it queues onto their target traces — see [Flagging what hurt with /hurt](#flagging-what-hurt-with-hurt) below. This is mate-ecosystem-specific and not expected to be upstreamed.
 > 3. This fork sends only to Langfuse Cloud's EU region (`https://cloud.langfuse.com`, the default) or to a self-hosted Langfuse. It refuses Langfuse Cloud's US, HIPAA and Japan regions. Upstream defaults to the US region.
 >
 > The upstream README follows unchanged below.
@@ -13,8 +13,8 @@ Trace hook-backed Claude Code sessions to [Langfuse](https://langfuse.com) — t
 ## Install
 
 ```bash
-claude plugin marketplace add langfuse/Claude-Observability-Plugin
-claude plugin install langfuse-observability@langfuse-observability
+claude plugin marketplace add publicanus/mate-marketplace
+claude plugin install mate-record@mate-marketplace
 ```
 
 The marketplace command registers the plugin marketplace and refreshes its local cache. The install command enables the plugin for your Claude Code user scope.
@@ -26,7 +26,7 @@ Installing without configuration is fine: no field is required at install time, 
 To set keys for one repo, run this in a Claude Code session in that repo:
 
 ```text
-/langfuse-observability:langfuse-setup
+/mate-record:langfuse-setup
 ```
 
 The skill prepares `.claude/settings.local.json` in the repo's main checkout with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When the repo's own `.claude/settings.local.json` already holds both keys, the skill says so and changes nothing. In a worktree, that is the worktree's own file, or else the main checkout's. Keys set anywhere else, such as for every repo on the machine, do not count. When the hook cannot run on the machine, it offers to install uv.
@@ -34,13 +34,13 @@ The skill prepares `.claude/settings.local.json` in the repo's main checkout wit
 To set keys for every repo on the machine instead, configure the plugin from within a Claude Code session. This is a Claude Code slash command, not a shell command:
 
 ```text
-/plugin configure langfuse-observability@langfuse-observability
+/plugin configure mate-record@mate-marketplace
 ```
 
 Alternatively, pass configuration values during install:
 
 ```bash
-claude plugin install langfuse-observability@langfuse-observability \
+claude plugin install mate-record@mate-marketplace \
   --config LANGFUSE_PUBLIC_KEY=pk-lf-... \
   --config LANGFUSE_SECRET_KEY=sk-lf-... \
   --config LANGFUSE_BASE_URL=https://cloud.langfuse.com
@@ -143,7 +143,7 @@ A hook reads the session transcript incrementally on every turn (Stop) and at se
 
 The hook does not send the traces itself. It stores them in `~/.claude/state/langfuse_waiting/`, and a background process sends them and deletes each one once Langfuse has accepted it. When Langfuse cannot be reached or answers with an error, the traces wait there, and the next turn in any session on the computer sends them, each at the time it happened. Each waiting file holds a copy of its repo's Langfuse keys, so that a session in another repo can send it. When Langfuse rejects the keys, the traces are dropped.
 
-When no Langfuse keys are set for the repo, the hook sends nothing. At session start (SessionStart) it shows a message saying so: the line "Langfuse: no keys for this repo, this session is not traced.", the setup skill's name, and short manual steps for your system (macOS, Linux or Windows). The plugin's steps are in `hooks/no_keys_steps/<system>.txt`. A repo can replace them for one or more systems with its own `.claude/langfuse-observability/no-keys-steps/<system>.txt` at the repo root, where `<system>` is `macos`, `linux` or `windows`.
+When no Langfuse keys are set for the repo, the hook sends nothing. At session start (SessionStart) it shows a message saying so: the line "Langfuse: no keys for this repo, this session is not traced.", the setup skill's name, and short manual steps for your system (macOS, Linux or Windows). The plugin's steps are in `hooks/no_keys_steps/<system>.txt`. A repo can replace them for one or more systems with its own `.claude/mate-record/no-keys-steps/<system>.txt` at the repo root, where `<system>` is `macos`, `linux` or `windows`.
 
 A tool span whose call failed carries `level: ERROR` and a `statusMessage` naming the failure class (`Tool call failed`, or `Permission denied` for a denied tool call), so errors and denials are queryable via the Langfuse API without fetching the span's output. Permission denials additionally carry a `denial_kind` metadata field (`user-rejected` or `permission-rule`) distinguishing a user's explicit rejection from an automatic permission-rule block. Successful calls keep the default level.
 
@@ -239,14 +239,14 @@ def latest_trace_id(session_id: str, transcript_path: str) -> str | None:
 this field, so a teammate-only entry has it null or absent — do not expect
 teammate sub-traces to move it.
 
-## Attaching /hurt annotations (mate-hurt)
+## Flagging what hurt with /hurt
 
-The companion [mate-hurt](https://github.com/publicanus/mate-hurt) plugin lets an operator flag something that went wrong in the current session (`/hurt <what happened>`). mate-hurt holds no Langfuse credentials and never contacts Langfuse itself — it resolves the target trace id from `latest_trace_id` (see above) and queues the annotation locally at `~/.claude/state/hurt_pending.json`, a JSON array of:
+`/mate-record:hurt <what happened>` lets an operator flag something that went wrong in the current session. It holds no Langfuse credentials and never contacts Langfuse itself — it resolves the target trace id from `latest_trace_id` (see above) and queues the annotation locally at `~/.claude/state/hurt_pending.json`, a JSON array of:
 
 | Field        | Meaning                                                          |
 | ------------ | ----------------------------------------------------------------- |
 | `id`         | uuid4, unique per queued hurt.                                    |
-| `trace_id`   | The target trace, resolved once by mate-hurt.                     |
+| `trace_id`   | The target trace, resolved once by /hurt.                         |
 | `category`   | One of a fixed six-value taxonomy (`correction-repeated`, `redone-work`, `stalled-loop`, `missed-trigger`, `ci-escape`, `other`). |
 | `comment`    | The operator's own words.                                         |
 | `created`    | ISO 8601 UTC timestamp.                                            |
@@ -266,9 +266,8 @@ configure (`LANGFUSE_BASE_URL`, default `https://cloud.langfuse.com`, Langfuse C
 EU; self-hosted endpoints are supported, Langfuse Cloud's other regions are refused). Data is sent at the end of each turn (the
 `Stop` hook) and at session end (`SessionEnd`) using the Langfuse API keys you
 provide, which are stored in your OS keychain. No data is sent anywhere other than
-the endpoint you configure. If the companion mate-hurt plugin is installed, this
-also includes any queued `/hurt` annotation's category and operator-written
-comment, sent to the same endpoint (see [Attaching /hurt annotations](#attaching-hurt-annotations-mate-hurt)).
+the endpoint you configure. This also includes any queued `/hurt` annotation's category and operator-written
+comment, sent to the same endpoint (see [Flagging what hurt with /hurt](#flagging-what-hurt-with-hurt)).
 
 Before any data leaves your machine, eight kinds of secret are replaced by
 `[REDACTED]` in every input and output: a key that starts with `sk-`, an AWS access
@@ -287,7 +286,7 @@ stays within your own infrastructure.
 In Claude Code, run:
 
 ```text
-/plugin configure langfuse-observability@langfuse-observability
+/plugin configure mate-record@mate-marketplace
 ```
 
 ## Disable tracing
@@ -295,7 +294,7 @@ In Claude Code, run:
 To stop tracing for new Claude Code CLI sessions and new Claude Code GUI Code mode sessions, disable the plugin:
 
 ```bash
-claude plugin disable langfuse-observability@langfuse-observability --scope user
+claude plugin disable mate-record@mate-marketplace --scope user
 claude plugin list
 ```
 
@@ -304,7 +303,7 @@ claude plugin list
 To enable tracing again:
 
 ```bash
-claude plugin enable langfuse-observability@langfuse-observability --scope user
+claude plugin enable mate-record@mate-marketplace --scope user
 ```
 
 If a Claude Code session is already running, restart it after disabling the plugin. Running sessions may have loaded their hooks at startup, so disabling the plugin is intended for new sessions.
@@ -312,14 +311,14 @@ If a Claude Code session is already running, restart it after disabling the plug
 ## Uninstall
 
 ```bash
-claude plugin uninstall langfuse-observability
+claude plugin uninstall mate-record@mate-marketplace
 ```
 
 ## Troubleshooting
 
 - Nothing in Langfuse: check `~/.claude/state/langfuse_hook.log` (enable `CC_LANGFUSE_DEBUG`).
 - Desktop chat has no traces: regular Claude Desktop Chat mode is not hook-backed. Use the `claude` CLI or Claude Code GUI Code mode.
-- Hook not firing: confirm with `claude plugin list` that langfuse-observability is enabled; restart Claude Code.
+- Hook not firing: confirm with `claude plugin list` that mate-record is enabled; restart Claude Code.
 - langfuse import errors (no uv): install uv, or ensure the `python3` on your PATH is Python 3.10+ and has `langfuse>=4.2,<5` installed.
 
 ## License

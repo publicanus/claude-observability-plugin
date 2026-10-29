@@ -15,8 +15,8 @@
 #   exit       the script's own exit code; 0 when the script does not run, except
 #              1 with --fail-if-cannot-run
 
-CANNOT_RUN_MESSAGE='{"systemMessage": "Langfuse: the hook cannot run on this machine, this session is not traced. It needs uv (on Windows, uv is required). To fix it, run /langfuse-observability:langfuse-setup."}'
-CANNOT_RUN_COMMAND_MESSAGE='langfuse-work-item: cannot run: needs uv or a suitable python3; run /langfuse-observability:langfuse-setup'
+CANNOT_RUN_MESSAGE='{"systemMessage": "Langfuse: the hook cannot run on this machine, this session is not traced. It needs uv (on Windows, uv is required). To fix it, run /mate-record:langfuse-setup."}'
+CANNOT_RUN_COMMAND_MESSAGE='langfuse-work-item: cannot run: needs uv or a suitable python3; run /mate-record:langfuse-setup'
 
 # Exit 0 when python3 is Python 3.10+ with langfuse 4.2 or later installed.
 # The version is read from the package's metadata, not imported: an import costs

@@ -33,7 +33,7 @@
     ],
     "UserPromptExpansion": [
       {
-        "matcher": "^(langfuse-observability:)?langfuse-setup$",
+        "matcher": "^(mate-record:)?langfuse-setup$",
         "hooks": [
           {
             "type": "command",

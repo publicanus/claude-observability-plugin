@@ -1,17 +1,15 @@
 """
-Attach pending /hurt annotations (mate-hurt plugin) onto their target traces.
+Attach pending /hurt annotations onto their target traces.
 
-mate-hurt queues an annotation locally instead of contacting Langfuse itself
-— see its README's "Local queue: the contract with langfuse-observability".
-This module is the consumer: it uses this hook's own already-resolved
+/hurt (hurt.py) queues an annotation locally instead of contacting Langfuse
+itself. This module is the consumer: it uses this hook's own already-resolved
 Langfuse credentials, so a hurt is always attached using the same
 credentials already writing this machine's traces — it can never land in
-the wrong Langfuse project, and mate-hurt never needs credentials of its
-own.
+the wrong Langfuse project, and /hurt never needs credentials of its own.
 
 Queue file: ~/.claude/state/hurt_pending.json — a JSON array of objects:
     id          str, uuid4, unique per queued hurt
-    trace_id    str, the target trace, resolved once by mate-hurt
+    trace_id    str, the target trace, resolved once by /hurt
     category    str, one of CATEGORIES
     comment     str, the operator's own words
     created     str, ISO 8601 UTC timestamp
@@ -157,7 +155,7 @@ def ensure_score_config(client: LangfuseClient, log: Log = None) -> Optional[str
     """Idempotent: reuse an existing 'hurt' categorical config with the
     right taxonomy, or create one. Returns the config's id, or None on
     failure. Provisioning lives here — done once by the component that
-    holds the connection — rather than in mate-hurt."""
+    holds the connection — rather than in /hurt."""
     existing = _find_matching_score_config(client)
     if existing is not None:
         return existing

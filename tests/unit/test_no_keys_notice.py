@@ -11,8 +11,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_STEPS_DIR = REPO_ROOT / "hooks" / "no_keys_steps"
-REPO_STEPS_DIR = Path(".claude") / "langfuse-observability" / "no-keys-steps"
-SETUP_LINE = "To add keys, run /langfuse-observability:langfuse-setup, or by hand:"
+REPO_STEPS_DIR = Path(".claude") / "mate-record" / "no-keys-steps"
+SETUP_LINE = "To add keys, run /mate-record:langfuse-setup, or by hand:"
 PLATFORMS = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
 KEY_VARS = [

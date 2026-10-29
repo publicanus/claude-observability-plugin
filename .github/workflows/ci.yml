@@ -21,7 +21,6 @@ jobs:
       - name: Manifests parse
         run: |
           jq . .claude-plugin/plugin.json > /dev/null
-          jq . .claude-plugin/marketplace.json > /dev/null
           jq . hooks/hooks.json > /dev/null
 
       - name: No userConfig field is install-required
