@@ -29,7 +29,7 @@ To set keys for one repo, run this in a Claude Code session in that repo:
 /langfuse-observability:langfuse-setup
 ```
 
-The skill prepares the repo's `.claude/settings.local.json` with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When keys are already set, it says so and changes nothing. When the hook cannot run on the machine, it offers to install uv.
+The skill prepares `.claude/settings.local.json` in the repo's main checkout with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When the repo's own `.claude/settings.local.json` already holds both keys, the skill says so and changes nothing. In a worktree, that is the worktree's own file, or else the main checkout's. Keys set anywhere else, such as for every repo on the machine, do not count. When the hook cannot run on the machine, it offers to install uv.
 
 To set keys for every repo on the machine instead, configure the plugin from within a Claude Code session. This is a Claude Code slash command, not a shell command:
 

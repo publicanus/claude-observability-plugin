@@ -24,7 +24,7 @@ Note its exit code, its stdout and its stderr.
 ## 2. Act on the answer
 
 - **Exit 0, nothing on stderr, and stdout is a JSON object with `"decision": "block"`:** say only the text of its `reason`, and stop. Change no file.
-- **Exit 0, nothing on stderr, and stdout is exactly `{}`:** the repo has no keys. Go on to step 4.
+- **Exit 0, nothing on stderr, and stdout is exactly `{}`:** the repo's own `.claude/settings.local.json` has no keys. Go on to step 4.
 - **`sh` was not found:** say that the Langfuse hook needs a POSIX `sh`, which on Windows comes with Git for Windows. Stop, and change no file.
 - **Anything else** (no output at all, a non-zero exit, text on stderr, or other stdout): run `uv --version`.
   - If `uv --version` fails, go on to step 3.

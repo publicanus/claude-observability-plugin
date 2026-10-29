@@ -8,8 +8,7 @@
     sh hooks/run_hook.sh prepare_keys_file.py --project-dir <dir>
 
     --project-dir  the folder the Claude Code session started in, inside a git repository
-    target         <dir>/.claude/settings.local.json on Windows; elsewhere the same path
-                   in the repository's main checkout
+    target         .claude/settings.local.json in the repository's main checkout
     writes         only what is missing, in this order:
                    - the line **/.claude/settings.local.json in the clone's .git/info/exclude,
                      when git does not ignore the target yet
@@ -61,13 +60,6 @@ def main_checkout(project_dir: Path) -> Path:
         if line.startswith("worktree "):
             return Path(line[len("worktree "):])
     raise SetupError(f"`git worktree list` named no checkout for {project_dir}")
-
-
-def settings_root(project_dir: Path) -> Path:
-    """The folder whose .claude/settings.local.json Claude Code reads for this session."""
-    if sys.platform == "win32":
-        return project_dir
-    return main_checkout(project_dir)
 
 
 def load_settings(path: Path) -> Dict[str, Any]:
@@ -148,7 +140,7 @@ def lists_settings_file(path: Path) -> bool:
 
 def prepare(project_dir: Path) -> Dict[str, Any]:
     checkout_root = Path(git_output(project_dir, "rev-parse", "--show-toplevel").strip())
-    root = settings_root(project_dir)
+    root = main_checkout(project_dir)
     target = root / SETTINGS
     settings = load_settings(target)
 

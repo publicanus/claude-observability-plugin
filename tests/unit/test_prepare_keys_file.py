@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +41,6 @@ def isolated_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setattr(sys, "platform", "linux")
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -160,19 +158,6 @@ def test_from_a_worktree_the_main_checkouts_file_is_prepared(prepare, capsys, re
     assert read_settings(repo / SETTINGS) == {"env": PLACEHOLDERS}
     assert not (worktree / SETTINGS).exists()
     assert (worktree / ".worktreeinclude").is_file()
-
-
-def test_on_windows_from_a_worktree_the_main_checkouts_file_is_prepared(prepare, capsys, repo, tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
-    worktree = (tmp_path / "wt").resolve()
-    git(repo, "worktree", "add", "-q", str(worktree))
-
-    code, out, _ = run(prepare, capsys, worktree)
-
-    assert code == 0
-    assert out["settings"] == str(repo / SETTINGS)
-    assert read_settings(repo / SETTINGS) == {"env": PLACEHOLDERS}
-    assert not (worktree / SETTINGS).exists()
 
 
 def test_outside_a_git_repository_nothing_is_written(prepare, capsys, tmp_path):

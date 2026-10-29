@@ -321,6 +321,14 @@ def read_plugin_versions(project_dir: Path) -> Dict[str, Optional[str]]:
         versions[key.split("@", 1)[0]] = plugin_version(winner.get("version"))
     return versions
 
+def read_keys(lookup: Callable[[str], str]) -> Tuple[str, str]:
+    """The public and secret key, each under its LANGFUSE_ name or else its
+    CC_LANGFUSE_ name; lookup returns "" for a name it does not hold."""
+    return (
+        lookup("LANGFUSE_PUBLIC_KEY") or lookup("CC_LANGFUSE_PUBLIC_KEY"),
+        lookup("LANGFUSE_SECRET_KEY") or lookup("CC_LANGFUSE_SECRET_KEY"),
+    )
+
 def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     """The hook's Langfuse settings, or None when no keys are set.
 
@@ -339,8 +347,7 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
     check_host_allowed(host)
 
-    public_key = _opt("LANGFUSE_PUBLIC_KEY") or _opt("CC_LANGFUSE_PUBLIC_KEY")
-    secret_key = _opt("LANGFUSE_SECRET_KEY") or _opt("CC_LANGFUSE_SECRET_KEY")
+    public_key, secret_key = read_keys(_opt)
     if not public_key or not secret_key:
         return None
 
@@ -528,6 +535,35 @@ def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
     """The setup skill's check: the UserPromptExpansion hook on its command, or the
     skill's own run of this hook with that event."""
     return hook_event_name(payload) == "UserPromptExpansion"
+
+
+# ----------------- Setup check -----------------
+REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
+
+class SettingsFileError(Exception):
+    """A repo's REPO_SETTINGS_FILE exists but cannot be read as Claude Code settings."""
+
+def settings_file_holds_keys(path: Path) -> bool:
+    """True when the settings file at path has both keys, not empty, in its env
+    block; False when the file does not exist. Raises SettingsFileError."""
+    if not path.exists():
+        return False
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise SettingsFileError(f"cannot read {path} as JSON: {e}") from e
+    env = settings.get("env", {}) if isinstance(settings, dict) else None
+    if not isinstance(env, dict):
+        raise SettingsFileError(f'{path} has no JSON object as its "env"')
+    public_key, secret_key = read_keys(lambda name: env.get(name) or "")
+    return bool(public_key and secret_key)
+
+def repo_settings_hold_keys(cwd: Optional[str]) -> bool:
+    """True when the REPO_SETTINGS_FILE of the checkout that holds cwd (None: the
+    process's working directory), or else of its repo's main checkout, holds both
+    keys. Keys set anywhere else do not count. Raises SettingsFileError."""
+    roots = [find_repo_root(cwd), find_main_checkout(cwd)]
+    return any(settings_file_holds_keys(root / REPO_SETTINGS_FILE) for root in roots if root is not None)
 
 
 # ----------------- No-keys message -----------------
@@ -3352,10 +3388,10 @@ def main() -> int:
 
     # The setup skill reads "no output" as "the hook cannot run", so this always answers.
     if is_setup_check:
-        if config is None:
-            print(json.dumps({}))
-        else:
+        if repo_settings_hold_keys(payload.get("cwd")):
             print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
+        else:
+            print(json.dumps({}))
         return 0
 
     # SessionStart exists only to say, once, that this session goes untraced.
