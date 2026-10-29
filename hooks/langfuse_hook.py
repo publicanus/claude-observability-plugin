@@ -800,11 +800,15 @@ def get_content_from_row(row: Dict[str, Any]) -> Any:
     return row.get("content")
 
 def get_user_or_assistant_role_from_row(row: Dict[str, Any]) -> Optional[str]:
-    # Claude Code transcript row format is internal. Prefer top-level row.type
-    # when it marks a chat row, then fall back to nested message.role.
+    # Claude Code transcript row format is internal. Prefer top-level row.type,
+    # and fall back to nested message.role only for a row without one: a row of
+    # another type, such as an api-request-blob copy of a request, carries a
+    # message role but is no chat row.
     row_type = row.get("type")
     if row_type in ("user", "assistant"):
         return row_type
+    if row_type is not None:
+        return None
 
     message = row.get("message")
     if isinstance(message, dict):

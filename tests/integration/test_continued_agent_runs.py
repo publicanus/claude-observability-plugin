@@ -541,3 +541,37 @@ def test_a_skill_used_in_a_later_round_counts_only_for_the_turn_that_started_tha
     assert "subagent-skill:pymate:tidy" in send_root.propagated["tags"]
     assert "pymate" not in [plugin["name"] for plugin in launch_root.kwargs["metadata"]["plugins"]]
     assert "pymate" in [plugin["name"] for plugin in send_root.kwargs["metadata"]["plugins"]]
+
+
+def api_request_blob(content: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A copy of a request's messages that Claude Code writes beside the turn."""
+    return {"type": "api-request-blob", "hash": "blob", "sessionId": SESSION_ID,
+            "message": {"role": "assistant", "content": content}}
+
+
+def test_a_request_copy_in_the_transcript_adds_no_tool_call_and_no_run(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1(), *round_2())
+    launch = launch_turn()
+    send = send_turn(2, SEND_2, 100)
+    continued_agent.add_main(
+        *launch[:3],
+        api_request_blob(launch[1]["message"]["content"]),
+        *launch[3:],
+        notification("main-note-1", LAUNCH, "Round 1 done.", 30),
+        *send[:3],
+        api_request_blob(send[1]["message"]["content"]),
+        *send[3:],
+        notification("main-note-2", SEND_2, "Round 2 done.", 130),
+    )
+
+    run_hook(hook_module, fake_langfuse, continued_agent)
+
+    names = [observation.name for observation in fake_langfuse.observations]
+    assert names.count("Tool: Agent") == 1
+    assert names.count("Tool: SendMessage") == 1
+    assert [run_summary(trace) for trace in traces(fake_langfuse)] == [
+        [(f"Subagent: {DESCRIPTION}", 1, ["Round 1, first.", "Round 1, report."])],
+        [(f"Subagent: {DESCRIPTION} - round 2", 2, ["Round 2, report."])],
+    ]
