@@ -39,10 +39,24 @@ except Exception:
     sys.exit(0)
 
 
+# Importable as a sibling of this file regardless of how it was invoked
+# (uv run --script puts the script's own directory on sys.path[0] already,
+# but the test harness loads this file via importlib without doing so).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from state_files import (  # noqa: E402
+    HURT_PENDING_FILE,
+    HURT_PENDING_LOCK_FILE,
+    STATE_DIR,
+    STATE_FILE,
+    FileLock,
+    get_session_state_key,
+    read_state,
+    retry_until,
+)
+
+
 # ----------------- Paths -----------------
-STATE_DIR = Path.home() / ".claude" / "state"
 LOG_FILE = STATE_DIR / "langfuse_hook.log"
-STATE_FILE = STATE_DIR / "langfuse_state.json"
 LOCK_FILE = STATE_DIR / "langfuse_state.lock"
 
 # Claude Code's own account file; its oauthAccount.emailAddress is the login email.
@@ -50,11 +64,6 @@ CLAUDE_JSON_FILE = Path.home() / ".claude.json"
 
 # Claude Code's record of each plugin's installs on this machine, with their scope and version.
 INSTALLED_PLUGINS_FILE = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-
-# mate-hurt's local queue of /hurt annotations pending attachment — see
-# hurt_annotations.py for the consumer side of this contract.
-HURT_PENDING_FILE = STATE_DIR / "hurt_pending.json"
-HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
 
 # Trace data that waits until Langfuse has accepted it, and the lock the one
 # background sender holds while it sends.
@@ -70,10 +79,6 @@ WORK_ITEM_FLAG = "--work-item"
 # Session entries in the state file, and work item markers, are dropped at this age.
 STATE_MAX_AGE = timedelta(days=30)
 
-# Importable as a sibling of this file regardless of how it was invoked
-# (uv run --script puts the script's own directory on sys.path[0] already,
-# but the test harness loads this file via importlib without doing so).
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
@@ -121,13 +126,13 @@ class LangfuseConfig:
     work_item_branch_pattern: Optional[re.Pattern] = None
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
-SETUP_COMMAND = "/langfuse-observability:langfuse-setup"
+SETUP_COMMAND = "/mate-record:langfuse-setup"
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 
 # The manual steps shown at SessionStart without keys: one text per system. A repo's
 # own text, at the root of its git checkout, wins over the plugin's for that system.
 NO_KEYS_STEPS_DIR = Path(__file__).resolve().parent / "no_keys_steps"
-REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "langfuse-observability" / "no-keys-steps"
+REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "mate-record" / "no-keys-steps"
 NO_KEYS_STEPS_NAMES = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
 EU_CLOUD_HOST = "https://cloud.langfuse.com"
@@ -589,92 +594,12 @@ def format_no_keys_message(cwd: Optional[str]) -> str:
     return "\n".join(lines)
 
 
-# ----------------- State file concurrency control -----------------
-def _retry_until(attempt: Callable[[], bool], timeout_s: float) -> bool:
-    """Calls attempt() until it returns True, every 0.05 s; False once timeout_s has passed."""
-    deadline = time.time() + timeout_s
-    while not attempt():
-        if time.time() > deadline:
-            return False
-        time.sleep(0.05)
-    return True
-
-
-if sys.platform == "win32":
-    import msvcrt
-
-    # Every process locks and unlocks the same first byte, whatever the file's length:
-    # msvcrt.locking works from the current position, and "a+" opens at the end.
-    def _try_lock(fh) -> bool:
-        fh.seek(0)
-        try:
-            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        except PermissionError:
-            return False
-        return True
-
-    def _unlock(fh) -> None:
-        fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-
-else:
-    import fcntl
-
-    def _try_lock(fh) -> bool:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        return True
-
-    def _unlock(fh) -> None:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-
-
-class FileLock:
-    def __init__(self, path: Path, timeout_s: float = 2.0):
-        self.path = path
-        self.timeout_s = timeout_s
-        self._fh = None
-
-    def __enter__(self):
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+", encoding="utf-8")
-        try:
-            if not _retry_until(lambda: _try_lock(self._fh), self.timeout_s):
-                raise TimeoutError(
-                    f"could not acquire {self.path} within {self.timeout_s}s"
-                )
-        except BaseException:
-            # __exit__ is not called when __enter__ raises — close the fh
-            # we just opened so it doesn't leak.
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-            raise
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            _unlock(self._fh)
-        finally:
-            self._fh.close()
-
-
 # ----------------- State file reading and writing -----------------
 def load_hook_state() -> Dict[str, Any]:
     try:
-        if not STATE_FILE.exists():
-            return {}
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return read_state(STATE_FILE)
     except Exception:
         return {}
-
-def get_session_state_key(session_id: str, transcript_path: str) -> str:
-    # stable key even if session_id collides
-    raw = f"{session_id}::{transcript_path}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 @dataclass
 class SessionState:
@@ -781,7 +706,7 @@ def save_hook_state(state: Dict[str, Any]) -> None:
                 return False
             return True
 
-        if not _retry_until(write_and_replace, STATE_SAVE_TIMEOUT_S):
+        if not retry_until(write_and_replace, STATE_SAVE_TIMEOUT_S):
             info(
                 f"could not save {STATE_FILE}: it stayed in use for {STATE_SAVE_TIMEOUT_S}s; "
                 "this run's turns will be sent again on the next run"

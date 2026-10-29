@@ -150,7 +150,8 @@ def test_the_gate_matches_only_the_setup_skill():
     matcher = re.compile(entry["matcher"])
 
     assert matcher.search("langfuse-setup")
-    assert matcher.search("langfuse-observability:langfuse-setup")
+    assert matcher.search("mate-record:langfuse-setup")
+    assert not matcher.search("langfuse-observability:langfuse-setup")
     assert not matcher.search("setup")
     assert not matcher.search("other-plugin:langfuse-setup")
 
