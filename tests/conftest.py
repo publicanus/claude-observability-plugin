@@ -145,6 +145,76 @@ def hook_module() -> Any:
     return load_hook_module()
 
 
+# The names the keys and the Langfuse address go by, in a settings file or elsewhere.
+LANGFUSE_CONFIG_VARS = [
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_BASE_URL",
+    "CC_LANGFUSE_PUBLIC_KEY",
+    "CC_LANGFUSE_SECRET_KEY",
+    "CC_LANGFUSE_BASE_URL",
+]
+
+
+@pytest.fixture
+def no_langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removes every LANGFUSE_CONFIG_VARS name, plain and as CLAUDE_PLUGIN_OPTION_<name>,
+    from the environment."""
+    for name in LANGFUSE_CONFIG_VARS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
+
+
+@pytest.fixture
+def nothing_may_be_sent(hook_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every path in main() that talks to Langfuse fails the test when reached."""
+    monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: pytest.fail("trace client built"))
+    monkeypatch.setattr(hook_module, "LangfuseClient", lambda *a, **k: pytest.fail("delivery probe sent"))
+    monkeypatch.setattr(hook_module, "process_pending_hurts", lambda *a, **k: pytest.fail("/hurt notes sent"))
+
+
+class AcceptingLangfuse:
+    """Answers the delivery probe as a Langfuse that accepts the keys."""
+
+    def get(self, path: str) -> Any:
+        return type("Response", (), {"status": 200, "body": None})()
+
+
+def run_main(hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, payload: dict) -> str:
+    """Runs the hook's main() on payload; asserts it returns 0 and returns what it printed."""
+    monkeypatch.setattr(hook_module, "read_hook_payload", lambda: payload)
+    assert hook_module.main() == 0
+    return capsys.readouterr().out
+
+
+def write_one_turn_transcript(tmp_path: Path) -> Path:
+    """Writes tmp_path/transcript.jsonl with one turn of session "sess"; returns its path."""
+    rows = [
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "sessionId": "sess",
+            "uuid": "user-1",
+            "message": {"role": "user", "content": "A question."},
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "sessionId": "sess",
+            "uuid": "assistant-1",
+            "message": {
+                "id": "msg-1",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "An answer."}],
+            },
+        },
+    ]
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    return transcript
+
+
 @pytest.fixture
 def fixture_transcript_path() -> Any:
     def _path(name: str) -> Path:

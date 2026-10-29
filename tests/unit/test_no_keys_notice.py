@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import pytest
 
-from conftest import write_settings
+from conftest import run_main, write_settings
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,28 +16,6 @@ PLUGIN_STEPS_DIR = REPO_ROOT / "hooks" / "no_keys_steps"
 REPO_STEPS_DIR = Path(".claude") / "mate-record" / "no-keys-steps"
 SETUP_LINE = "To add keys, run /mate-record:langfuse-setup, or by hand:"
 PLATFORMS = {"darwin": "macos", "linux": "linux", "win32": "windows"}
-
-KEY_VARS = [
-    "LANGFUSE_PUBLIC_KEY",
-    "LANGFUSE_SECRET_KEY",
-    "CC_LANGFUSE_PUBLIC_KEY",
-    "CC_LANGFUSE_SECRET_KEY",
-    "LANGFUSE_BASE_URL",
-    "CC_LANGFUSE_BASE_URL",
-]
-
-
-@pytest.fixture
-def no_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in KEY_VARS:
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
-
-
-def run_main(hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, payload: dict) -> str:
-    monkeypatch.setattr(hook_module, "read_hook_payload", lambda: payload)
-    assert hook_module.main() == 0
-    return capsys.readouterr().out
 
 
 def session_start_message(
@@ -67,7 +45,7 @@ def write_repo_steps(repo: Path, os_name: str, data: bytes) -> Path:
 
 @pytest.mark.parametrize("platform", sorted(PLATFORMS))
 def test_session_start_without_keys_shows_the_steps_for_this_system(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path, platform
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path, platform
 ):
     message = session_start_message(hook_module, monkeypatch, capsys, platform, tmp_path)
 
@@ -79,7 +57,7 @@ def test_the_windows_steps_differ_from_the_others():
 
 
 def test_another_system_gets_the_warning_and_the_skill_name_only(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path
 ):
     message = session_start_message(hook_module, monkeypatch, capsys, "freebsd14", tmp_path)
 
@@ -87,7 +65,7 @@ def test_another_system_gets_the_warning_and_the_skill_name_only(
 
 
 def test_a_repo_text_wins_for_its_own_system_only(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path
 ):
     write_repo_steps(tmp_path, "macos", b"Ask Anna for the team keys.\n")
 
@@ -99,7 +77,7 @@ def test_a_repo_text_wins_for_its_own_system_only(
 
 
 def test_a_session_started_in_a_subfolder_finds_the_repo_text_at_the_repo_root(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path
 ):
     repo = tmp_path / "repo"
     subfolder = repo / "src" / "app"
@@ -113,7 +91,7 @@ def test_a_session_started_in_a_subfolder_finds_the_repo_text_at_the_repo_root(
 
 
 def test_an_input_without_cwd_finds_the_repo_text_in_the_working_directory(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path
 ):
     write_repo_steps(tmp_path, "linux", b"Run make langfuse-keys.\n")
     monkeypatch.chdir(tmp_path)
@@ -124,7 +102,7 @@ def test_an_input_without_cwd_finds_the_repo_text_in_the_working_directory(
 
 
 def test_an_unreadable_repo_text_is_named_in_the_message(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path
 ):
     path = write_repo_steps(tmp_path, "linux", b"\xff\xfe not utf-8")
 
@@ -135,7 +113,7 @@ def test_an_unreadable_repo_text_is_named_in_the_message(
 
 
 def test_empty_placeholder_keys_still_count_as_no_keys(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, tmp_path
 ):
     write_settings(tmp_path, {"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})
 
@@ -154,7 +132,7 @@ def test_the_named_setup_command_is_this_plugins_skill(hook_module):
 
 
 def test_session_start_with_keys_says_nothing(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys
 ):
     write_settings(Path.cwd(), {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
     monkeypatch.setattr(
@@ -166,7 +144,7 @@ def test_session_start_with_keys_says_nothing(
 
 @pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
 def test_later_firings_without_keys_stay_silent(
-    hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, event
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, event
 ):
     # The notice comes once, at SessionStart — not again on every turn.
     assert run_main(hook_module, monkeypatch, capsys, {"hook_event_name": event}) == ""

@@ -602,10 +602,7 @@ def format_no_keys_message(cwd: Optional[str]) -> str:
     return "\n".join(lines)
 
 def format_broken_settings_message(error: SettingsFileError) -> str:
-    return (
-        f"Langfuse: {error}. This session is not traced until the file is fixed; "
-        "the hook reads it again at the end of each turn."
-    )
+    return f"Langfuse: {error}. This session is not traced until the file is fixed. {SETTINGS_REREAD}"
 
 
 # ----------------- State file reading and writing -----------------

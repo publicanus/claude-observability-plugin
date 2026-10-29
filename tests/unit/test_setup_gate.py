@@ -19,28 +19,8 @@ from conftest import write_settings
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 LAUNCHER_COMMAND = 'sh "${CLAUDE_PLUGIN_ROOT}"/hooks/run_hook.sh "${CLAUDE_PLUGIN_ROOT}"/hooks/langfuse_hook.py'
-CONFIG_VARS = [
-    "LANGFUSE_PUBLIC_KEY",
-    "LANGFUSE_SECRET_KEY",
-    "LANGFUSE_BASE_URL",
-    "CC_LANGFUSE_PUBLIC_KEY",
-    "CC_LANGFUSE_SECRET_KEY",
-    "CC_LANGFUSE_BASE_URL",
-]
 
-
-@pytest.fixture(autouse=True)
-def clean_env(isolated_hook_state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in CONFIG_VARS:
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
-
-
-@pytest.fixture(autouse=True)
-def nothing_may_be_sent(hook_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: pytest.fail("trace client built"))
-    monkeypatch.setattr(hook_module, "process_pending_hurts", lambda *a, **k: pytest.fail("/hurt notes sent"))
-
+pytestmark = pytest.mark.usefixtures("isolated_hook_state", "no_langfuse_env", "nothing_may_be_sent")
 
 ALREADY_CONFIGURED = {"decision": "block", "reason": "Langfuse: tracing is already configured for this repo."}
 BOTH_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-test", "LANGFUSE_SECRET_KEY": "sk-lf-test"}
