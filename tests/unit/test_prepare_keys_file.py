@@ -162,17 +162,17 @@ def test_from_a_worktree_the_main_checkouts_file_is_prepared(prepare, capsys, re
     assert (worktree / ".worktreeinclude").is_file()
 
 
-def test_on_windows_the_file_goes_in_the_project_folder(prepare, capsys, repo, monkeypatch):
+def test_on_windows_from_a_worktree_the_main_checkouts_file_is_prepared(prepare, capsys, repo, tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
-    project_dir = repo / "sub"
-    project_dir.mkdir()
+    worktree = (tmp_path / "wt").resolve()
+    git(repo, "worktree", "add", "-q", str(worktree))
 
-    code, out, _ = run(prepare, capsys, project_dir)
+    code, out, _ = run(prepare, capsys, worktree)
 
     assert code == 0
-    assert out["settings"] == str(project_dir / SETTINGS)
-    assert read_settings(project_dir / SETTINGS) == {"env": PLACEHOLDERS}
-    assert "sub/.claude/" not in git(repo, "status", "--porcelain", "--untracked-files=all")
+    assert out["settings"] == str(repo / SETTINGS)
+    assert read_settings(repo / SETTINGS) == {"env": PLACEHOLDERS}
+    assert not (worktree / SETTINGS).exists()
 
 
 def test_outside_a_git_repository_nothing_is_written(prepare, capsys, tmp_path):
