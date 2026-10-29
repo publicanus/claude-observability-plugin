@@ -6,6 +6,7 @@ import importlib.util
 import json
 import logging
 import random
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -137,6 +138,34 @@ def write_settings(checkout: Path, env: dict) -> Path:
     path = checkout / ".claude" / "settings.local.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"env": env}), encoding="utf-8")
+    return path
+
+
+def git(cwd: Path, *args: str) -> None:
+    """Runs git with args in cwd, as a test user; raises when git fails."""
+    subprocess.run(
+        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A git repo with one commit, at tmp_path/shop."""
+    path = (tmp_path / "shop").resolve()
+    path.mkdir()
+    git(path, "init", "-q")
+    git(path, "commit", "-q", "--allow-empty", "-m", "first")
+    return path
+
+
+@pytest.fixture
+def worktree(repo: Path, tmp_path: Path) -> Path:
+    """A worktree of repo, at tmp_path/shop-feature."""
+    path = (tmp_path / "shop-feature").resolve()
+    git(repo, "worktree", "add", "-q", str(path))
     return path
 
 

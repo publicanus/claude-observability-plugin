@@ -12,13 +12,12 @@ folder (see isolated_hook_state); the git checkouts they use are real, in a temp
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
 
-from conftest import write_settings
+from conftest import git, write_settings
 
 
 # ----------------- installed_plugins.json -----------------
@@ -109,15 +108,6 @@ def test_an_unreadable_plugins_file_fails_naming_the_file(hook_module, isolated_
 
     with pytest.raises(hook_module.PluginsFileError, match="installed_plugins.json"):
         hook_module.read_plugin_versions(tmp_path / "shop")
-
-
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
 
 
 def test_a_session_in_a_worktree_uses_the_installs_of_the_main_checkout(

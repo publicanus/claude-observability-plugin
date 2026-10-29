@@ -8,21 +8,11 @@ temp one, never the machine's.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from conftest import write_settings
-
-
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
+from conftest import git, write_settings
 
 
 def make_repo(path: Path, remotes: dict[str, str]) -> Path:

@@ -6,7 +6,6 @@ else the main checkout's. Keys and addresses set anywhere else are not used.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any, List
 
@@ -27,31 +26,6 @@ NOT_USED_LINE = (
 )
 
 pytestmark = pytest.mark.usefixtures("isolated_hook_state", "no_langfuse_env")
-
-
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    path = (tmp_path / "shop").resolve()
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "commit", "-q", "--allow-empty", "-m", "first")
-    return path
-
-
-@pytest.fixture
-def worktree(repo: Path, tmp_path: Path) -> Path:
-    path = (tmp_path / "shop-feature").resolve()
-    git(repo, "worktree", "add", "-q", str(path))
-    return path
 
 
 def set_outside(monkeypatch: pytest.MonkeyPatch, prefix: str, **values: str) -> None:

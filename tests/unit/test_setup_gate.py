@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -27,32 +26,19 @@ BOTH_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-test", "LANGFUSE_SECRET_KEY": "sk-lf-
 EMPTY_KEYS = {"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""}
 
 
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
+@pytest.fixture
+def repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The shared repo, as the working directory: the setup check runs as the skill
+    runs it, with no cwd in the input."""
+    monkeypatch.chdir(repo)
+    return repo
 
 
 @pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A git repo the setup check runs in, as the skill runs it: no cwd in the input."""
-    path = (tmp_path / "shop").resolve()
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "commit", "-q", "--allow-empty", "-m", "first")
-    monkeypatch.chdir(path)
-    return path
-
-
-@pytest.fixture
-def worktree(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = (tmp_path / "shop-feature").resolve()
-    git(repo, "worktree", "add", "-q", str(path))
-    monkeypatch.chdir(path)
-    return path
+def worktree(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The shared worktree, as the working directory."""
+    monkeypatch.chdir(worktree)
+    return worktree
 
 
 def run_setup_check(hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> Any:
