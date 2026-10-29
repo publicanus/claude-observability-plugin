@@ -9,23 +9,6 @@
   "license": "MIT",
   "homepage": "https://langfuse.com/integrations/other/claude-code",
   "userConfig": {
-    "LANGFUSE_SECRET_KEY": {
-      "type": "string",
-      "title": "Langfuse Secret Key",
-      "description": "Your Langfuse project secret key (sk-lf-...)",
-      "sensitive": true
-    },
-    "LANGFUSE_PUBLIC_KEY": {
-      "type": "string",
-      "title": "Langfuse Public Key",
-      "description": "Your Langfuse project public key (pk-lf-...)"
-    },
-    "LANGFUSE_BASE_URL": {
-      "type": "string",
-      "title": "Langfuse Base URL",
-      "description": "Langfuse host: https://cloud.langfuse.com (Langfuse Cloud EU, the default) or your self-hosted URL. Langfuse Cloud's US, HIPAA and Japan regions are refused: nothing is sent there.",
-      "default": "https://cloud.langfuse.com"
-    },
     "LANGFUSE_USER_ID": {
       "type": "string",
       "title": "User ID",

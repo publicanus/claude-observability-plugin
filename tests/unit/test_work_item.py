@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 import work_item
+from conftest import write_settings
 
 SESSION = "session-46"
 PATTERN = r"^feat/(\d+)-"
@@ -89,9 +90,6 @@ def name_item(hook_module: Any, argv: List[str], when: datetime) -> None:
 
 
 def configure(hook_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pattern: Optional[str]) -> Any:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://example.test")
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN", raising=False)
     if pattern is None:
         monkeypatch.delenv("CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN", raising=False)
@@ -99,6 +97,9 @@ def configure(hook_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         monkeypatch.setenv("CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN", pattern)
     cwd = tmp_path / "shop"
     cwd.mkdir(exist_ok=True)
+    write_settings(
+        cwd, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret", "LANGFUSE_BASE_URL": "https://example.test"}
+    )
     return hook_module.get_langfuse_config(str(cwd))
 
 
@@ -277,7 +278,12 @@ def test_a_hook_run_deletes_markers_older_than_the_state_bound(
     monkeypatch.setattr(
         hook_module,
         "read_hook_payload",
-        lambda: {"hook_event_name": "Stop", "session_id": SESSION, "transcript_path": str(transcript)},
+        lambda: {
+            "hook_event_name": "Stop",
+            "session_id": SESSION,
+            "transcript_path": str(transcript),
+            "cwd": str(tmp_path / "shop"),
+        },
     )
     monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: fake_langfuse)
 

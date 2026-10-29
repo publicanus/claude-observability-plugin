@@ -132,6 +132,14 @@ def load_hook_module() -> Any:
     return module
 
 
+def write_settings(checkout: Path, env: dict) -> Path:
+    """Writes {"env": env} as checkout's .claude/settings.local.json; returns its path."""
+    path = checkout / ".claude" / "settings.local.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": env}), encoding="utf-8")
+    return path
+
+
 @pytest.fixture(scope="session")
 def hook_module() -> Any:
     return load_hook_module()

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import pytest
+from conftest import write_settings
 from waiting_turns import send_waiting_turns
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
@@ -166,7 +167,7 @@ class Machine:
     def waiting_files(self) -> List[Path]:
         return sorted(self.waiting_dir.glob("*.json")) if self.waiting_dir.is_dir() else []
 
-    def env(self, port: Optional[int], keys: Optional[tuple[str, str]] = KEYS_A) -> Dict[str, str]:
+    def env(self) -> Dict[str, str]:
         env = {
             name: value
             for name, value in os.environ.items()
@@ -178,12 +179,6 @@ class Machine:
             GIT_CONFIG_GLOBAL=str(self.home / ".gitconfig"),
             GIT_CONFIG_NOSYSTEM="1",
         )
-        if keys is not None:
-            env.update(
-                LANGFUSE_PUBLIC_KEY=keys[0],
-                LANGFUSE_SECRET_KEY=keys[1],
-                LANGFUSE_BASE_URL=f"http://127.0.0.1:{port}",
-            )
         return env
 
     def run_hook(
@@ -194,8 +189,18 @@ class Machine:
         port: Optional[int],
         keys: Optional[tuple[str, str]] = KEYS_A,
     ) -> tuple[subprocess.CompletedProcess, float]:
-        repo = self.tmp_path / "repo"
+        # A run without keys is a session in another repo, one without a settings file.
+        repo = self.tmp_path / ("repo" if keys is not None else "repo-without-keys")
         repo.mkdir(exist_ok=True)
+        if keys is not None:
+            write_settings(
+                repo,
+                {
+                    "LANGFUSE_PUBLIC_KEY": keys[0],
+                    "LANGFUSE_SECRET_KEY": keys[1],
+                    "LANGFUSE_BASE_URL": f"http://127.0.0.1:{port}",
+                },
+            )
         payload = {
             "hook_event_name": event,
             "session_id": session_id,
@@ -206,7 +211,7 @@ class Machine:
         result = subprocess.run(
             [sys.executable, str(HOOK)],
             input=json.dumps(payload),
-            env=self.env(port, keys),
+            env=self.env(),
             cwd=repo,
             capture_output=True,
             text=True,

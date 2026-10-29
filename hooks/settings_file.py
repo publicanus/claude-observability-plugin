@@ -9,11 +9,14 @@ load_settings(path) returns the file's settings object.
 
 read_keys(lookup) returns the Langfuse public and secret key from a set of
 settings, such as an "env" block or the process environment.
+
+read_env_keys(env) is read_keys for an "env" block, and env_holds_keys(env) is
+True when that block holds both keys, not empty.
 """
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Mapping, Tuple
 
 
 class SettingsFileError(Exception):
@@ -41,3 +44,11 @@ def read_keys(lookup: Callable[[str], str]) -> Tuple[str, str]:
         lookup("LANGFUSE_PUBLIC_KEY") or lookup("CC_LANGFUSE_PUBLIC_KEY"),
         lookup("LANGFUSE_SECRET_KEY") or lookup("CC_LANGFUSE_SECRET_KEY"),
     )
+
+
+def read_env_keys(env: Mapping[str, Any]) -> Tuple[str, str]:
+    return read_keys(lambda name: env.get(name) or "")
+
+
+def env_holds_keys(env: Mapping[str, Any]) -> bool:
+    return all(read_env_keys(env))

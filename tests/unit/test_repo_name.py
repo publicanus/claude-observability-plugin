@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_settings
+
 
 def git(cwd: Path, *args: str) -> None:
     subprocess.run(
@@ -86,12 +88,11 @@ def test_all_worktrees_of_a_repo_without_remote_share_the_main_folder_name(
 def test_every_observation_carries_the_repo_and_never_the_address(
     hook_module, isolated_hook_state, fake_langfuse, fixture_transcript_path, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
     token = "ghp_0123456789abcdefSECRET"
     repo = make_repo(
         tmp_path / "checkout", {"origin": f"https://jaap:{token}@github.com/acme/shop.git"}
     )
+    write_settings(repo, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
     config = hook_module.get_langfuse_config(str(repo))
 
     emitted = hook_module.emit_new_turns_from_transcript(

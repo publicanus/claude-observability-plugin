@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 
+from conftest import write_settings
+
 
 EU = "https://cloud.langfuse.com"
 CONFIG_VARS = [
@@ -29,10 +31,18 @@ def clean_env(isolated_hook_state: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
 
 
+KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-test", "LANGFUSE_SECRET_KEY": "sk-lf-test"}
+
+
+def write_own_settings(**env: str) -> None:
+    """Writes env as the settings file of the session's repo: the working
+    directory, which isolated_hook_state sets."""
+    write_settings(Path.cwd(), env)
+
+
 @pytest.fixture
-def keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+def keys() -> None:
+    write_own_settings(**KEYS)
 
 
 @pytest.fixture
@@ -91,7 +101,6 @@ REFUSED = [
     ("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com", "US"),
     ("LANGFUSE_BASE_URL", "https://hipaa.cloud.langfuse.com", "HIPAA"),
     ("LANGFUSE_BASE_URL", "https://jp.cloud.langfuse.com", "Japan"),
-    ("CLAUDE_PLUGIN_OPTION_LANGFUSE_BASE_URL", "https://jp.cloud.langfuse.com", "Japan"),
     ("CC_LANGFUSE_BASE_URL", "https://hipaa.cloud.langfuse.com", "HIPAA"),
     ("LANGFUSE_BASE_URL", "https://US.Cloud.Langfuse.COM", "US"),
     ("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com/", "US"),
@@ -101,9 +110,9 @@ REFUSED = [
 
 @pytest.mark.parametrize("variable, address, region", REFUSED)
 def test_a_refused_address_sends_nothing_and_says_why_at_session_start(
-    hook_module, keys, nothing_may_be_sent, monkeypatch, capsys, variable, address, region
+    hook_module, nothing_may_be_sent, monkeypatch, capsys, variable, address, region
 ):
-    monkeypatch.setenv(variable, address)
+    write_own_settings(**KEYS, **{variable: address})
 
     out = run_main(hook_module, monkeypatch, capsys, {"hook_event_name": "SessionStart"})
 
@@ -112,14 +121,15 @@ def test_a_refused_address_sends_nothing_and_says_why_at_session_start(
     assert region in message
     assert EU in message
     assert "EU project" in message
-    assert "restart Claude Code" in message
+    assert ".claude/settings.local.json" in message
+    assert message.endswith("The hook reads that file again at the end of each turn.")
 
 
 @pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
 def test_a_refused_address_sends_no_traces_and_no_hurt_notes_on_later_firings(
-    hook_module, keys, nothing_may_be_sent, monkeypatch, capsys, tmp_path, event
+    hook_module, nothing_may_be_sent, monkeypatch, capsys, tmp_path, event
 ):
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com")
+    write_own_settings(**KEYS, LANGFUSE_BASE_URL="https://us.cloud.langfuse.com")
     payload = {
         "hook_event_name": event,
         "sessionId": "sess",
@@ -132,7 +142,7 @@ def test_a_refused_address_sends_no_traces_and_no_hurt_notes_on_later_firings(
 def test_a_refused_address_without_keys_shows_the_refusal_not_the_no_keys_message(
     hook_module, nothing_may_be_sent, monkeypatch, capsys
 ):
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com")
+    write_own_settings(LANGFUSE_BASE_URL="https://us.cloud.langfuse.com")
 
     out = run_main(hook_module, monkeypatch, capsys, {"hook_event_name": "SessionStart"})
 
@@ -143,10 +153,10 @@ def test_a_refused_address_without_keys_shows_the_refusal_not_the_no_keys_messag
 
 
 def test_a_self_hosted_address_that_looks_like_a_cloud_host_still_gets_traces(
-    hook_module, keys, fake_langfuse, monkeypatch, capsys, tmp_path
+    hook_module, fake_langfuse, monkeypatch, capsys, tmp_path
 ):
     address = "https://us.cloud.langfuse.com.example.com"
-    monkeypatch.setenv("LANGFUSE_BASE_URL", address)
+    write_own_settings(**KEYS, LANGFUSE_BASE_URL=address)
     built_for = []
 
     def client(config):

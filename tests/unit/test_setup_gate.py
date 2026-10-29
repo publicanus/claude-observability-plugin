@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from conftest import write_settings
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
@@ -73,12 +75,6 @@ def worktree(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     return path
 
 
-def write_settings(checkout: Path, env: dict) -> None:
-    path = checkout / ".claude" / "settings.local.json"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({"env": env}), encoding="utf-8")
-
-
 def run_setup_check(hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> Any:
     monkeypatch.setattr(hook_module, "read_hook_payload", lambda: {"hook_event_name": "UserPromptExpansion"})
     assert hook_module.main() == 0
@@ -132,8 +128,8 @@ def test_an_unreadable_settings_file_fails_naming_the_file(hook_module, monkeypa
         hook_module.main()
 
 
-def test_refused_address_blocks_with_the_refusal(hook_module, monkeypatch, capsys):
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com")
+def test_refused_address_blocks_with_the_refusal(hook_module, monkeypatch, capsys, repo):
+    write_settings(repo, {"LANGFUSE_BASE_URL": "https://us.cloud.langfuse.com"})
 
     answer = run_setup_check(hook_module, monkeypatch, capsys)
 

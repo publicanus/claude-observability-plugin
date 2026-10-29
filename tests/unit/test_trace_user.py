@@ -16,15 +16,15 @@ from typing import Any, Optional
 
 import pytest
 
+from conftest import write_settings
+
 
 USER_ID_VARS = ["LANGFUSE_USER_ID", "CC_LANGFUSE_USER_ID"]
 
 
 @pytest.fixture
 def traced(hook_module: Any, isolated_hook_state: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keys set, no explicit user, an absent temp ~/.claude.json and an empty git config."""
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    """No explicit user, an absent temp ~/.claude.json and an empty git config."""
     for name in USER_ID_VARS:
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
@@ -36,8 +36,10 @@ def write_login(claude_json: Path, email: Optional[str]) -> None:
 
 
 def make_repo(path: Path, email: Optional[str]) -> Path:
+    """A git repo at path whose own settings file holds both keys."""
     path.mkdir()
     subprocess.run(["git", "init", "-q", str(path)], check=True)
+    write_settings(path, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
     if email is not None:
         subprocess.run(["git", "-C", str(path), "config", "user.email", email], check=True)
     return path
@@ -80,12 +82,8 @@ def test_git_email_of_the_session_dir_is_the_user_without_a_login_email(
     assert hook_module.get_langfuse_config(str(repo)).user_id == "git@example.com"
 
 
-@pytest.mark.parametrize("cwd_kind", ["repo-without-email", "missing-dir"])
-def test_no_user_when_neither_login_nor_git_email(hook_module, traced, tmp_path, cwd_kind):
-    if cwd_kind == "repo-without-email":
-        cwd = make_repo(tmp_path / "repo", None)
-    else:
-        cwd = tmp_path / "gone"
+def test_no_user_when_neither_login_nor_git_email(hook_module, traced, tmp_path):
+    cwd = make_repo(tmp_path / "repo", None)
 
     config = hook_module.get_langfuse_config(str(cwd))
 

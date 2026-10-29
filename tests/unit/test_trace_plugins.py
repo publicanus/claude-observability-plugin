@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from conftest import write_settings
+
 
 # ----------------- installed_plugins.json -----------------
 
@@ -121,12 +123,11 @@ def git(cwd: Path, *args: str) -> None:
 def test_a_session_in_a_worktree_uses_the_installs_of_the_main_checkout(
     hook_module, isolated_hook_state, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
     main = tmp_path / "shop"
     main.mkdir()
     git(main, "init", "-q")
     git(main, "commit", "-q", "--allow-empty", "-m", "first")
+    write_settings(main, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
     worktree = tmp_path / "shop-feature"
     git(main, "worktree", "add", "-q", str(worktree))
     write_installed_plugins(hook_module, {

@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 import pytest
 
+from conftest import write_settings
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_STEPS_DIR = REPO_ROOT / "hooks" / "no_keys_steps"
@@ -135,8 +137,7 @@ def test_an_unreadable_repo_text_is_named_in_the_message(
 def test_empty_placeholder_keys_still_count_as_no_keys(
     hook_module, isolated_hook_state, no_keys, monkeypatch, capsys, tmp_path
 ):
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
+    write_settings(tmp_path, {"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})
 
     message = session_start_message(hook_module, monkeypatch, capsys, "linux", tmp_path)
 
@@ -155,8 +156,7 @@ def test_the_named_setup_command_is_this_plugins_skill(hook_module):
 def test_session_start_with_keys_says_nothing(
     hook_module, isolated_hook_state, no_keys, monkeypatch, capsys
 ):
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    write_settings(Path.cwd(), {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
     monkeypatch.setattr(
         hook_module, "create_langfuse_client", lambda config: pytest.fail("SessionStart must not trace")
     )
