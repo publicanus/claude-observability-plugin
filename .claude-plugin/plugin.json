@@ -59,6 +59,11 @@
       "type": "string",
       "title": "Trace ID seed",
       "description": "Optional. Derive deterministic trace ids as Langfuse.create_trace_id(seed=f\"{seed}:{turn_number}\") so external systems can precompute them. Use a unique seed per session (e.g. the --session-id UUID). Leave empty for auto-generated ids."
+    },
+    "CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN": {
+      "type": "string",
+      "title": "Work item branch pattern",
+      "description": "Optional. A regular expression for the git branch; its first group is the work item a trace is tagged with (work-item:<id>) when no tool named one. Example: ^feat/(\\d+)- gives 37 for feat/37-plugins-on-trace. Leave empty for no work item from the branch."
     }
   }
 }

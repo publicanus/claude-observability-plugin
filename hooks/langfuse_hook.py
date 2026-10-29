@@ -63,6 +63,13 @@ WAITING_LOCK_FILE = STATE_DIR / "langfuse_waiting.lock"
 WAITING_LOCK_TIMEOUT_S = 60.0
 SEND_WAITING_FLAG = "--send-waiting"
 
+# The marker file of each session's named work item; see work_item.py.
+WORK_ITEMS_DIR = STATE_DIR / "langfuse_work_items"
+WORK_ITEM_FLAG = "--work-item"
+
+# Session entries in the state file, and work item markers, are dropped at this age.
+STATE_MAX_AGE = timedelta(days=30)
+
 # Importable as a sibling of this file regardless of how it was invoked
 # (uv run --script puts the script's own directory on sys.path[0] already,
 # but the test harness loads this file via importlib without doing so).
@@ -71,6 +78,7 @@ from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
+import work_item  # noqa: E402
 
 
 # ----------------- Configuration -----------------
@@ -108,6 +116,8 @@ class LangfuseConfig:
     user_warning: Optional[str] = None
     # read_plugin_versions for the session's repo; every trace lists the plugins it used with these.
     plugin_versions: Dict[str, Optional[str]] = field(default_factory=dict)
+    # CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN; None when unset or refused.
+    work_item_branch_pattern: Optional[re.Pattern] = None
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
 SETUP_COMMAND = "/langfuse-observability:langfuse-setup"
@@ -322,7 +332,9 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
     When a source exists but cannot be read, the user is None and user_warning says why.
     The repo name is read_repo_name(cwd), and fails as that does. The plugin versions
     are read_plugin_versions() for the repo's main checkout, or for cwd outside git,
-    and fail as that does.
+    and fail as that does. The work item branch pattern is
+    CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN (env var or plugin userConfig); a refused
+    pattern is logged and left unset.
     """
     host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
     check_host_allowed(host)
@@ -355,7 +367,18 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         trace_seed=trace_seed,
         user_warning=user_warning,
         plugin_versions=read_plugin_versions(find_main_checkout(cwd) or session_dir(cwd)),
+        work_item_branch_pattern=read_work_item_branch_pattern(),
     )
+
+def read_work_item_branch_pattern() -> Optional[re.Pattern]:
+    text = _opt("CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN")
+    if not text:
+        return None
+    try:
+        return work_item.compile_branch_pattern(text)
+    except ValueError as e:
+        info(f"work item branch pattern refused: {text}: {e}")
+        return None
 
 class WaitingTurnExporter(SpanExporter):
     """Stores each batch of spans in WAITING_DIR for the background sender; sends nothing."""
@@ -704,8 +727,8 @@ STATE_SAVE_TIMEOUT_S = 0.5
 
 def save_hook_state(state: Dict[str, Any]) -> None:
     try:
-        # Drop session entries older than 30 days to keep the file bounded.
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        # Drop old session entries to keep the file bounded.
+        cutoff = datetime.now(timezone.utc) - STATE_MAX_AGE
         for k in list(state.keys()):
             entry = state.get(k)
             if not isinstance(entry, dict):
@@ -1910,6 +1933,29 @@ REPO_METADATA_KEY = "repo"
 def repo_tag(repo_name: str) -> str:
     return f"repo:{repo_name}"
 
+def read_work_items(session_id: str, branch_pattern: Optional[re.Pattern]) -> work_item.WorkItems:
+    """The session's named work items and the branch pattern its turns take their item from.
+
+    A marker that cannot be read is logged, and then no turn gets an item, not even
+    from the branch.
+    """
+    try:
+        path = work_item.marker_path(WORK_ITEMS_DIR, session_id)
+    except ValueError as e:
+        info(f"no work item for this session's traces: {e}")
+        return work_item.WorkItems([], None)
+    try:
+        return work_item.WorkItems(work_item.read_entries(path), branch_pattern)
+    except work_item.MarkerError as e:
+        info(f"work item marker {path} unreadable, its session's traces carry no work item: {e}")
+        return work_item.WorkItems([], None)
+
+def work_item_tags(turn: Turn, work_items: work_item.WorkItems) -> List[str]:
+    item = work_item.work_item_for(
+        work_items.entries, work_items.branch_pattern, turn.user_msg.get("gitBranch"), get_turn_end_timestamp(turn)
+    )
+    return [f"work-item:{item}"] if item else []
+
 def get_trace_tags(
     turn: Turn,
     subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -2566,7 +2612,9 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
               plugin_versions: Dict[str, Optional[str]],
               user_id: Optional[str] = None,
               subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
-              trace_seed: Optional[str] = None) -> Optional[str]:
+              trace_seed: Optional[str] = None,
+              *,
+              work_items: work_item.WorkItems) -> Optional[str]:
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
     user_text, user_text_meta = mask_and_truncate(user_text_raw)
 
@@ -2581,6 +2629,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
         plugins_used_in_turn(turn, subagent_transcripts_by_tool_use_id), plugin_versions
     )
     tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id) + [repo_tag(repo_name)]
+    tags += work_item_tags(turn, work_items)
 
     trace_name = trace_display_name(session_id, turn_num)
     session = component_of(SESSION_COMPONENT, plugin_versions)
@@ -2682,6 +2731,7 @@ def emit_teammate_turn(
     launching_tool_use_id: Optional[str] = None,
     ambiguous_name: bool = False,
     trace_seed: Optional[str] = None,
+    work_items: work_item.WorkItems,
 ) -> None:
     """Emit one teammate turn as its own top-level trace.
 
@@ -2725,6 +2775,7 @@ def emit_teammate_turn(
         tags.append("teammate-ambiguous-name")
     if SKILL_TAGS:
         tags += collect_skill_tags(turn)
+    tags += work_item_tags(turn, work_items)
 
     trace_name = teammate_trace_display_name(name, teammate_turn_num, session_id)
     teammate_component = component_of(teammate.get("agent_type"), plugin_versions)
@@ -2776,6 +2827,7 @@ def emit_teammate_transcripts(
     state: Dict[str, Any],
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     *,
+    work_items: work_item.WorkItems,
     flush_deferred_agent_turns: bool = False,
 ) -> int:
     """Emit newly-closed turns for every named teammate under this session.
@@ -2804,6 +2856,7 @@ def emit_teammate_transcripts(
                 name_to_tool_use_id,
                 ambiguous_names,
                 subagent_transcripts_by_tool_use_id,
+                work_items=work_items,
                 flush=flush_deferred_agent_turns,
             )
         except Exception as e:
@@ -2822,6 +2875,7 @@ def _emit_one_teammate(
     ambiguous_names: set,
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     *,
+    work_items: work_item.WorkItems,
     flush: bool,
 ) -> int:
     """Emit one teammate's newly-closed turns and persist its progress.
@@ -2918,6 +2972,7 @@ def _emit_one_teammate(
                 launching_tool_use_id=launching_tool_use_id,
                 ambiguous_name=ambiguous,
                 trace_seed=config.trace_seed,
+                work_items=work_items,
             )
             emitted += 1
             last_emitted_rowcount = len(turns[index].rows)
@@ -2953,6 +3008,7 @@ def emit_ready_turns(
     user_id: Optional[str],
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     trace_seed: Optional[str] = None,
+    work_items: work_item.WorkItems,
 ) -> int:
     emitted = 0
     for turn in turns_to_emit:
@@ -2970,6 +3026,7 @@ def emit_ready_turns(
                 user_id=user_id,
                 subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 trace_seed=trace_seed,
+                work_items=work_items,
             )
         except Exception as e:
             # Log at INFO so SDK incompatibilities (and other emit failures)
@@ -2996,6 +3053,7 @@ def emit_new_turns_from_transcript(
         subagent_transcripts_by_tool_use_id = get_subagent_transcripts_by_tool_use_id(transcript_path)
         if subagent_transcripts_by_tool_use_id:
             debug(f"Discovered {len(subagent_transcripts_by_tool_use_id)} subagent transcript(s)")
+        work_items = read_work_items(session_id, config.work_item_branch_pattern)
 
         turns, session_state = get_new_turns_from_transcript(
             transcript_path,
@@ -3022,6 +3080,7 @@ def emit_new_turns_from_transcript(
                 user_id=config.user_id,
                 subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
                 trace_seed=config.trace_seed,
+                work_items=work_items,
             )
             session_state.turn_count += emitted
 
@@ -3043,6 +3102,7 @@ def emit_new_turns_from_transcript(
                 transcript_path,
                 state,
                 subagent_transcripts_by_tool_use_id,
+                work_items=work_items,
                 flush_deferred_agent_turns=flush_deferred_agent_turns,
             )
         except Exception as e:
@@ -3350,6 +3410,7 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
         # Stores the turns on disk now: a SessionEnd hook can be stopped during
         # the delivery check below, and the turn position is already saved.
         langfuse.flush()
+        work_item.prune(WORK_ITEMS_DIR, datetime.now(timezone.utc) - STATE_MAX_AGE, info)
 
         dur = time.time() - start
         # Nothing was even attempted to be sent, so "Processed 0" needs no
@@ -3411,5 +3472,14 @@ def send_waiting_turns_main() -> int:
     return 0
 
 
+def work_item_command_main() -> int:
+    """Runs `langfuse-work-item` with the arguments after WORK_ITEM_FLAG."""
+    return work_item.run_command(
+        sys.argv[2:], WORK_ITEMS_DIR, os.environ.get("CLAUDE_CODE_SESSION_ID"), datetime.now(timezone.utc)
+    )
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == [WORK_ITEM_FLAG]:
+        sys.exit(work_item_command_main())
     sys.exit(send_waiting_turns_main() if sys.argv[1:] == [SEND_WAITING_FLAG] else main())

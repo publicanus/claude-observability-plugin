@@ -1,0 +1,2 @@
+# sh scripts: LF line endings on every checkout, Windows included.
+bin/* text eol=lf

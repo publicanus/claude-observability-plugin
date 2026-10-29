@@ -59,6 +59,7 @@ The plugin requires or accepts:
 | `CC_LANGFUSE_SKILL_TAGS` | Tag traces with `skill:<name>` for every skill invoked in the turn (default true).                 |
 | `CC_LANGFUSE_CAPTURE_SKILL_CONTENT` | Include injected skill instruction text in the Skill tool span output (default false).  |
 | `CC_LANGFUSE_TRACE_SEED` | Optional. Opt-in seed for deterministic trace IDs — see [Deterministic trace IDs](#deterministic-trace-ids). |
+| `CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN` | Optional. A regular expression whose first group picks the work item out of the git branch, such as `^feat/(\d+)-`. See [Work item](#work-item). |
 
 Get keys from your Langfuse project settings → API Keys.
 
@@ -81,6 +82,25 @@ Each trace carries the name of its repo, so a Langfuse dashboard can total token
 The name is the last part of the address of the git remote `origin`, without `.git`: `git@github.com:acme/shop.git` gives `shop`. Without `origin`, the hook uses the first remote that `git remote` lists. Without any remote, the name is the repo's folder name; all worktrees of that repo share the main folder's name. Outside git, it is the session folder's name. The remote's address itself, with any user name or token in it, is never sent.
 
 A fork and its source with the same name, such as `jaap/shop` and `acme/shop`, share one tag.
+
+### Work item
+
+Each trace can name the work item its turn served, as the tag `work-item:<id>`, so a plugin's maintainer can see how each work item went. The tag goes on main-session traces and teammate traces alike, and an agent's work is inside its turn's trace.
+
+A tool names the item with the command `langfuse-work-item`, run in a Bash tool call of the session. Claude Code puts it on the PATH while this plugin is enabled. It needs uv, or `python3` as in [Requirements](#requirements).
+
+```bash
+langfuse-work-item set 37   # from this turn on, traces carry work-item:37
+langfuse-work-item clear    # from this turn on, the branch pattern decides again
+```
+
+The command prints nothing and exits 0 when it recorded the call. It exits 2, with one line on stderr, when the arguments are wrong, the id is empty or holds whitespace or a control character, or `CLAUDE_CODE_SESSION_ID` is not set or holds more than letters, digits and `-`. It exits 1, with one line on stderr, when it cannot write its record or cannot run on this machine.
+
+The item a tool names applies from the turn in which it ran, and a later `set` replaces it from its own turn on. When a turn names two items, it carries the last. The records are in `~/.claude/state/langfuse_work_items/<session>.jsonl`, and the hook deletes those older than 30 days.
+
+When no tool named an item, the setting `CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN` can give one from the turn's git branch. The pattern is a regular expression, and its first group is the id: `^feat/(\d+)-` gives `37` for the branch `feat/37-plugins-on-trace`. The pattern may match anywhere in the branch name unless it starts with `^`. An item a tool named wins over the branch. A detached checkout, whose branch is `HEAD`, gives no item.
+
+A pattern that is not a valid regular expression, or has no group, is refused: traces are sent with no item from the branch, and the hook log `~/.claude/state/langfuse_hook.log` holds the line `work item branch pattern refused: <pattern>: <reason>`. When a record file cannot be read, the log names it, and that session's traces carry no work-item tag.
 
 ### Plugins
 
