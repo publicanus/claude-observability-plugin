@@ -131,6 +131,17 @@ def test_hook_resolves_git_email_from_the_payload_cwd(
     assert (user, message) == ("git@example.com", None)
 
 
+def test_a_removed_session_folder_gives_no_git_user_and_the_session_is_still_traced(
+    hook_module, traced, monkeypatch, capsys, tmp_path, fake_langfuse
+):
+    repo = make_repo(tmp_path / "repo", None)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+
+    user, message = run_hook(hook_module, monkeypatch, capsys, tmp_path, fake_langfuse, tmp_path / "gone")
+
+    assert (user, message) == (None, None)
+
+
 def test_unreadable_login_file_attaches_no_user_and_says_so(
     hook_module, traced, monkeypatch, capsys, tmp_path, fake_langfuse
 ):

@@ -3,6 +3,11 @@
 Uses only the Python standard library, so /hurt can import it without langfuse.
 Needs git on the PATH; answers as outside git when git cannot run.
 
+project_folder(cwd) is the folder whose checkout a session belongs to: the
+project folder Claude Code started in, CLAUDE_PROJECT_DIR, which stays the same
+when the session changes directory; without it, cwd (None: the process's working
+directory).
+
 find_checkout(folder, log=None) returns the Checkout that holds folder.
 
   folder  the session's folder
@@ -14,6 +19,7 @@ find_checkout(folder, log=None) returns the Checkout that holds folder.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +37,10 @@ class Checkout:
 def session_dir(cwd: Optional[str]) -> Path:
     """cwd as a Path; None means the process's working directory."""
     return Path(cwd) if cwd else Path.cwd()
+
+
+def project_folder(cwd: Optional[str]) -> Path:
+    return session_dir(os.environ.get("CLAUDE_PROJECT_DIR") or cwd)
 
 
 def git_rev_parse(folder: Path, *flags: str, log: Log = None) -> Optional[str]:

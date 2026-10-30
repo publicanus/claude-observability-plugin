@@ -82,7 +82,7 @@ STATE_MAX_AGE = timedelta(days=30)
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
-from repo_checkout import Checkout, find_checkout, session_dir  # noqa: E402
+from repo_checkout import Checkout, find_checkout, project_folder  # noqa: E402
 from settings_file import (  # noqa: E402
     SETUP_COMMAND,
     SettingsFileError,
@@ -3691,7 +3691,7 @@ def main() -> int:
     payload = read_hook_payload()
     is_session_start = is_session_start_hook_payload(payload)
     is_setup_check = is_setup_check_hook_payload(payload)
-    checkout = find_checkout(session_dir(payload.get("cwd")), log=debug)
+    checkout = find_checkout(project_folder(payload.get("cwd")), log=debug)
     try:
         config = get_langfuse_config(checkout, payload.get("cwd"))
     except RefusedHostError as e:

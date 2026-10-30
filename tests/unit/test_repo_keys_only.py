@@ -11,7 +11,7 @@ from typing import Any, List
 
 import pytest
 
-from conftest import AcceptingLangfuse, config_for, run_main, write_one_turn_transcript, write_settings
+from conftest import AcceptingLangfuse, config_for, git, run_main, write_one_turn_transcript, write_settings
 
 
 EU = "https://cloud.langfuse.com"
@@ -137,6 +137,32 @@ def test_in_a_worktree_without_keys_in_the_main_checkout_the_worktrees_own_are_u
     run_main(hook_module, monkeypatch, capsys, stop_payload(worktree, tmp_path))
 
     assert [sent_with(config) for config in clients_built] == [("pk-lf-wt", "sk-lf-wt", EU)]
+
+
+def test_after_a_cd_into_another_repo_the_project_folders_keys_are_still_used(
+    hook_module, clients_built, monkeypatch, capsys, tmp_path, repo
+):
+    write_settings(repo, {**KEYS_A, "LANGFUSE_BASE_URL": "https://a.example.test"})
+    nested = repo / "vendor" / "other"
+    nested.mkdir(parents=True)
+    git(nested, "init", "-q")
+    write_settings(nested, {"LANGFUSE_PUBLIC_KEY": "pk-lf-b", "LANGFUSE_SECRET_KEY": "sk-lf-b"})
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+
+    run_main(hook_module, monkeypatch, capsys, stop_payload(nested, tmp_path))
+
+    assert [sent_with(config) for config in clients_built] == [("pk-lf-a", "sk-lf-a", "https://a.example.test")]
+
+
+def test_after_the_sessions_folder_is_removed_the_project_folders_keys_are_still_used(
+    hook_module, clients_built, monkeypatch, capsys, tmp_path, repo
+):
+    write_settings(repo, KEYS_A)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+
+    run_main(hook_module, monkeypatch, capsys, stop_payload(tmp_path / "removed-worktree", tmp_path))
+
+    assert [sent_with(config) for config in clients_built] == [("pk-lf-a", "sk-lf-a", EU)]
 
 
 @OUTSIDE

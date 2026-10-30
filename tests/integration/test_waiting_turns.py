@@ -171,7 +171,7 @@ class Machine:
         env = {
             name: value
             for name, value in os.environ.items()
-            if not name.startswith(("LANGFUSE_", "CC_LANGFUSE_", "CLAUDE_PLUGIN_OPTION_"))
+            if not name.startswith(("LANGFUSE_", "CC_LANGFUSE_", "CLAUDE_PLUGIN_OPTION_", "CLAUDE_PROJECT_DIR"))
         }
         env.update(
             HOME=str(self.home),

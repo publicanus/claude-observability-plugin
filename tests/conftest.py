@@ -171,8 +171,10 @@ def worktree(repo: Path, tmp_path: Path) -> Path:
 
 def config_for(hook_module: Any, folder: Any) -> Any:
     """get_langfuse_config for a session in folder (None: the working directory)."""
+    from repo_checkout import session_dir  # not at the top: state_writer.py imports this file without hooks/ on its path
+
     cwd = str(folder) if folder is not None else None
-    return hook_module.get_langfuse_config(hook_module.find_checkout(hook_module.session_dir(cwd)), cwd)
+    return hook_module.get_langfuse_config(hook_module.find_checkout(session_dir(cwd)), cwd)
 
 
 @pytest.fixture(scope="session")
@@ -404,6 +406,7 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(home)
     # _get_logger() caches its handler in this module-level global on first
     # use, and logging.getLogger("langfuse_hook") is itself a process-wide
