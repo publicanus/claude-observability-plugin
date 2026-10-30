@@ -32,7 +32,6 @@ from urllib.parse import urlsplit
 # ----------------- Langfuse import (fail-open) -----------------
 try:
     from langfuse import Langfuse, propagate_attributes
-    from langfuse._client.attributes import LangfuseOtelSpanAttributes
     from opentelemetry import trace as otel_trace_api
     from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
     from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -1962,16 +1961,36 @@ def _build_forced_trace_context(trace_id_hex: str) -> Optional[Any]:
         debug(f"forced trace context for {trace_id_hex!r} failed: {e}")
         return None
 
+def _langfuse_sdk_version() -> str:
+    try:
+        return getattr(__import__("langfuse"), "__version__", "unknown")
+    except Exception:
+        return "unknown"
+
+def _as_root_attribute() -> str:
+    """The span attribute that makes Langfuse treat a span with a remote parent as
+    its trace's root. Raises RuntimeError when the installed SDK does not have it."""
+    try:
+        from langfuse._client.attributes import LangfuseOtelSpanAttributes
+        return LangfuseOtelSpanAttributes.AS_ROOT
+    except (ImportError, AttributeError) as e:
+        raise RuntimeError(
+            f"Langfuse SDK {_langfuse_sdk_version()} has no "
+            f"langfuse._client.attributes.LangfuseOtelSpanAttributes.AS_ROOT ({e}). This hook "
+            f"targets SDK 4.x; pin with `pip install \"langfuse>=4.2,<5\"` or update the hook script."
+        ) from e
+
 def _start_root_otel_span(langfuse: Langfuse, name: str, start_ns: Optional[int],
                           forced_trace_id: Optional[str]) -> Any:
     if forced_trace_id:
         context = _build_forced_trace_context(forced_trace_id)
         if context is not None:
+            as_root = _as_root_attribute()
             try:
                 otel_span = langfuse._otel_tracer.start_span(name=name, start_time=start_ns, context=context)
                 # Without it Langfuse treats the span as a child of the remote parent,
                 # and the trace shows no input and output of its own.
-                otel_span.set_attribute(LangfuseOtelSpanAttributes.AS_ROOT, True)
+                otel_span.set_attribute(as_root, True)
                 return otel_span
             except Exception as e:
                 debug(f"start_span with forced trace id {forced_trace_id!r} failed: {e}")
@@ -1994,12 +2013,8 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
     AttributeError get swallowed by the broad emit_turn handler.
     """
     if not hasattr(langfuse, "_otel_tracer") or not hasattr(langfuse, "_create_observation_from_otel_span"):
-        try:
-            sdk_version = getattr(__import__("langfuse"), "__version__", "unknown")
-        except Exception:
-            sdk_version = "unknown"
         raise RuntimeError(
-            f"Langfuse SDK {sdk_version} is missing _otel_tracer or "
+            f"Langfuse SDK {_langfuse_sdk_version()} is missing _otel_tracer or "
             f"_create_observation_from_otel_span. This hook targets SDK 4.x; "
             f"pin with `pip install \"langfuse>=4.2,<5\"` or update the hook script."
         )

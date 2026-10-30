@@ -10,6 +10,7 @@ Langfuse and the hook's state file.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -120,3 +121,37 @@ def test_a_held_back_turn_whose_seeded_id_cannot_be_derived_is_not_sent_and_says
 
     assert sent_trace_ids_by_question(fake_langfuse) == {}
     assert "turn 1" in Path(hook_module.LOG_FILE).read_text(encoding="utf-8")
+
+
+def test_a_turn_held_back_by_the_old_hook_is_numbered_when_it_is_sent(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    rest_of_round_1 = start_session(continued_agent, *launch_turn())
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+    # Rewrite the entry the way the old hook saved it: no number and no trace id
+    # on the held-back turn, and a turn count from earlier turns.
+    state = hook_module.load_hook_state()
+    entry = state[hook_module.get_session_state_key(SESSION_ID, str(continued_agent.transcript))]
+    for held_back in entry["pending_agent_turns"]:
+        del held_back["turn_number"], held_back["trace_id"]
+    entry["turn_count"] = 4
+    hook_module.save_hook_state(state)
+
+    let_the_agent_finish(continued_agent, rest_of_round_1)
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+
+    assert sent_trace_ids_by_question(fake_langfuse) == {
+        "Launch the researcher.": hook_module.derive_turn_trace_id(SEED, 5),
+    }
+    assert session_entry(hook_module, continued_agent)["turn_count"] == 5
+
+
+def test_an_sdk_without_the_root_mark_logs_why_a_turn_is_not_sent(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setitem(sys.modules, "langfuse._client.attributes", None)
+    start_session(continued_agent, *launch_turn(), *plain_turn())
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+
+    assert sent_trace_ids_by_question(fake_langfuse) == {}
+    assert "langfuse._client.attributes" in Path(hook_module.LOG_FILE).read_text(encoding="utf-8")
