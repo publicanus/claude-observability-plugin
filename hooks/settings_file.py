@@ -13,7 +13,11 @@ settings, such as an "env" block or the process environment.
 read_env_keys(env) is read_keys for an "env" block, and env_holds_keys(env) is
 True when that block holds both keys, not empty.
 
-repo_settings_env(checkout) and repo_settings_hold_keys(checkout) read the repo's
+KEY_NAMES are the names a key goes by, LANGFUSE_ before CC_LANGFUSE_.
+
+repo_settings_envs(checkout) returns the env blocks of the repo's own settings
+files, in the order they count; repo_settings_env(checkout) and
+repo_settings_hold_keys(checkout) read the repo's
 own REPO_SETTINGS_FILE, the only source of the keys and the Langfuse address, for a
 repo_checkout.Checkout; SETUP_COMMAND is the command that prepares that file.
 
@@ -22,12 +26,15 @@ Uses only the Python standard library and git, so /hurt can import it without la
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 from repo_checkout import Checkout
 
 REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
 SETUP_COMMAND = "/mate-record:langfuse-setup"
+PUBLIC_KEY_NAMES = ("LANGFUSE_PUBLIC_KEY", "CC_LANGFUSE_PUBLIC_KEY")
+SECRET_KEY_NAMES = ("LANGFUSE_SECRET_KEY", "CC_LANGFUSE_SECRET_KEY")
+KEY_NAMES = PUBLIC_KEY_NAMES + SECRET_KEY_NAMES
 
 
 class SettingsFileError(Exception):
@@ -51,10 +58,15 @@ def load_settings(path: Path) -> Dict[str, Any]:
 def read_keys(lookup: Callable[[str], str]) -> Tuple[str, str]:
     """The public and secret key, each under its LANGFUSE_ name or else its
     CC_LANGFUSE_ name; lookup returns "" for a name it does not hold."""
-    return (
-        lookup("LANGFUSE_PUBLIC_KEY") or lookup("CC_LANGFUSE_PUBLIC_KEY"),
-        lookup("LANGFUSE_SECRET_KEY") or lookup("CC_LANGFUSE_SECRET_KEY"),
-    )
+    return _first_set(lookup, PUBLIC_KEY_NAMES), _first_set(lookup, SECRET_KEY_NAMES)
+
+
+def _first_set(lookup: Callable[[str], str], names: Tuple[str, ...]) -> str:
+    for name in names:
+        value = lookup(name)
+        if value:
+            return value
+    return ""
 
 
 def read_env_keys(env: Mapping[str, Any]) -> Tuple[str, str]:
@@ -65,21 +77,21 @@ def env_holds_keys(env: Mapping[str, Any]) -> bool:
     return all(read_env_keys(env))
 
 
-def repo_settings_env(checkout: Checkout) -> Dict[str, Any]:
-    """The env block of the repo's own REPO_SETTINGS_FILE.
-
-    The file that counts is the one in checkout.main when it holds both keys, else the
-    one at checkout.root, such as a worktree's own; outside git, only the one at
-    checkout.root. A missing file gives {}.
-    Raises SettingsFileError, naming the file, when a file it reads is broken.
+def repo_settings_envs(checkout: Checkout) -> List[Dict[str, Any]]:
+    """The env blocks of the repo's own REPO_SETTINGS_FILE files, in the order they
+    count: checkout.main's, then checkout.root's, such as a worktree's own; outside
+    git, or in the main checkout itself, only checkout.root's. A missing file gives {}.
+    Raises SettingsFileError, naming the file, when a file is broken.
     """
     roots = [checkout.root] if checkout.main in (None, checkout.root) else [checkout.main, checkout.root]
-    env: Dict[str, Any] = {}
-    for root in roots:
-        env = load_settings(root / REPO_SETTINGS_FILE).get("env", {})
-        if env_holds_keys(env):
-            return env
-    return env
+    return [load_settings(root / REPO_SETTINGS_FILE).get("env", {}) for root in roots]
+
+
+def repo_settings_env(checkout: Checkout) -> Dict[str, Any]:
+    """The env block that counts: the first of repo_settings_envs(checkout) that holds
+    both keys, else the last one. Raises SettingsFileError."""
+    envs = repo_settings_envs(checkout)
+    return next((env for env in envs if env_holds_keys(env)), envs[-1])
 
 
 def repo_settings_hold_keys(checkout: Checkout) -> bool:

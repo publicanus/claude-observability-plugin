@@ -105,6 +105,20 @@ def test_the_not_traced_line_says_that_keys_set_outside_are_not_used(
     assert lines[:2] == [hook_module.NO_KEYS_WARNING, NOT_USED_LINE]
 
 
+def test_a_key_that_claude_code_copied_from_the_repos_own_file_is_not_called_outside(
+    hook_module, nothing_may_be_sent, monkeypatch, capsys, repo
+):
+    write_settings(repo, {"LANGFUSE_PUBLIC_KEY": "pk-lf-own"})
+    # Claude Code puts the env block of the project's settings file into the hook's environment.
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-own")
+
+    out = run_main(hook_module, monkeypatch, capsys, {"hook_event_name": "SessionStart", "cwd": str(repo)})
+
+    message = json.loads(out)["systemMessage"]
+    assert message.startswith(hook_module.NO_KEYS_WARNING + "\n")
+    assert NOT_USED_LINE not in message
+
+
 def test_without_keys_set_outside_the_not_traced_line_has_no_not_used_line(
     hook_module, nothing_may_be_sent, monkeypatch, capsys, repo
 ):

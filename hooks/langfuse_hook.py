@@ -84,12 +84,13 @@ from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
 from repo_checkout import Checkout, find_checkout, project_folder  # noqa: E402
 from settings_file import (  # noqa: E402
+    KEY_NAMES,
     SETUP_COMMAND,
     SettingsFileError,
     env_holds_keys,
     read_env_keys,
-    read_keys,
     repo_settings_env,
+    repo_settings_envs,
 )
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
@@ -542,9 +543,20 @@ def read_no_keys_steps(checkout: Checkout) -> Optional[str]:
     except (OSError, UnicodeDecodeError) as e:
         return f"Langfuse: cannot read {path}: {e}"
 
+def keys_set_outside(checkout: Checkout) -> bool:
+    """True when a key name holds a value, as an env var or in the plugin's userConfig,
+    that no repo settings file of checkout holds under that name. Claude Code copies
+    the project's own file into the environment, so those values do not count."""
+    own_envs = repo_settings_envs(checkout)
+    for name in KEY_NAMES:
+        for value in (os.environ.get(name), os.environ.get(f"CLAUDE_PLUGIN_OPTION_{name}")):
+            if value and all(env.get(name) != value for env in own_envs):
+                return True
+    return False
+
 def format_no_keys_message(checkout: Checkout) -> str:
     lines = [NO_KEYS_WARNING]
-    if any(read_keys(_opt)):
+    if keys_set_outside(checkout):
         lines.append(OUTSIDE_KEYS_NOT_USED)
     lines.append(f"To add keys, run {SETUP_COMMAND}, or by hand:")
     steps = read_no_keys_steps(checkout)
