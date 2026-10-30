@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from repo_checkout import find_checkout
+from settings_file import repo_settings_env
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -169,3 +171,32 @@ def test_outside_a_git_repository_nothing_is_written(prepare, capsys, tmp_path):
     assert code == 1
     assert err
     assert list(project_dir.iterdir()) == []
+
+
+@pytest.fixture
+def bare_layout(tmp_path: Path) -> Path:
+    """A bare repo at proj/.bare with the worktrees proj/main and proj/feat; returns proj."""
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "-q")
+    git(source, "commit", "-q", "--allow-empty", "-m", "init")
+    proj = (tmp_path / "proj").resolve()
+    proj.mkdir()
+    subprocess.run(["git", "clone", "-q", "--bare", str(source), str(proj / ".bare")], check=True, capture_output=True)
+    git(proj / ".bare", "worktree", "add", "-q", str(proj / "main"))
+    git(proj / ".bare", "worktree", "add", "-q", str(proj / "feat"))
+    return proj
+
+
+def test_in_a_bare_repo_layout_the_setup_prepares_the_file_the_hook_reads(prepare, capsys, bare_layout):
+    feat = bare_layout / "feat"
+
+    code, out, err = run(prepare, capsys, feat)
+
+    assert (code, err) == (0, "")
+    settings = Path(out["settings"])
+    settings.write_text(
+        json.dumps({"env": {"LANGFUSE_PUBLIC_KEY": "pk-lf-1", "LANGFUSE_SECRET_KEY": "sk-lf-1"}}), encoding="utf-8"
+    )
+    assert settings == bare_layout / SETTINGS
+    assert repo_settings_env(find_checkout(feat))["LANGFUSE_PUBLIC_KEY"] == "pk-lf-1"

@@ -19,4 +19,4 @@ def test_when_git_cannot_run_it_answers_as_outside_git_and_logs_why(
     checkout = find_checkout(tmp_path, log=logged.append)
 
     assert (checkout.root, checkout.main) == (tmp_path, None)
-    assert logged and logged[0].startswith("git rev-parse could not run: ")
+    assert logged and logged[0].startswith("git could not run: ")

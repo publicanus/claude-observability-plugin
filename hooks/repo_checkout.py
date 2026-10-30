@@ -14,7 +14,9 @@ find_checkout(folder, log=None) returns the Checkout that holds folder.
   log     called with one line when git cannot run; None logs nothing
   return  Checkout(root, main): root is the root of the git checkout that holds
           folder, or folder itself outside git; main is the repo's main checkout,
-          the same for all its worktrees, or None outside git
+          the same for all its worktrees: the folder that holds the repo's git
+          folder (for a bare repo with worktrees, the folder that holds the bare
+          repo), or None outside git
 """
 
 from __future__ import annotations
@@ -43,14 +45,14 @@ def project_folder(cwd: Optional[str]) -> Path:
     return session_dir(os.environ.get("CLAUDE_PROJECT_DIR") or cwd)
 
 
-def git_rev_parse(folder: Path, *flags: str, log: Log = None) -> Optional[str]:
-    """The output of `git rev-parse <flags>` in folder, or None when folder is not in
-    a git checkout or git cannot run."""
+def git_output(folder: Path, *args: str, log: Log = None) -> Optional[str]:
+    """The output of `git <args>` in folder, stripped, or None when git fails there,
+    such as outside a git checkout, or cannot run."""
     try:
-        result = subprocess.run(["git", "rev-parse", *flags], cwd=folder, capture_output=True, text=True)
+        result = subprocess.run(["git", *args], cwd=folder, capture_output=True, text=True)
     except OSError as e:
         if log is not None:
-            log(f"git rev-parse could not run: {type(e).__name__}: {e}")
+            log(f"git could not run: {type(e).__name__}: {e}")
         return None
     if result.returncode != 0:
         return None
@@ -58,9 +60,9 @@ def git_rev_parse(folder: Path, *flags: str, log: Log = None) -> Optional[str]:
 
 
 def find_checkout(folder: Path, log: Log = None) -> Checkout:
-    toplevel = git_rev_parse(folder, "--show-toplevel", log=log)
+    toplevel = git_output(folder, "rev-parse", "--show-toplevel", log=log)
     if toplevel is None:
         return Checkout(root=folder, main=None)
-    common_dir = git_rev_parse(folder, "--path-format=absolute", "--git-common-dir", log=log)
+    common_dir = git_output(folder, "rev-parse", "--path-format=absolute", "--git-common-dir", log=log)
     main = Path(common_dir).parent if common_dir is not None else None
     return Checkout(root=Path(toplevel), main=main)
