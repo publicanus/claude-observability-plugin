@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.1](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.0...v3.0.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **hook:** send x-langfuse-ingestion-version: 4 with every span batch ([#75](https://github.com/publicanus/claude-observability-plugin/issues/75)) ([6e4ef1a](https://github.com/publicanus/claude-observability-plugin/commit/6e4ef1aeca993f6930dcfa894cc418239f3c8e3d))
+
 ## [3.0.0](https://github.com/publicanus/claude-observability-plugin/compare/v2.0.1...v3.0.0) (2026-10-30)
 
 
