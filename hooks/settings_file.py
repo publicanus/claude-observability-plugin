@@ -12,11 +12,22 @@ settings, such as an "env" block or the process environment.
 
 read_env_keys(env) is read_keys for an "env" block, and env_holds_keys(env) is
 True when that block holds both keys, not empty.
+
+repo_settings_env(cwd) and repo_settings_hold_keys(cwd) read the repo's own
+REPO_SETTINGS_FILE, the only source of the keys and the Langfuse address;
+SETUP_COMMAND is the command that prepares that file.
+
+Uses only the Python standard library and git, so /hurt can import it without langfuse.
 """
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+
+from repo_checkout import find_main_checkout, find_repo_root
+
+REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
+SETUP_COMMAND = "/mate-record:langfuse-setup"
 
 
 class SettingsFileError(Exception):
@@ -52,3 +63,26 @@ def read_env_keys(env: Mapping[str, Any]) -> Tuple[str, str]:
 
 def env_holds_keys(env: Mapping[str, Any]) -> bool:
     return all(read_env_keys(env))
+
+
+def repo_settings_env(cwd: Optional[str]) -> Dict[str, Any]:
+    """The env block of the repo's own REPO_SETTINGS_FILE.
+
+    cwd: the session's directory; None means the process's working directory.
+    The file that counts is the one at the root of the checkout that holds cwd when it
+    holds both keys, else the one of the repo's main checkout; outside git, the one in
+    cwd. A missing file gives {}.
+    Raises SettingsFileError, naming the file, when a file it reads is broken.
+    """
+    roots = [root for root in (find_repo_root(cwd), find_main_checkout(cwd)) if root is not None]
+    env: Dict[str, Any] = {}
+    for root in roots:
+        env = load_settings(root / REPO_SETTINGS_FILE).get("env", {})
+        if env_holds_keys(env):
+            return env
+    return env
+
+
+def repo_settings_hold_keys(cwd: Optional[str]) -> bool:
+    """True when repo_settings_env(cwd) holds both keys. Raises SettingsFileError."""
+    return env_holds_keys(repo_settings_env(cwd))

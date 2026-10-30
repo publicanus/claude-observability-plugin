@@ -82,7 +82,16 @@ STATE_MAX_AGE = timedelta(days=30)
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
-from settings_file import SettingsFileError, env_holds_keys, load_settings, read_env_keys, read_keys  # noqa: E402
+from repo_checkout import find_main_checkout, find_repo_root, session_dir  # noqa: E402
+from settings_file import (  # noqa: E402
+    SETUP_COMMAND,
+    SettingsFileError,
+    env_holds_keys,
+    read_env_keys,
+    read_keys,
+    repo_settings_env,
+    repo_settings_hold_keys,
+)
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
 
@@ -129,7 +138,6 @@ OUTSIDE_KEYS_NOT_USED = (
 )
 # Ends every text that tells the user to fix the repo's settings file.
 SETTINGS_REREAD = "The hook reads that file again at the end of each turn."
-SETUP_COMMAND = "/mate-record:langfuse-setup"
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 
 # The manual steps shown at SessionStart without keys: one text per system. A repo's
@@ -207,31 +215,6 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
             f"`git config user.email` failed (exit {result.returncode}): {result.stderr.strip()}"
         )
     return result.stdout.strip() or None
-
-def session_dir(cwd: Optional[str]) -> Path:
-    """cwd as a Path; None means the process's working directory."""
-    return Path(cwd) if cwd else Path.cwd()
-
-def git_rev_parse(cwd: Optional[str], *flags: str) -> Optional[str]:
-    """The output of `git rev-parse <flags>` in session_dir(cwd), or None when that
-    folder is not in a git checkout or git cannot run."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", *flags], cwd=session_dir(cwd), capture_output=True, text=True
-        )
-    except OSError as e:
-        debug(f"git rev-parse could not run: {type(e).__name__}: {e}")
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-def find_main_checkout(cwd: Optional[str]) -> Optional[Path]:
-    """The main checkout of the git repo that holds cwd (None: the process's working
-    directory), the same for all its worktrees; None outside a git checkout or
-    without git installed."""
-    common_dir = git_rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
-    return Path(common_dir).parent if common_dir is not None else None
 
 def read_repo_name(cwd: Optional[str]) -> str:
     """The name of the repo that holds cwd (None: the process's working directory).
@@ -540,40 +523,7 @@ def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
     return hook_event_name(payload) == "UserPromptExpansion"
 
 
-# ----------------- Setup check -----------------
-REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
-
-def repo_settings_env(cwd: Optional[str]) -> Dict[str, Any]:
-    """The env block of the repo's own REPO_SETTINGS_FILE, the only source of the keys
-    and the Langfuse address.
-
-    cwd: the session's directory; None means the process's working directory.
-    The file that counts is the one at the root of the checkout that holds cwd when it
-    holds both keys, else the one of the repo's main checkout; outside git, the one in
-    cwd. A missing file gives {}.
-    Raises SettingsFileError, naming the file, when a file it reads is broken.
-    """
-    roots = [root for root in (find_repo_root(cwd), find_main_checkout(cwd)) if root is not None]
-    env: Dict[str, Any] = {}
-    for root in roots:
-        env = load_settings(root / REPO_SETTINGS_FILE).get("env", {})
-        if env_holds_keys(env):
-            return env
-    return env
-
-def repo_settings_hold_keys(cwd: Optional[str]) -> bool:
-    """True when repo_settings_env(cwd) holds both keys. Raises SettingsFileError."""
-    return env_holds_keys(repo_settings_env(cwd))
-
-
 # ----------------- No-keys message -----------------
-def find_repo_root(cwd: Optional[str]) -> Path:
-    """The root of the git checkout that holds cwd (None: the process's working
-    directory), or that directory itself when it is not in a git checkout or git
-    cannot run."""
-    toplevel = git_rev_parse(cwd, "--show-toplevel")
-    return Path(toplevel) if toplevel is not None else session_dir(cwd)
-
 def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
     """The manual steps for this system, or None on a system with no text.
 

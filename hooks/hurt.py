@@ -12,7 +12,9 @@
     --session-id  the session; defaults to CLAUDE_CODE_SESSION_ID
     reads         ~/.claude/projects/*/<session>.jsonl, to find the session's
                   transcript, and ~/.claude/state/langfuse_state.json, where
-                  the hook keeps each session's latest trace id
+                  the hook keeps each session's latest trace id; without an
+                  entry there, the repo's own .claude/settings.local.json of
+                  the working directory, as the hook finds it, to say why
     stdout        one line: what was queued, or why nothing was
     exit          0 when queued; 1 when nothing was queued; 2 on a wrong argument
     writes        appends one entry to ~/.claude/state/hurt_pending.json, under
@@ -34,7 +36,7 @@ from typing import Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import CATEGORIES, load_pending_hurts, save_pending_hurts  # noqa: E402
-from settings_file import env_holds_keys  # noqa: E402
+from settings_file import REPO_SETTINGS_FILE, SETUP_COMMAND, SettingsFileError, repo_settings_hold_keys  # noqa: E402
 from state_files import (  # noqa: E402
     HURT_PENDING_FILE,
     HURT_PENDING_LOCK_FILE,
@@ -76,24 +78,19 @@ def find_transcript_path(session_id: str, projects_dir: Path = PROJECTS_DIR) -> 
     return matches[0].resolve()
 
 
-def langfuse_keys_set(env: Mapping[str, str]) -> bool:
-    """True when both Langfuse keys are set, as the hook needs to run. Only
-    presence is checked — the values are never printed."""
-    return env_holds_keys(env)
-
-
 def resolve_latest_trace_id(
     session_id: Optional[str],
     *,
     projects_dir: Path = PROJECTS_DIR,
     state_file: Path = STATE_FILE,
-    env: Optional[Mapping[str, str]] = None,
 ) -> Resolution:
     """The session's latest trace id, or why there is none.
 
-    Raises StateFileError when state_file exists but cannot be read.
+    Without a state entry, it reads the repo's own settings file of the working
+    directory, as the hook does, to say why.
+    Raises StateFileError when state_file exists but cannot be read, and
+    SettingsFileError when the repo's settings file cannot be read.
     """
-    env = env if env is not None else os.environ
     if not session_id:
         return Resolution(error="No session id available (CLAUDE_CODE_SESSION_ID is unset).")
 
@@ -104,14 +101,11 @@ def resolve_latest_trace_id(
     key = get_session_state_key(session_id, str(transcript_path))
     entry = read_state(state_file).get(key)
     if not isinstance(entry, dict):
-        if not langfuse_keys_set(env):
+        if not repo_settings_hold_keys(None):
             return Resolution(
-                error="No mate-record state entry for this session, and "
-                "no LANGFUSE_* or CC_LANGFUSE_* keys in this session's environment, "
-                "so the hook most likely did not run. Keys set only through the "
-                "plugin's setup are not visible here. Set both keys in the environment "
-                "Claude Code starts with, for example .envrc (direnv) or env in "
-                ".claude/settings.local.json."
+                error="No mate-record state entry for this session, and this repo's "
+                f"{REPO_SETTINGS_FILE.as_posix()} holds no Langfuse keys, so this session "
+                f"is not traced. To add keys, run {SETUP_COMMAND}."
             )
         return Resolution(
             error="No mate-record state entry for this session — "
@@ -175,10 +169,8 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
 
     session_id = args.session_id or env.get("CLAUDE_CODE_SESSION_ID")
     try:
-        resolution = resolve_latest_trace_id(
-            session_id, projects_dir=PROJECTS_DIR, state_file=STATE_FILE, env=env
-        )
-    except StateFileError as e:
+        resolution = resolve_latest_trace_id(session_id, projects_dir=PROJECTS_DIR, state_file=STATE_FILE)
+    except (StateFileError, SettingsFileError) as e:
         print(f"/hurt: {e}. Nothing queued.")
         return 1
     if not resolution.ok:
