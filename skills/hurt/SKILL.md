@@ -6,7 +6,7 @@ allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGI
 
 The operator just typed: $ARGUMENTS
 
-This is a complaint about something that went wrong in the current session — queue it as a pending annotation for the Langfuse trace of the session's most recent turn. All of the deterministic work (finding the trace and queuing the record) is done by a script; your job is to read the operator's text, settle on a category, and invoke the script correctly. The actual Langfuse writes (tag, score, comment) happen later, made by this plugin's hook the next time it runs — this script never contacts Langfuse and holds no Langfuse credentials.
+This is a complaint about something that went wrong in the current session — queue it as a pending annotation for the Langfuse trace of the session's most recent turn. All of the deterministic work (finding the trace and queuing the record) is done by a script; your job is to read the operator's text, settle on a category, and invoke the script correctly. The actual Langfuse writes (tag, score, comment) happen later, made by this plugin's hook once that turn's trace is in Langfuse — this script never contacts Langfuse and holds no Langfuse credentials.
 
 ## 1. Determine the category
 
