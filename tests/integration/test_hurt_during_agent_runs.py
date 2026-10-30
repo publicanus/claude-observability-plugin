@@ -1,0 +1,87 @@
+"""Pins that a /hurt typed while the session's turns wait for a running background
+agent is not lost: the note lands on the session's trace once the hook has sent it.
+
+The test writes a session whose only turn launched a background agent that is still
+running, runs the hook over it, runs /hurt, lets the agent finish, runs the hook
+again, and then attaches the queued notes the way the hook does, against a fake
+Langfuse.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import hurt
+import hurt_annotations
+from test_continued_agent_runs import (
+    AGENT_ID,
+    AGENT_TYPE,
+    DESCRIPTION,
+    LAUNCH,
+    SESSION_ID,
+    ContinuedAgent,
+    launch_turn,
+    notification,
+    round_1,
+)
+from test_hurt_pending_processing import FakeConfig, RoutedClient, full_success_routes, install_fake_client
+
+
+def session_in_projects_dir(projects_dir: Path) -> ContinuedAgent:
+    """A session transcript where /hurt looks for it, with the agent's transcript beside it."""
+    project = projects_dir / "project"
+    subagents = project / SESSION_ID / "subagents"
+    subagents.mkdir(parents=True)
+    (subagents / f"agent-{AGENT_ID}.meta.json").write_text(json.dumps({
+        "agentType": AGENT_TYPE, "description": DESCRIPTION, "toolUseId": LAUNCH,
+    }), encoding="utf-8")
+    transcript = project / f"{SESSION_ID}.jsonl"
+    agent_transcript = subagents / f"agent-{AGENT_ID}.jsonl"
+    transcript.touch()
+    agent_transcript.touch()
+    return ContinuedAgent(transcript.resolve(), agent_transcript)
+
+
+def run_hook(hook_module: Any, fake_langfuse: Any, session: ContinuedAgent) -> None:
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, SESSION_ID, session.transcript)
+
+
+def test_a_hurt_typed_while_the_sessions_turn_waits_for_a_running_agent_lands_on_its_trace(
+    hook_module, fake_langfuse, isolated_hook_state, tmp_path, monkeypatch, capsys
+):
+    projects_dir = tmp_path / "projects"
+    session = session_in_projects_dir(projects_dir)
+    monkeypatch.setattr(hurt, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(hurt, "STATE_FILE", hook_module.STATE_FILE)
+    monkeypatch.setattr(hurt, "HURT_PENDING_FILE", hook_module.HURT_PENDING_FILE)
+    monkeypatch.setattr(hurt, "HURT_PENDING_LOCK_FILE", hook_module.HURT_PENDING_LOCK_FILE)
+
+    agent_prompt, *rest_of_round_1 = round_1()
+    session.add_agent(agent_prompt)
+    session.add_main(*launch_turn())
+    run_hook(hook_module, fake_langfuse, session)
+
+    exit_code = hurt.run(
+        ["--category", "stalled-loop", "--comment", "the agent went in circles"],
+        env={"CLAUDE_CODE_SESSION_ID": SESSION_ID},
+    )
+    assert exit_code == 0, capsys.readouterr().out
+
+    session.add_agent(*rest_of_round_1)
+    session.add_main(notification("main-note-1", LAUNCH, "Round 1 done.", 30))
+    run_hook(hook_module, fake_langfuse, session)
+    sent_traces = [o.trace_id for o in fake_langfuse.observations if o.name == "Conversational Turn"]
+    assert len(sent_traces) == 1
+
+    client = RoutedClient(hurt_annotations)
+    full_success_routes(hurt_annotations, client).uploaded.update(sent_traces)
+    install_fake_client(hurt_annotations, monkeypatch, client)
+    hook_module.process_pending_hurts(FakeConfig(), hook_module.HURT_PENDING_FILE)
+
+    scores = [body for method, path, body in client.calls if path == "/api/public/scores"]
+    assert [(score["traceId"], score["comment"]) for score in scores] == [
+        (sent_traces[0], "the agent went in circles"),
+    ]
