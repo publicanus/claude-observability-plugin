@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import pytest
 
-from conftest import write_settings
+from conftest import config_for, write_settings
 
 
 USER_ID_VARS = ["LANGFUSE_USER_ID", "CC_LANGFUSE_USER_ID"]
@@ -53,14 +53,14 @@ def test_explicit_config_wins_over_login_and_git(hook_module, traced, monkeypatc
     write_login(traced, "login@example.com")
     repo = make_repo(tmp_path / "repo", "git@example.com")
 
-    assert hook_module.get_langfuse_config(str(repo)).user_id == "explicit-user"
+    assert config_for(hook_module, repo).user_id == "explicit-user"
 
 
 def test_login_email_is_the_user_when_no_explicit_config(hook_module, traced, tmp_path):
     write_login(traced, "login@example.com")
     repo = make_repo(tmp_path / "repo", "git@example.com")
 
-    assert hook_module.get_langfuse_config(str(repo)).user_id == "login@example.com"
+    assert config_for(hook_module, repo).user_id == "login@example.com"
 
 
 @pytest.mark.parametrize(
@@ -79,13 +79,13 @@ def test_git_email_of_the_session_dir_is_the_user_without_a_login_email(
         traced.write_text(claude_json_content, encoding="utf-8")
     repo = make_repo(tmp_path / "repo", "git@example.com")
 
-    assert hook_module.get_langfuse_config(str(repo)).user_id == "git@example.com"
+    assert config_for(hook_module, repo).user_id == "git@example.com"
 
 
 def test_no_user_when_neither_login_nor_git_email(hook_module, traced, tmp_path):
     cwd = make_repo(tmp_path / "repo", None)
 
-    config = hook_module.get_langfuse_config(str(cwd))
+    config = config_for(hook_module, cwd)
 
     assert config is not None
     assert config.user_id is None

@@ -169,6 +169,12 @@ def worktree(repo: Path, tmp_path: Path) -> Path:
     return path
 
 
+def config_for(hook_module: Any, folder: Any) -> Any:
+    """get_langfuse_config for a session in folder (None: the working directory)."""
+    cwd = str(folder) if folder is not None else None
+    return hook_module.get_langfuse_config(hook_module.find_checkout(hook_module.session_dir(cwd)), cwd)
+
+
 @pytest.fixture(scope="session")
 def hook_module() -> Any:
     return load_hook_module()

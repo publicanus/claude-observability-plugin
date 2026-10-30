@@ -11,7 +11,7 @@ from typing import Any, List
 
 import pytest
 
-from conftest import AcceptingLangfuse, run_main, write_one_turn_transcript, write_settings
+from conftest import AcceptingLangfuse, config_for, run_main, write_one_turn_transcript, write_settings
 
 
 EU = "https://cloud.langfuse.com"
@@ -142,14 +142,14 @@ def test_without_an_address_in_the_repos_file_turns_go_to_langfuse_cloud_eu(hook
     write_settings(repo, KEYS_A)
     set_outside(monkeypatch, prefix, LANGFUSE_BASE_URL="https://example.test")
 
-    assert hook_module.get_langfuse_config(str(repo)).host == EU
+    assert config_for(hook_module, repo).host == EU
 
 
 @pytest.mark.parametrize("name", ["LANGFUSE_BASE_URL", "CC_LANGFUSE_BASE_URL"])
 def test_the_address_in_the_repos_file_is_used(hook_module, repo, name):
     write_settings(repo, {**KEYS_A, name: "https://self.example.test"})
 
-    assert hook_module.get_langfuse_config(str(repo)).host == "https://self.example.test"
+    assert config_for(hook_module, repo).host == "https://self.example.test"
 
 
 @pytest.fixture

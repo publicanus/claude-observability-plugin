@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from conftest import AcceptingLangfuse, run_main, write_one_turn_transcript, write_settings
+from conftest import AcceptingLangfuse, config_for, run_main, write_one_turn_transcript, write_settings
 
 
 EU = "https://cloud.langfuse.com"
@@ -32,7 +32,7 @@ def keys() -> None:
 
 
 def test_no_address_set_sends_to_langfuse_cloud_eu(hook_module: Any, keys):
-    assert hook_module.get_langfuse_config(None).host == EU
+    assert config_for(hook_module, None).host == EU
 
 
 REFUSED = [

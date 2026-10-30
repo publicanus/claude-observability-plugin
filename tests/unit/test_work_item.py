@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 import work_item
-from conftest import write_settings
+from conftest import config_for, write_settings
 
 SESSION = "session-46"
 PATTERN = r"^feat/(\d+)-"
@@ -100,7 +100,7 @@ def configure(hook_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     write_settings(
         cwd, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret", "LANGFUSE_BASE_URL": "https://example.test"}
     )
-    return hook_module.get_langfuse_config(str(cwd))
+    return config_for(hook_module, cwd)
 
 
 def emit(hook_module: Any, fake_langfuse: Any, config: Any, transcript: Path) -> None:

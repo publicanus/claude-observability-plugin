@@ -36,6 +36,7 @@ from typing import Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import CATEGORIES, load_pending_hurts, save_pending_hurts  # noqa: E402
+from repo_checkout import find_checkout  # noqa: E402
 from settings_file import REPO_SETTINGS_FILE, SETUP_COMMAND, SettingsFileError, repo_settings_hold_keys  # noqa: E402
 from state_files import (  # noqa: E402
     HURT_PENDING_FILE,
@@ -101,7 +102,7 @@ def resolve_latest_trace_id(
     key = get_session_state_key(session_id, str(transcript_path))
     entry = read_state(state_file).get(key)
     if not isinstance(entry, dict):
-        if not repo_settings_hold_keys(None):
+        if not repo_settings_hold_keys(find_checkout(Path.cwd())):
             return Resolution(
                 error="No mate-record state entry for this session, and this repo's "
                 f"{REPO_SETTINGS_FILE.as_posix()} holds no Langfuse keys, so this session "

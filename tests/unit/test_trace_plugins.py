@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from conftest import git, write_settings
+from conftest import config_for, git, write_settings
 
 
 # ----------------- installed_plugins.json -----------------
@@ -124,7 +124,7 @@ def test_a_session_in_a_worktree_uses_the_installs_of_the_main_checkout(
         "mate-core@mate-marketplace": [install("project", "8.9.0-0ae331d8a58b", main)],
     })
 
-    config = hook_module.get_langfuse_config(str(worktree))
+    config = config_for(hook_module, worktree)
 
     assert config.plugin_versions == {"mate-core": "8.9.0"}
 

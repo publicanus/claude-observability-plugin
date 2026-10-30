@@ -82,7 +82,7 @@ STATE_MAX_AGE = timedelta(days=30)
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
-from repo_checkout import find_main_checkout, find_repo_root, session_dir  # noqa: E402
+from repo_checkout import Checkout, find_checkout, session_dir  # noqa: E402
 from settings_file import (  # noqa: E402
     SETUP_COMMAND,
     SettingsFileError,
@@ -90,7 +90,6 @@ from settings_file import (  # noqa: E402
     read_env_keys,
     read_keys,
     repo_settings_env,
-    repo_settings_hold_keys,
 )
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
@@ -216,17 +215,17 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
         )
     return result.stdout.strip() or None
 
-def read_repo_name(cwd: Optional[str]) -> str:
-    """The name of the repo that holds cwd (None: the process's working directory).
+def read_repo_name(checkout: Checkout) -> str:
+    """The name of the repo of checkout.
 
     With a git remote: the last part of the address of `origin`, else of the first
     remote `git remote` lists, without a `.git` ending. Without a remote: the name of
     the main checkout's folder, the same for all its worktrees. Outside a git checkout,
-    or without git installed: the name of cwd's own folder.
+    or without git installed: the name of checkout.root.
     Raises subprocess.CalledProcessError when git fails inside a checkout.
     """
-    base = session_dir(cwd)
-    main_checkout = find_main_checkout(cwd)
+    base = checkout.root
+    main_checkout = checkout.main
     if main_checkout is None:
         return base.name
 
@@ -313,23 +312,25 @@ def read_plugin_versions(project_dir: Path) -> Dict[str, Optional[str]]:
         versions[key.split("@", 1)[0]] = plugin_version(winner.get("version"))
     return versions
 
-def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
+def get_langfuse_config(checkout: Checkout, cwd: Optional[str]) -> Optional[LangfuseConfig]:
     """The hook's Langfuse settings, or None when the repo's own settings file has no keys.
 
-    The keys and the host come only from repo_settings_env(cwd), and fail as that does.
+    checkout: the session's repo; cwd: the session's directory (None: the process's
+    working directory), for the trace user's git email.
+    The keys and the host come only from repo_settings_env(checkout), and fail as that does.
     The host is its LANGFUSE_BASE_URL or CC_LANGFUSE_BASE_URL, else EU_CLOUD_HOST.
     Raises RefusedHostError for a refused host, with or without keys.
 
     The trace user is, in order: LANGFUSE_USER_ID or CC_LANGFUSE_USER_ID (env var or
     plugin userConfig), the Claude login email, `git config user.email` in cwd, or None.
     When a source exists but cannot be read, the user is None and user_warning says why.
-    The repo name is read_repo_name(cwd), and fails as that does. The plugin versions
-    are read_plugin_versions() for the repo's main checkout, or for cwd outside git,
-    and fail as that does. The work item branch pattern is
+    The repo name is read_repo_name(checkout), and fails as that does. The plugin
+    versions are read_plugin_versions() for the repo's main checkout, or for
+    checkout.root outside git, and fail as that does. The work item branch pattern is
     CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN (env var or plugin userConfig); a refused
     pattern is logged and left unset.
     """
-    env = repo_settings_env(cwd)
+    env = repo_settings_env(checkout)
     host = env.get("LANGFUSE_BASE_URL") or env.get("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
     check_host_allowed(host)
 
@@ -356,10 +357,10 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         secret_key=secret_key,
         host=host,
         user_id=user_id,
-        repo_name=read_repo_name(cwd),
+        repo_name=read_repo_name(checkout),
         trace_seed=trace_seed,
         user_warning=user_warning,
-        plugin_versions=read_plugin_versions(find_main_checkout(cwd) or session_dir(cwd)),
+        plugin_versions=read_plugin_versions(checkout.main or checkout.root),
         work_item_branch_pattern=read_work_item_branch_pattern(),
     )
 
@@ -524,29 +525,28 @@ def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
 
 
 # ----------------- No-keys message -----------------
-def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
+def read_no_keys_steps(checkout: Checkout) -> Optional[str]:
     """The manual steps for this system, or None on a system with no text.
 
-    cwd: the session's directory; the repo's own texts are looked up at the root of
-    its git checkout (see find_repo_root).
+    The repo's own texts are looked up at checkout.root.
     A text that exists but cannot be read gives a line naming the file instead.
     """
     name = NO_KEYS_STEPS_NAMES.get(sys.platform)
     if name is None:
         return None
-    repo_text = find_repo_root(cwd) / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
+    repo_text = checkout.root / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
     path = repo_text if repo_text.exists() else NO_KEYS_STEPS_DIR / f"{name}.txt"
     try:
         return path.read_text(encoding="utf-8").rstrip("\n")
     except (OSError, UnicodeDecodeError) as e:
         return f"Langfuse: cannot read {path}: {e}"
 
-def format_no_keys_message(cwd: Optional[str]) -> str:
+def format_no_keys_message(checkout: Checkout) -> str:
     lines = [NO_KEYS_WARNING]
     if any(read_keys(_opt)):
         lines.append(OUTSIDE_KEYS_NOT_USED)
     lines.append(f"To add keys, run {SETUP_COMMAND}, or by hand:")
-    steps = read_no_keys_steps(cwd)
+    steps = read_no_keys_steps(checkout)
     if steps is not None:
         lines.append(steps)
     return "\n".join(lines)
@@ -3691,8 +3691,9 @@ def main() -> int:
     payload = read_hook_payload()
     is_session_start = is_session_start_hook_payload(payload)
     is_setup_check = is_setup_check_hook_payload(payload)
+    checkout = find_checkout(session_dir(payload.get("cwd")), log=debug)
     try:
-        config = get_langfuse_config(payload.get("cwd"))
+        config = get_langfuse_config(checkout, payload.get("cwd"))
     except RefusedHostError as e:
         info(str(e))
         if is_session_start:
@@ -3710,7 +3711,7 @@ def main() -> int:
 
     # The setup skill reads "no output" as "the hook cannot run", so this always answers.
     if is_setup_check:
-        if repo_settings_hold_keys(payload.get("cwd")):
+        if config is not None:
             print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
         else:
             print(json.dumps({}))
@@ -3719,7 +3720,7 @@ def main() -> int:
     # SessionStart exists only to say, once, that this session goes untraced.
     if is_session_start:
         if config is None:
-            print(json.dumps({"systemMessage": format_no_keys_message(payload.get("cwd"))}))
+            print(json.dumps({"systemMessage": format_no_keys_message(checkout)}))
         return 0
 
     if config is not None:
