@@ -916,6 +916,12 @@ class TurnAssemblyState:
     tool_use_timestamps_by_id: Dict[str, Any] = field(default_factory=dict)
     injected_by_tool_id: Dict[str, str] = field(default_factory=dict)
     current_rows: List[Dict[str, Any]] = field(default_factory=list)
+    # Set at a turn-end row (is_turn_end_row); a later notification or hand-back then
+    # starts a new turn instead of joining this one.
+    turn_ended: bool = False
+    # Each turn closed earlier in the batch, by each call it made, so a result that
+    # arrives in a later turn still reaches the call's own turn.
+    closed_turns_by_call_id: Dict[str, Turn] = field(default_factory=dict)
 
 
 def _extract_xml_tag_value(text: str, tag: str) -> Optional[str]:
@@ -929,9 +935,12 @@ def _extract_xml_tag_value(text: str, tag: str) -> Optional[str]:
         return None
     return text[i + len(start):j]
 
-def is_task_notification_row(row: Dict[str, Any]) -> bool:
+def has_task_notification_origin(row: Dict[str, Any]) -> bool:
     origin = row.get("origin")
-    if isinstance(origin, dict) and origin.get("kind") == "task-notification":
+    return isinstance(origin, dict) and origin.get("kind") == "task-notification"
+
+def is_task_notification_row(row: Dict[str, Any]) -> bool:
+    if has_task_notification_origin(row):
         return True
 
     notification_text = extract_text_from_content(get_content_from_row(row)).lstrip()
@@ -1031,19 +1040,19 @@ def resolve_deferred_agent_turns(
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
     agent_calls: Optional[Dict[str, AgentCalls]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Move task-notification rows from the batch to their deferred turns, and copy
-    each hand-back row to every deferred turn that waits for a call whose round it
-    ends (calls_ended_by_hand_back). Returns the deferred turns' entries that no
-    longer wait, and the batch rows that stay in the batch.
+    """Copy each task-notification row of the batch to its deferred turn, and each
+    hand-back row to every deferred turn that waits for a call whose round it ends
+    (calls_ended_by_hand_back). Returns the deferred turns' entries that no longer
+    wait, and the batch rows.
 
     agent_calls maps an agent's id to its AgentCalls.
     Deferred rows are never spliced into the batch (a user row mid-batch would
     cut the current turn in half); resolved turns are returned for isolated
-    assembly. Notifications matching a tool_use in the batch stay there, and
-    ones that cannot be attributed yet (task-id-only, subagent meta.json not
-    on disk) are stashed in the session state and retried on later runs
-    instead of being swallowed by the turn assembly. Hand-back rows also stay
-    in the batch, for the calls to their agent that the batch's turns make.
+    assembly. Notifications that cannot be attributed yet (task-id-only,
+    subagent meta.json not on disk) are stashed in the session state and
+    retried on later runs. Every notification and hand-back row also stays in
+    the batch, which returns as the second value: there it gives its result to
+    a call of the batch's own turns, or starts the session's reply to it.
     """
     remaining_rows: List[Dict[str, Any]] = []
     stashed_notifications: List[Dict[str, Any]] = []
@@ -1082,22 +1091,19 @@ def resolve_deferred_agent_turns(
         route_to_pending_turn(pending_turn, row, [tool_use_id])
 
     for row in rows:
+        remaining_rows.append(row)
         if hand_back_agent_id(row) is not None:
             route_hand_back(row)
-            remaining_rows.append(row)
             continue
         if not is_task_notification_row(row):
-            remaining_rows.append(row)
             continue
         tool_use_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
         if tool_use_id is None:
             stashed_notifications.append(row)
             continue
         pending_turn = _find_pending_agent_turn(session_state, tool_use_id)
-        if pending_turn is None:
-            remaining_rows.append(row)
-            continue
-        route_to_pending_turn(pending_turn, row, [tool_use_id])
+        if pending_turn is not None:
+            route_to_pending_turn(pending_turn, row, [tool_use_id])
 
     session_state.pending_task_notifications = stashed_notifications[-MAX_PENDING_TASK_NOTIFICATIONS:]
 
@@ -1318,29 +1324,70 @@ def add_hand_back_row(
     state: TurnAssemblyState,
     agent_calls: Optional[Dict[str, AgentCalls]] = None,
 ) -> bool:
-    """Take a hand-back row: each call of the current turn whose round it ends
-    (calls_ended_by_hand_back) and that has no final result yet gets the hand-back as
-    its final result. agent_calls maps an agent's id to its AgentCalls."""
+    """Take a hand-back row: each call whose round it ends (calls_ended_by_hand_back),
+    made by the current turn or by a turn closed earlier in the batch, and that has no
+    final result yet, gets the hand-back as its final result. The row joins the
+    current turn's rows, and the rows of each closed turn it gave a result to.
+    agent_calls maps an agent's id to its AgentCalls."""
     if hand_back_agent_id(row) is None:
         return False
 
-    if state.current_turn_user_row is None:
-        return True
-
     report = extract_text_from_content(get_content_from_row(row))
+    closed_turns_given: Dict[int, Turn] = {}
     for tool_use_id in calls_ended_by_hand_back(row, agent_calls or {}):
-        tool_result_entry = state.tool_results_by_id.get(tool_use_id)
+        holder = holder_of_call(tool_use_id, state)
+        tool_result_entry = holder.tool_results_by_id.get(tool_use_id)
         if isinstance(tool_result_entry, dict) and tool_result_entry.get("final_content") is None:
             set_final_result(tool_result_entry, report, row)
             tool_result_entry["final_from_hand_back"] = True
+            if holder.closed_turn is not None:
+                closed_turns_given[id(holder.closed_turn)] = holder.closed_turn
+    for closed_turn in closed_turns_given.values():
+        closed_turn.rows.append(row)
     state.current_rows.append(row)
     return True
+
+@dataclass
+class CallHolder:
+    """The tool results and call times of the turn that holds a call's result, and
+    that turn itself when it is a turn closed earlier in the batch (None for the open
+    turn)."""
+    tool_results_by_id: Dict[str, Any]
+    tool_use_timestamps_by_id: Dict[str, Any]
+    closed_turn: Optional[Turn]
+
+def holder_of_call(call_id: str, state: TurnAssemblyState) -> CallHolder:
+    """The turn that holds call_id's result: the turn closed earlier in the batch that
+    made the call, else the open turn."""
+    closed_turn = state.closed_turns_by_call_id.get(call_id)
+    if closed_turn is not None:
+        return CallHolder(closed_turn.tool_results_by_id, closed_turn.tool_use_timestamps_by_id, closed_turn)
+    return CallHolder(state.tool_results_by_id, state.tool_use_timestamps_by_id, None)
+
+def give_notification_result(row: Dict[str, Any], tool_use_id: str, holder: CallHolder) -> None:
+    """Gives the notification row's result to the call tool_use_id in holder's turn.
+    Does nothing when that turn did not make the call."""
+    existing_result = holder.tool_results_by_id.get(tool_use_id)
+    if isinstance(existing_result, dict):
+        # A hand-back came first and ended the round; the notification after it
+        # must not move the round's end or replace the agent's report.
+        if not existing_result.get("final_from_hand_back"):
+            set_final_result(existing_result, get_result_from_task_notification(row), row)
+    elif tool_use_id in holder.tool_use_timestamps_by_id:
+        holder.tool_results_by_id[tool_use_id] = {
+            "content": get_result_from_task_notification(row),
+            "timestamp": row.get("timestamp"),
+        }
 
 def add_task_notification_row(
     row: Dict[str, Any],
     state: TurnAssemblyState,
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
 ) -> bool:
+    """Take a task-notification row: the call it names gets its result when the current
+    turn made that call. When a turn closed earlier in the batch made it, that turn
+    gets the result and the row. The row also joins the current turn's rows. With no
+    turn open, the row is taken and dropped."""
     if not is_task_notification_row(row):
         return False
 
@@ -1352,17 +1399,10 @@ def add_task_notification_row(
         state.current_rows.append(row)
         return True
 
-    existing_result = state.tool_results_by_id.get(tool_use_id)
-    if isinstance(existing_result, dict):
-        # A hand-back came first and ended the round; the notification after it
-        # must not move the round's end or replace the agent's report.
-        if not existing_result.get("final_from_hand_back"):
-            set_final_result(existing_result, get_result_from_task_notification(row), row)
-    else:
-        state.tool_results_by_id[tool_use_id] = {
-            "content": get_result_from_task_notification(row),
-            "timestamp": row.get("timestamp"),
-        }
+    holder = holder_of_call(tool_use_id, state)
+    give_notification_result(row, tool_use_id, holder)
+    if holder.closed_turn is not None:
+        holder.closed_turn.rows.append(row)
     state.current_rows.append(row)
     return True
 
@@ -1426,6 +1466,7 @@ def start_new_turn(row: Dict[str, Any], state: TurnAssemblyState) -> None:
     state.tool_use_timestamps_by_id = {}
     state.injected_by_tool_id = {}
     state.current_rows = [row]
+    state.turn_ended = False
 
 
 def add_assistant_row(row: Dict[str, Any], state: TurnAssemblyState) -> None:
@@ -1446,6 +1487,29 @@ def add_assistant_row(row: Dict[str, Any], state: TurnAssemblyState) -> None:
     state.current_rows.append(row)
 
 
+TURN_END_SUBTYPES = ("turn_duration", "stop_hook_summary")
+
+def is_turn_end_row(row: Dict[str, Any]) -> bool:
+    """True for the system row Claude Code writes when a turn of the session ends."""
+    return row.get("type") == "system" and row.get("subtype") in TURN_END_SUBTYPES
+
+def starts_turn_when_none_is_open(row: Dict[str, Any]) -> bool:
+    """True for a row that starts a turn when no turn is open or the open one has
+    ended: the user row of a task notification, or a hand-back row."""
+    is_notification = row.get("type") == "user" and has_task_notification_origin(row)
+    return is_notification or hand_back_agent_id(row) is not None
+
+def close_and_start_turn(row: Dict[str, Any], state: TurnAssemblyState, turns: List[Turn]) -> None:
+    """Add the open turn, if it can be built, to turns and to
+    state.closed_turns_by_call_id, and start a new turn at row."""
+    turn = build_turn_from_state(state)
+    if turn is not None:
+        turns.append(turn)
+        for call_id in turn.tool_use_timestamps_by_id:
+            state.closed_turns_by_call_id[call_id] = turn
+    start_new_turn(row, state)
+
+
 def build_turns(
     rows: List[Dict[str, Any]],
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
@@ -1454,6 +1518,9 @@ def build_turns(
     """
     Groups incremental transcript rows into turns:
     user (non-tool-result) -> assistant messages -> (tool_result rows, possibly interleaved)
+    A task notification or hand-back also starts a turn when no turn is open or the
+    open one has ended (starts_turn_when_none_is_open); the open turn first gets its
+    result.
     Uses:
     - assistant rows merged by message.id (all content blocks concatenated)
     - tool results dedupe by tool_use_id (latest wins)
@@ -1463,6 +1530,18 @@ def build_turns(
     state = TurnAssemblyState()
 
     for row in rows:
+        # A turn-end row may be isMeta, so it goes before the injected-context check.
+        if is_turn_end_row(row):
+            state.turn_ended = True
+            continue
+
+        turn_is_open = state.current_turn_user_row is not None
+        if starts_turn_when_none_is_open(row) and (not turn_is_open or state.turn_ended):
+            if turn_is_open and not add_hand_back_row(row, state, agent_calls):
+                add_task_notification_row(row, state, task_id_to_tool_use_id)
+            close_and_start_turn(row, state, turns)
+            continue
+
         # A hand-back row is also isMeta, so it goes before the injected-context check.
         if add_hand_back_row(row, state, agent_calls):
             continue
@@ -1479,11 +1558,7 @@ def build_turns(
         role = get_user_or_assistant_role_from_row(row)
 
         if role == "user":
-            turn = build_turn_from_state(state)
-            if turn is not None:
-                turns.append(turn)
-
-            start_new_turn(row, state)
+            close_and_start_turn(row, state, turns)
             continue
 
         if role == "assistant":

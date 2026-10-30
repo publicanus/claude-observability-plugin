@@ -1,6 +1,8 @@
 """Pins how an agent's rounds reach Langfuse: the launch prompt and each message the
 main session sends it with SendMessage start a round, and each round is a run (a
-"Subagent: ..." observation) in the trace of the turn that started it.
+"Subagent: ..." observation) in the trace of the turn that started it. Also pins how
+the session's reply to an agent's notification or hand-back, after its turn has ended,
+reaches Langfuse as a trace of its own.
 
 Each test writes a main transcript and one agent transcript in a temp folder (the
 `continued_agent` fixture), runs the hook over them one or more times, and reads what
@@ -10,6 +12,7 @@ the fake Langfuse received.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -245,8 +248,10 @@ def continued_agent(tmp_path: Path) -> ContinuedAgent:
     return ContinuedAgent(transcript, agent_transcript)
 
 
-def run_hook(hook_module: Any, fake_langfuse: Any, session: ContinuedAgent, flush: bool = False) -> int:
-    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop")
+def run_hook(hook_module: Any, fake_langfuse: Any, session: ContinuedAgent, flush: bool = False,
+             **config_fields: Any) -> int:
+    config = hook_module.LangfuseConfig("public", "secret", "https://example.test", "user-1", repo_name="shop",
+                                        **config_fields)
     return hook_module.emit_new_turns_from_transcript(
         fake_langfuse, config, SESSION_ID, session.transcript, flush_deferred_agent_turns=flush,
     )
@@ -611,8 +616,240 @@ def test_a_hand_back_that_ends_an_earlier_round_leaves_a_later_round_waiting(
         agent_says("main-done", "Both are in.", 122),
     )
 
-    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
     assert run_summary(traces(fake_langfuse)[1]) == [
         (f"Subagent: {DESCRIPTION} - round 2", 2, ["Round 2, report."]),
         (f"Subagent: {DESCRIPTION} - round 3", 3, ["Round 3, first.", "Round 3, report."]),
     ]
+
+
+# ----------------- The reply to an agent's result -----------------
+# The launch turn has ended when the agent's notification or hand-back arrives, and the
+# session answers it: that reply is a turn of its own, started by the notification or
+# hand-back.
+
+def round_1_notification() -> Dict[str, Any]:
+    return notification("main-note-1", LAUNCH, "Round 1 done.", 30)
+
+
+def queued_notification(tool_use_id: str, seconds: float) -> Dict[str, Any]:
+    """The queue row Claude Code writes for a notification before its user row; it has
+    no gitBranch."""
+    return {"type": "queue-operation", "timestamp": at(seconds), "operation": "append", "content": (
+        f"<task-notification><task-id>{AGENT_ID}</task-id><tool-use-id>{tool_use_id}</tool-use-id>"
+        f"<result>Round 1 done.</result></task-notification>"
+    )}
+
+
+def turn_end(seconds: float) -> Dict[str, Any]:
+    return {"type": "system", "subtype": "stop_hook_summary", "timestamp": at(seconds),
+            "uuid": f"turn-end-{seconds}", "isMeta": True}
+
+
+def reply(start: float) -> List[Dict[str, Any]]:
+    """A reply that runs two tools and then answers."""
+    return [
+        assistant_row("reply-1", [text("Reading."), tool_use("toolu_reply_1", "Bash", {"command": "ls"})], start + 1),
+        tool_result_row("reply-1-result", "toolu_reply_1", "a.txt", start + 2, {"stdout": "a.txt"}),
+        assistant_row("reply-2", [tool_use("toolu_reply_2", "Bash", {"command": "pwd"})], start + 3),
+        tool_result_row("reply-2-result", "toolu_reply_2", "/repo", start + 4, {"stdout": "/repo"}),
+        agent_says("reply-3", "Done replying.", start + 5),
+    ]
+
+
+def generation_names(observations: List[Any]) -> List[str]:
+    return [o.name for o in observations if o.name.startswith("LLM Call")]
+
+
+def root_input(trace: List[Any]) -> Any:
+    return trace[0].kwargs["input"]["content"]
+
+
+def reply_after_waiting_launch(hook_module: Any, fake_langfuse: Any, session: ContinuedAgent,
+                               result_row: Dict[str, Any]) -> int:
+    """Runs the hook over a launch turn that waits, then over result_row and a reply;
+    returns the number of traces the second run sent."""
+    session.add_agent(*round_1())
+    session.add_main(*launch_turn())
+    assert run_hook(hook_module, fake_langfuse, session) == 0
+    session.add_main(result_row, *reply(30))
+    return run_hook(hook_module, fake_langfuse, session)
+
+
+@pytest.mark.parametrize("result_row", [
+    pytest.param(round_1_notification(), id="notification"),
+    pytest.param(hand_back("main-hand-back-1", "Round 1 report.", 30), id="hand-back"),
+])
+def test_the_reply_to_an_agent_result_is_a_trace_with_that_result_as_input(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent, result_row
+):
+    assert reply_after_waiting_launch(hook_module, fake_langfuse, continued_agent, result_row) == 2
+
+    assert root_input(traces(fake_langfuse)[1]) == result_row["message"]["content"]
+
+
+def test_a_reply_in_the_same_batch_as_its_launch_turn_is_a_trace_of_its_own(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(
+        *launch_turn(),
+        turn_end(4),
+        queued_notification(LAUNCH, 29),
+        round_1_notification(),
+        *reply(30),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+
+    launch_trace, reply_trace = traces(fake_langfuse)
+    assert generation_names(launch_trace) == ["LLM Call 1", "LLM Call 2"]
+    assert root_input(reply_trace) == round_1_notification()["message"]["content"]
+
+
+def test_the_reply_trace_shows_each_model_call_with_usage_and_each_tool(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    reply_after_waiting_launch(hook_module, fake_langfuse, continued_agent, round_1_notification())
+
+    reply_trace = traces(fake_langfuse)[1]
+    generations = [o for o in reply_trace if o.name.startswith("LLM Call")]
+    assert [g.name for g in generations] == ["LLM Call 1", "LLM Call 2", "LLM Call 3"]
+    assert all(g.kwargs.get("usage_details") for g in generations)
+    assert [o.name for o in reply_trace if o.name.startswith("Tool:")] == ["Tool: Bash", "Tool: Bash"]
+
+
+def test_the_waiting_launch_turn_gets_the_agent_result_and_the_reply_does_not(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    reply_after_waiting_launch(hook_module, fake_langfuse, continued_agent, round_1_notification())
+
+    launch_trace, reply_trace = traces(fake_langfuse)
+    assert root_input(launch_trace) == "Launch the researcher."
+    assert run_summary(launch_trace) == [(f"Subagent: {DESCRIPTION}", 1, ["Round 1, first.", "Round 1, report."])]
+    assert "Tool: Agent" not in [o.name for o in reply_trace]
+
+
+def test_a_reply_to_a_notification_after_its_launch_turn_was_sent_is_still_a_trace(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn())
+    run_hook(hook_module, fake_langfuse, continued_agent)
+    continued_agent.add_main(hand_back("main-hand-back-1", "Round 1 report.", 25))
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+
+    continued_agent.add_main(round_1_notification(), *reply(30))
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+    assert root_input(traces(fake_langfuse)[1]) == round_1_notification()["message"]["content"]
+
+
+def test_the_reply_trace_carries_the_details_of_a_prompt_trace(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    config = {"plugin_versions": {"mate-core": "8.9.0"}, "work_item_branch_pattern": re.compile(r"issue-(\d+)")}
+    continued_agent.add_agent(*round_1(), *round_2())
+    continued_agent.add_main(*launch_turn())
+    run_hook(hook_module, fake_langfuse, continued_agent, **config)
+    note = round_1_notification()
+    note["gitBranch"] = "issue-60"
+    continued_agent.add_main(
+        queued_notification(LAUNCH, 29),
+        note,
+        assistant_row("main-skill", [tool_use("toolu_skill", "Skill", {"skill": "mate-core:writing-craft"})], 31),
+        tool_result_row("main-skill-result", "toolu_skill", "Loaded.", 32, {"success": True}),
+        send_call("main-send-2", SEND_2, "Message for round 2.", 101),
+        send_result("main-send-result-2", SEND_2, 102),
+        agent_says("main-sent-2", "Sent.", 103),
+        notification("main-note-2", SEND_2, "Round 2 done.", 130),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent, **config) == 2
+
+    reply_trace = traces(fake_langfuse)[1]
+    reply_root = reply_trace[0]
+    assert "work-item:60" in reply_root.propagated["tags"]
+    assert reply_root.kwargs["metadata"]["component"] == "session"
+    assert reply_root.kwargs["metadata"]["plugins"] == [{"name": "mate-core", "version": "8.9.0"}]
+    assert [run.kwargs["metadata"]["component"] for run, _ in runs(reply_trace)] == [AGENT_TYPE]
+
+
+def test_a_reply_and_the_next_prompt_sent_at_session_end_are_two_traces(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_main(
+        notification("main-note-1", "toolu_already_sent", "Done.", 30),
+        *reply(30),
+        user_row("main-user-2", "Next question.", 50),
+        agent_says("main-answer-2", "Next answer.", 51),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent, flush=True) == 2
+
+    assert [generation_names(trace) for trace in traces(fake_langfuse)] == [
+        ["LLM Call 1", "LLM Call 2", "LLM Call 3"],
+        ["LLM Call 1"],
+    ]
+
+
+OTHER_LAUNCH = "toolu_launch_other"
+
+
+def two_agent_launch_turn() -> List[Dict[str, Any]]:
+    """A turn that launches the usual agent and one other background agent."""
+    return [
+        user_row("main-user-1", "Launch two agents.", 0),
+        assistant_row("main-launch", [
+            tool_use(LAUNCH, "Agent", {"description": DESCRIPTION, "prompt": "Research the topic.",
+                                       "subagent_type": AGENT_TYPE, "run_in_background": True}),
+            tool_use(OTHER_LAUNCH, "Agent", {"description": "Other", "prompt": "Do the other thing.",
+                                             "subagent_type": "general-purpose", "run_in_background": True}),
+        ], 1),
+        launch_result(2),
+        tool_result_row("main-launch-other-result", OTHER_LAUNCH, "Async agent launched successfully.", 2.1,
+                        {"status": "async_launched", "isAsync": True, "agentId": "a-other"}),
+        agent_says("main-launched", "Both are running.", 3),
+    ]
+
+
+@pytest.mark.parametrize("second_result", [
+    pytest.param(round_1_notification(), id="notification"),
+    pytest.param(hand_back("main-hand-back-1", "Round 1 report.", 33), id="hand-back"),
+])
+def test_a_result_that_arrives_during_the_reply_still_reaches_the_launch_turn_of_the_same_batch(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent, second_result
+):
+    continued_agent.add_agent(*round_1())
+    reply_rows = reply(30)
+    continued_agent.add_main(
+        *two_agent_launch_turn(),
+        turn_end(4),
+        notification("main-note-other", OTHER_LAUNCH, "Other done.", 30),
+        *reply_rows[:2],
+        second_result,
+        *reply_rows[2:],
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+
+    assert [root_input(trace) for trace in traces(fake_langfuse)] == [
+        "Launch two agents.", notification("main-note-other", OTHER_LAUNCH, "Other done.", 30)["message"]["content"],
+    ]
+
+
+def test_a_result_that_arrives_during_the_next_prompt_still_reaches_the_launch_turn_of_the_same_batch(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(
+        *launch_turn(),
+        user_row("main-user-2", "Next question.", 20),
+        agent_says("main-working-2", "Working on it.", 21),
+        round_1_notification(),
+        agent_says("main-answer-2", "Next answer.", 31),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+
+    assert [root_input(trace) for trace in traces(fake_langfuse)] == ["Launch the researcher.", "Next question."]

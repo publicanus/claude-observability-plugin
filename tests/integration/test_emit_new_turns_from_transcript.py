@@ -19,10 +19,10 @@ def test_emit_new_turns_from_completed_async_agent_transcript(
         transcript,
     )
 
-    assert emitted == 1
+    assert emitted == 2
     assert any(observation.name == "Conversational Turn" for observation in fake_langfuse.observations)
     state = json.loads((isolated_hook_state / "langfuse_state.json").read_text(encoding="utf-8"))
-    assert next(iter(state.values()))["turn_count"] == 1
+    assert next(iter(state.values()))["turn_count"] == 2
     assert next(iter(state.values()))["pending_agent_turns"] == []
 
 

@@ -119,8 +119,8 @@ def test_completed_async_agent_turn_is_ready_to_emit(
     turns, state = hook_module.get_new_turns_from_transcript(transcript, state, subagents)
     turns_to_emit = hook_module.get_turns_to_emit(turns, state)
 
-    assert len(turns) == 1
-    assert len(turns_to_emit) == 1
+    assert len(turns) == 2
+    assert len(turns_to_emit) == 2
     assert state.pending_agent_turns == []
     result = turns[0].tool_results_by_id["toolu_agent_complete"]
     assert result["final_content"] == "Subagent summary is ready."
@@ -176,7 +176,7 @@ def test_turn_waiting_on_multiple_agents_resolves_only_after_all_notifications(h
     # One of two agents finished: the notification is captured, but the turn
     # keeps waiting for the second agent instead of being emitted half-done.
     assert resolved == []
-    assert remaining == []
+    assert remaining == [first_notification]
     assert len(state.pending_agent_turns) == 1
     assert state.pending_agent_turns[0]["pending_tool_use_ids"] == ["toolu_agent_b"]
     assert state.pending_agent_turns[0]["resolved_tool_use_ids"] == ["toolu_agent_a"]
@@ -187,7 +187,7 @@ def test_turn_waiting_on_multiple_agents_resolves_only_after_all_notifications(h
     )
     resolved, remaining = hook_module.resolve_deferred_agent_turns([second_notification], state)
 
-    assert remaining == []
+    assert remaining == [second_notification]
     assert state.pending_agent_turns == []
     assert len(resolved) == 1
     assert resolved[0]["rows"] == deferred_rows
@@ -212,9 +212,9 @@ def test_duplicate_notifications_for_same_agent_are_routed_to_the_deferred_turn(
     resolved, remaining = hook_module.resolve_deferred_agent_turns(notifications, state)
 
     # Real transcripts often carry two notification rows per task; the second
-    # one must follow the first into the deferred turn instead of leaking into
-    # the current batch as an orphan row.
-    assert remaining == []
+    # one must follow the first into the deferred turn. Both also stay in the
+    # batch, where they start the session's reply to them.
+    assert remaining == notifications
     assert state.pending_agent_turns == []
     assert len(resolved) == 1
     assert resolved[0]["rows"][-2:] == notifications
@@ -339,6 +339,7 @@ def test_mid_turn_notification_does_not_corrupt_the_surrounding_turn(hook_module
     # The current turn keeps ALL of its assistant messages.
     assert current_turn.user_msg["uuid"] == "user-2"
     assert [m["message"]["id"] for m in current_turn.assistant_msgs] == ["msg-3", "msg-4"]
+    assert "toolu_bg" not in current_turn.tool_results_by_id
 
 
 def test_notification_before_first_assistant_row_does_not_drop_the_turn(hook_module, tmp_path):
