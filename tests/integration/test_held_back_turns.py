@@ -18,6 +18,7 @@ import pytest
 
 from test_continued_agent_runs import (
     LAUNCH,
+    SEND_2,
     SESSION_ID,
     ContinuedAgent,
     agent_says,
@@ -25,6 +26,9 @@ from test_continued_agent_runs import (
     launch_turn,
     notification,
     round_1,
+    round_2,
+    send_call,
+    send_result,
     user_row,
 )
 
@@ -155,3 +159,49 @@ def test_an_sdk_without_the_root_mark_logs_why_a_turn_is_not_sent(
 
     assert sent_trace_ids_by_question(fake_langfuse) == {}
     assert "langfuse._client.attributes" in Path(hook_module.LOG_FILE).read_text(encoding="utf-8")
+
+
+def note_text(row: Dict[str, Any]) -> str:
+    return row["message"]["content"]
+
+
+def test_a_reply_to_an_agent_result_is_numbered_after_its_launch_turn_and_is_the_latest_trace(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    rest_of_round_1 = start_session(continued_agent, *launch_turn())
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+    note = notification("main-note-1", LAUNCH, "Round 1 done.", 30)
+    continued_agent.add_agent(*rest_of_round_1)
+    continued_agent.add_main(note, agent_says("main-reply", "Replied.", 31))
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+
+    assert sent_trace_ids_by_question(fake_langfuse) == {
+        "Launch the researcher.": hook_module.derive_turn_trace_id(SEED, 1),
+        note_text(note): hook_module.derive_turn_trace_id(SEED, 2),
+    }
+    entry = session_entry(hook_module, continued_agent)
+    assert entry["turn_count"] == 2
+    assert entry["latest_trace_id"] == hook_module.derive_turn_trace_id(SEED, 2)
+
+
+def test_a_reply_that_waits_for_an_agent_is_the_latest_trace_and_is_sent_under_that_id(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    rest_of_round_1 = start_session(continued_agent, *launch_turn())
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+    note = notification("main-note-1", LAUNCH, "Round 1 done.", 30)
+    continued_agent.add_agent(*rest_of_round_1, *round_2())
+    continued_agent.add_main(
+        note,
+        send_call("main-send-2", SEND_2, "Message for round 2.", 101),
+        send_result("main-send-result-2", SEND_2, 102),
+        agent_says("main-sent-2", "Sent.", 103),
+    )
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+    latest_while_reply_waits = session_entry(hook_module, continued_agent)["latest_trace_id"]
+
+    continued_agent.add_main(notification("main-note-2", SEND_2, "Round 2 done.", 130))
+    run_hook(hook_module, fake_langfuse, continued_agent, SEED)
+
+    assert latest_while_reply_waits == hook_module.derive_turn_trace_id(SEED, 2)
+    assert sent_trace_ids_by_question(fake_langfuse)[note_text(note)] == latest_while_reply_waits
