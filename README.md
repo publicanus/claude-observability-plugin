@@ -173,7 +173,7 @@ turn **before** the trace exists.
 The seed also keeps a turn from showing up twice in Langfuse when the hook could not save its progress and sends that turn again on a later run.
 
 With the seed set, the trace ID for turn `N` (1-based, counted per session across hook
-runs) is derived as:
+runs, in the order the turns were typed) is derived as:
 
 ```python
 from langfuse import Langfuse
@@ -220,9 +220,11 @@ trace ID (fail-open, like the rest of the hook). Unset or empty seed = unchanged
 
 Whether or not a seed is set, each session's entry in
 `~/.claude/state/langfuse_state.json` carries `latest_trace_id`: the trace ID
-actually emitted for that session's most recent turn. A same-machine consumer
-that knows the session ID and transcript path can read it directly instead of
-polling the Langfuse API:
+of that session's most recent turn. A turn that waits for a background agent
+gets its trace ID when the hook first sees it, but is sent only when the agent
+finishes or the session ends, so that trace may not be in Langfuse yet. A
+same-machine consumer that knows the session ID and transcript path can read it
+directly instead of polling the Langfuse API:
 
 ```python
 import hashlib, json

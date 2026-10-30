@@ -179,7 +179,7 @@ def test_run_queues_a_well_formed_record(
     )
 
     assert exit_code == 0
-    assert "mate-record's hook will attach it" in capsys.readouterr().out
+    assert "attaches it once that trace is in Langfuse" in capsys.readouterr().out
     records = json.loads(pending_file.read_text(encoding="utf-8"))
     assert len(records) == 1
     record = records[0]

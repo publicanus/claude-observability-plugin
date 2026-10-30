@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 # ----------------- Langfuse import (fail-open) -----------------
 try:
     from langfuse import Langfuse, propagate_attributes
+    from langfuse._client.attributes import LangfuseOtelSpanAttributes
     from opentelemetry import trace as otel_trace_api
     from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
     from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -597,8 +598,9 @@ def load_hook_state() -> Dict[str, Any]:
 class SessionState:
     offset: int = 0       # Last byte read from the transcript file.
     buffer: str = ""      # Partial JSONL line kept between hook runs.
-    turn_count: int = 0   # Turns already emitted for this session.
-    latest_trace_id: Optional[str] = None  # Trace id emitted for the most recent turn.
+    turn_count: int = 0   # Turns numbered so far in this session, sent or held back.
+    # Trace id of the session's newest turn; a held-back turn's trace is not sent yet.
+    latest_trace_id: Optional[str] = None
     pending_agent_turns: List[Dict[str, Any]] = field(default_factory=list)
     # Task-notification rows whose tool_use_id could not be resolved yet
     # (task-id-only and the subagent meta.json not on disk); retried each run.
@@ -900,6 +902,11 @@ class Turn:
     # belongs to, taken from isMeta rows carrying sourceToolUseID.
     injected_by_tool_id: Dict[str, str]
     rows: List[Dict[str, Any]]
+    # The turn's number in the session, given by number_new_turns.
+    number: Optional[int] = None
+    # The trace id a held-back turn is given before it is sent; once a turn is
+    # sent, the id its trace got.
+    trace_id: Optional[str] = None
 
 @dataclass
 class TurnAssemblyState:
@@ -1024,10 +1031,11 @@ def resolve_deferred_agent_turns(
     session_state: SessionState,
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
     agent_calls: Optional[Dict[str, AgentCalls]] = None,
-) -> Tuple[List[List[Dict[str, Any]]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Move task-notification rows from the batch to their deferred turns, and copy
     each hand-back row to every deferred turn that waits for a call whose round it
-    ends (calls_ended_by_hand_back).
+    ends (calls_ended_by_hand_back). Returns the deferred turns' entries that no
+    longer wait, and the batch rows that stay in the batch.
 
     agent_calls maps an agent's id to its AgentCalls.
     Deferred rows are never spliced into the batch (a user row mid-batch would
@@ -1095,7 +1103,7 @@ def resolve_deferred_agent_turns(
     session_state.pending_task_notifications = stashed_notifications[-MAX_PENDING_TASK_NOTIFICATIONS:]
 
     # Pop fully resolved turns in deferral (i.e. chronological) order.
-    resolved_turn_row_lists: List[List[Dict[str, Any]]] = []
+    resolved_turns: List[Dict[str, Any]] = []
     still_pending: List[Dict[str, Any]] = []
     for pending_turn in session_state.pending_agent_turns:
         if not isinstance(pending_turn, dict) or not isinstance(pending_turn.get("rows"), list):
@@ -1103,23 +1111,23 @@ def resolve_deferred_agent_turns(
         if pending_turn.get("pending_tool_use_ids"):
             still_pending.append(pending_turn)
             continue
-        resolved_turn_row_lists.append(pending_turn["rows"])
+        resolved_turns.append(pending_turn)
     session_state.pending_agent_turns = still_pending
 
-    return resolved_turn_row_lists, remaining_rows
+    return resolved_turns, remaining_rows
 
-def pop_all_deferred_agent_turn_row_lists(
+def pop_all_deferred_agent_turns(
     session_state: SessionState,
-) -> List[List[Dict[str, Any]]]:
-    row_lists: List[List[Dict[str, Any]]] = []
+) -> List[Dict[str, Any]]:
+    popped: List[Dict[str, Any]] = []
     for pending_turn in session_state.pending_agent_turns:
         if not isinstance(pending_turn, dict):
             continue
         rows = pending_turn.get("rows")
         if isinstance(rows, list) and rows:
-            row_lists.append(rows)
+            popped.append(pending_turn)
     session_state.pending_agent_turns = []
-    return row_lists
+    return popped
 
 def get_tool_result_text(tool_result_entry: Any) -> str:
     if not isinstance(tool_result_entry, dict):
@@ -1219,11 +1227,42 @@ def get_turns_to_emit(
             session_state.pending_agent_turns.append({
                 "pending_tool_use_ids": pending_agent_tool_use_ids,
                 "rows": turn.rows,
+                "turn_number": turn.number,
+                "trace_id": turn.trace_id,
             })
             debug(f"Deferred agent turn until task notification: {pending_agent_tool_use_ids}")
             continue
         turns_to_emit.append(turn)
     return turns_to_emit
+
+def number_new_turns(
+    turns: List[Turn],
+    session_state: SessionState,
+    continued_rounds: Optional[Dict[str, Dict[str, Any]]],
+    trace_seed: Optional[str],
+) -> List[Turn]:
+    """Gives each turn that has no number yet the session's next turn number, in
+    transcript order, and gives each of those that has an agent call still running
+    its trace id now, so the turn is the session's latest before it is sent.
+
+    Returns the turns that can go on; a turn whose seeded trace id cannot be
+    derived is logged and left out, so it is never sent.
+    """
+    numbered: List[Turn] = []
+    for turn in turns:
+        if turn.number is None:
+            session_state.turn_count += 1
+            turn.number = session_state.turn_count
+            if get_pending_agent_tool_use_ids(turn, continued_rounds):
+                if trace_seed:
+                    turn.trace_id = derive_turn_trace_id(trace_seed, turn.number)
+                else:
+                    turn.trace_id = Langfuse.create_trace_id()
+                if turn.trace_id is None:
+                    info(f"turn {turn.number} is not sent: no trace id could be derived from CC_LANGFUSE_TRACE_SEED")
+                    continue
+        numbered.append(turn)
+    return numbered
 
 
 def add_injected_context_row(row: Dict[str, Any], state: TurnAssemblyState) -> bool:
@@ -1472,15 +1511,15 @@ def get_new_turns_from_transcript(
     task_id_to_tool_use_id = get_task_id_to_tool_use_id(subagent_transcripts_by_tool_use_id)
     agent_calls = get_agent_calls(subagent_transcripts_by_tool_use_id or {}, continued_rounds or {})
 
-    deferred_turn_row_lists, rows = resolve_deferred_agent_turns(
+    deferred_turns, rows = resolve_deferred_agent_turns(
         rows, session_state, task_id_to_tool_use_id, agent_calls
     )
 
     if flush_deferred_agent_turns and session_state.pending_agent_turns:
-        flushed_row_lists = pop_all_deferred_agent_turn_row_lists(session_state)
-        if flushed_row_lists:
-            debug(f"Flushing {len(flushed_row_lists)} deferred agent turn(s) without task notification")
-            deferred_turn_row_lists = deferred_turn_row_lists + flushed_row_lists
+        flushed_turns = pop_all_deferred_agent_turns(session_state)
+        if flushed_turns:
+            debug(f"Flushing {len(flushed_turns)} deferred agent turn(s) without task notification")
+            deferred_turns = deferred_turns + flushed_turns
 
     if flush_deferred_agent_turns and session_state.pending_task_notifications:
         debug(f"Dropping {len(session_state.pending_task_notifications)} unresolved task notification(s) at session end")
@@ -1490,8 +1529,12 @@ def get_new_turns_from_transcript(
     # it is rebuilt in isolation and emitted before the current batch (its
     # rows are always chronologically older than anything in the batch).
     turns: List[Turn] = []
-    for deferred_turn_rows in deferred_turn_row_lists:
-        turns.extend(build_turns(deferred_turn_rows, task_id_to_tool_use_id, agent_calls))
+    for deferred_turn in deferred_turns:
+        rebuilt = build_turns(deferred_turn["rows"], task_id_to_tool_use_id, agent_calls)
+        if rebuilt:
+            rebuilt[0].number = deferred_turn.get("turn_number")
+            rebuilt[0].trace_id = deferred_turn.get("trace_id")
+        turns.extend(rebuilt)
     if rows:
         turns.extend(build_turns(rows, task_id_to_tool_use_id, agent_calls))
 
@@ -1925,7 +1968,11 @@ def _start_root_otel_span(langfuse: Langfuse, name: str, start_ns: Optional[int]
         context = _build_forced_trace_context(forced_trace_id)
         if context is not None:
             try:
-                return langfuse._otel_tracer.start_span(name=name, start_time=start_ns, context=context)
+                otel_span = langfuse._otel_tracer.start_span(name=name, start_time=start_ns, context=context)
+                # Without it Langfuse treats the span as a child of the remote parent,
+                # and the trace shows no input and output of its own.
+                otel_span.set_attribute(LangfuseOtelSpanAttributes.AS_ROOT, True)
+                return otel_span
             except Exception as e:
                 debug(f"start_span with forced trace id {forced_trace_id!r} failed: {e}")
     return langfuse._otel_tracer.start_span(name=name, start_time=start_ns)
@@ -2877,9 +2924,10 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     session = component_of(SESSION_COMPONENT, plugin_versions)
     root_observation_name = "Conversational Turn"
 
-    # Opt-in deterministic trace ids: fail open to the auto-generated id.
-    forced_trace_id: Optional[str] = None
-    if trace_seed:
+    # A held-back turn brings the trace id it was given; otherwise opt-in
+    # deterministic trace ids, failing open to the auto-generated id.
+    forced_trace_id: Optional[str] = turn.trace_id
+    if forced_trace_id is None and trace_seed:
         try:
             forced_trace_id = derive_turn_trace_id(trace_seed, turn_num)
         except Exception as e:
@@ -3244,7 +3292,6 @@ def emit_ready_turns(
     session_id: str,
     transcript_path: Path,
     turns_to_emit: List[Turn],
-    session_state: SessionState,
     *,
     repo_name: str,
     plugin_versions: Dict[str, Optional[str]],
@@ -3257,12 +3304,12 @@ def emit_ready_turns(
     emitted = 0
     for turn in turns_to_emit:
         emitted += 1
-        turn_num = session_state.turn_count + emitted
+        assert turn.number is not None, "number_new_turns numbers every turn before it is sent"
         try:
             trace_id = emit_turn(
                 langfuse,
                 session_id,
-                turn_num,
+                turn.number,
                 turn,
                 transcript_path,
                 repo_name,
@@ -3278,8 +3325,7 @@ def emit_ready_turns(
             # are visible without needing CC_LANGFUSE_DEBUG=true.
             info(f"emit_turn failed: {type(e).__name__}: {e}")
         else:
-            if trace_id:
-                session_state.latest_trace_id = trace_id
+            turn.trace_id = trace_id
     return emitted
 
 def emit_new_turns_from_transcript(
@@ -3311,6 +3357,8 @@ def emit_new_turns_from_transcript(
 
         emitted = 0
         if turns:
+            new_turns = [turn for turn in turns if turn.number is None]
+            turns = number_new_turns(turns, session_state, continued_rounds, config.trace_seed)
             turns_to_emit = get_turns_to_emit(
                 turns,
                 session_state,
@@ -3322,7 +3370,6 @@ def emit_new_turns_from_transcript(
                 session_id,
                 transcript_path,
                 turns_to_emit,
-                session_state,
                 repo_name=config.repo_name,
                 plugin_versions=config.plugin_versions,
                 user_id=config.user_id,
@@ -3331,7 +3378,8 @@ def emit_new_turns_from_transcript(
                 trace_seed=config.trace_seed,
                 work_items=work_items,
             )
-            session_state.turn_count += emitted
+            if new_turns and new_turns[-1].trace_id:
+                session_state.latest_trace_id = new_turns[-1].trace_id
 
         # Persist classic progress immediately: the teammate pass below shares the
         # same state dict, and a failure there must never discard the classic
