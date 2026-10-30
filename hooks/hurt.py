@@ -12,9 +12,11 @@
     --session-id  the session; defaults to CLAUDE_CODE_SESSION_ID
     reads         ~/.claude/projects/*/<session>.jsonl, to find the session's
                   transcript, and ~/.claude/state/langfuse_state.json, where
-                  the hook keeps each session's latest trace id; without an
-                  entry there, the repo's own .claude/settings.local.json of
-                  the working directory, as the hook finds it, to say why
+                  the hook keeps each session's latest trace id; and the repo's
+                  own .claude/settings.local.json, as the hook finds it from
+                  CLAUDE_PROJECT_DIR or the working directory: to store which
+                  Langfuse project the note is for, or to say why nothing was
+                  queued
     stdout        one line: what was queued, or why nothing was
     exit          0 when queued; 1 when nothing was queued; 2 on a wrong argument
     writes        appends one entry to ~/.claude/state/hurt_pending.json, under
@@ -35,9 +37,18 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hurt_annotations import CATEGORIES, load_pending_hurts, save_pending_hurts  # noqa: E402
+from hurt_annotations import CATEGORIES, load_pending_hurts, queue_target, save_pending_hurts  # noqa: E402
 from repo_checkout import find_checkout, project_folder  # noqa: E402
-from settings_file import REPO_SETTINGS_FILE, SETUP_COMMAND, SettingsFileError, repo_settings_hold_keys  # noqa: E402
+from settings_file import (  # noqa: E402
+    REPO_SETTINGS_FILE,
+    SETUP_COMMAND,
+    SettingsFileError,
+    env_holds_keys,
+    read_env_host,
+    read_env_keys,
+    repo_settings_env,
+    repo_settings_hold_keys,
+)
 from state_files import (  # noqa: E402
     HURT_PENDING_FILE,
     HURT_PENDING_LOCK_FILE,
@@ -131,6 +142,7 @@ def append_pending_hurt(
     category: str,
     comment: str,
     session_id: str,
+    target: Optional[str] = None,
     pending_file: Path = HURT_PENDING_FILE,
     lock_file: Path = HURT_PENDING_LOCK_FILE,
     timeout_s: float = HURT_LOCK_TIMEOUT_S,
@@ -138,6 +150,8 @@ def append_pending_hurt(
     """Queues one annotation locally. Never contacts Langfuse; never removes
     or inspects other entries.
 
+    target: hurt_annotations.queue_target() of the session's Langfuse project, stored
+    so only a hook run with those keys attempts it; None stores none.
     Raises TimeoutError when the hook holds the queue for longer than timeout_s.
     """
     record = {
@@ -148,6 +162,8 @@ def append_pending_hurt(
         "created": datetime.now(timezone.utc).isoformat(),
         "session_id": session_id,
     }
+    if target is not None:
+        record["target"] = target
     with FileLock(lock_file, timeout_s=timeout_s):
         records = load_pending_hurts(pending_file)
         records.append(record)
@@ -155,6 +171,15 @@ def append_pending_hurt(
 
 
 # ----------------- CLI -----------------
+
+def read_queue_target() -> Optional[str]:
+    """queue_target() of the keys and address in the repo's own settings file of the
+    working directory; None when it holds no keys. Raises SettingsFileError."""
+    env = repo_settings_env(find_checkout(project_folder(None)))
+    if not env_holds_keys(env):
+        return None
+    return queue_target(read_env_host(env), read_env_keys(env)[0])
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Queue a /hurt annotation for the current session's latest trace.")
@@ -171,6 +196,7 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
     session_id = args.session_id or env.get("CLAUDE_CODE_SESSION_ID")
     try:
         resolution = resolve_latest_trace_id(session_id, projects_dir=PROJECTS_DIR, state_file=STATE_FILE)
+        target = read_queue_target() if resolution.ok else None
     except (StateFileError, SettingsFileError) as e:
         print(f"/hurt: {e}. Nothing queued.")
         return 1
@@ -187,6 +213,7 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
             category=args.category,
             comment=args.comment,
             session_id=session_id or "",
+            target=target,
             pending_file=HURT_PENDING_FILE,
             lock_file=HURT_PENDING_LOCK_FILE,
             timeout_s=HURT_LOCK_TIMEOUT_S,

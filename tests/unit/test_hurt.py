@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import hurt
+import hurt_annotations
 from conftest import write_settings
 from state_files import get_session_state_key
 
@@ -40,6 +41,9 @@ def pending_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     lock_file = tmp_path / "hurt_pending.lock"
     monkeypatch.setattr(hurt, "HURT_PENDING_FILE", pending_file)
     monkeypatch.setattr(hurt, "HURT_PENDING_LOCK_FILE", lock_file)
+    # /hurt reads the working directory's repo settings; keep the developer's own repo out.
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
     return pending_file, lock_file
 
 
@@ -220,6 +224,25 @@ def test_run_queues_a_well_formed_record(
     # No trace or transcript content beyond what the operator typed: the
     # record is exactly these six fields, nothing more.
     assert set(record.keys()) == {"id", "trace_id", "category", "comment", "created", "session_id"}
+
+
+def test_a_queued_hurt_names_the_project_of_the_repos_keys(
+    monkeypatch: pytest.MonkeyPatch, pending_paths: tuple[Path, Path], repo: Path, session_in: Any
+) -> None:
+    pending_file, _ = pending_paths
+    write_settings(
+        repo,
+        {"LANGFUSE_PUBLIC_KEY": "pk-lf-a", "LANGFUSE_SECRET_KEY": "sk-lf-a", "LANGFUSE_BASE_URL": "https://a.example"},
+    )
+    session_in(repo)
+    monkeypatch.setattr(
+        hurt, "resolve_latest_trace_id", lambda session_id, **_: hurt.Resolution(trace_id="tid-123")
+    )
+
+    hurt.run(["--category", "other", "--comment", "x"], env={"CLAUDE_CODE_SESSION_ID": "sess-1"})
+
+    [record] = json.loads(pending_file.read_text(encoding="utf-8"))
+    assert record["target"] == hurt_annotations.queue_target("https://a.example", "pk-lf-a")
 
 
 def test_run_appends_without_disturbing_earlier_queued_hurts(

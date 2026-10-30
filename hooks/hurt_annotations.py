@@ -14,6 +14,10 @@ Queue file: ~/.claude/state/hurt_pending.json — a JSON array of objects:
     comment     str, the operator's own words
     created     str, ISO 8601 UTC timestamp
     session_id  str, for log correlation only — never read here
+    target      str, optional: queue_target() of the Langfuse address and public
+                key the session sent its traces with. A hurt with a target is
+                attempted only by a hook run with those keys; one without is
+                attempted by any run.
     done        list of str, written by earlier versions of this hook only;
                 never read here
 
@@ -37,6 +41,7 @@ not silent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -213,6 +218,11 @@ def post_score(
 
 # ----------------- Pending queue I/O -----------------
 
+def queue_target(host: str, public_key: str) -> str:
+    """The id of the Langfuse project a hurt belongs to: its address and public key."""
+    return hashlib.sha256(f"{host.rstrip('/')}\n{public_key}".encode("utf-8")).hexdigest()
+
+
 def load_pending_hurts(pending_file: Path) -> List[Dict[str, Any]]:
     try:
         data = json.loads(pending_file.read_text(encoding="utf-8"))
@@ -317,6 +327,7 @@ def process_pending_hurts(
 
     client = LangfuseClient(config)
     now = datetime.now(timezone.utc)
+    this_target = queue_target(config.host, config.public_key)
     # Resolved once per run and reused for every queued hurt.
     config_id_cache: Dict[str, Optional[str]] = {}
 
@@ -330,10 +341,11 @@ def process_pending_hurts(
             continue
 
         completed = False
-        try:
-            completed = _attempt_annotation(client, record, config_id_cache, now, log)
-        except Exception as e:
-            _log(f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
+        if record.get("target") in (None, this_target):
+            try:
+                completed = _attempt_annotation(client, record, config_id_cache, now, log)
+            except Exception as e:
+                _log(f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
 
         if completed:
             attached += 1

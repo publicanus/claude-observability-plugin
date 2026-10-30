@@ -433,3 +433,56 @@ def test_process_pending_hurts_no_op_on_missing_file(
 ) -> None:
     module = hurt_annotations_module
     assert module.process_pending_hurts(FakeConfig(), tmp_path / "missing.json") == 0
+
+
+# ----------------- a hurt belongs to the project its trace went to -----------------
+
+def test_a_hurt_queued_for_another_project_is_not_attempted_with_these_keys(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    other = module.queue_target("https://other.example", "pk-other")
+    record = make_record(module, target=other)
+    write_pending(pending_file, [record])
+    client = RoutedClient(module)
+    full_success_routes(module, client)
+    install_fake_client(module, monkeypatch, client)
+
+    attached = module.process_pending_hurts(FakeConfig(), pending_file)
+
+    assert attached == 0
+    assert client.calls == []
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == [record]
+
+
+def test_a_hurt_queued_for_this_project_is_attached(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    config = FakeConfig()
+    write_pending(pending_file, [make_record(module, target=module.queue_target(config.host, config.public_key))])
+    client = RoutedClient(module)
+    full_success_routes(module, client)
+    install_fake_client(module, monkeypatch, client)
+
+    assert module.process_pending_hurts(config, pending_file) == 1
+
+
+def test_an_old_hurt_queued_for_another_project_is_still_dropped_after_the_age_bound(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    old = datetime.now(timezone.utc) - timedelta(days=module.PENDING_MAX_AGE_DAYS + 1)
+    write_pending(
+        pending_file,
+        [make_record(module, target=module.queue_target("https://other.example", "pk-other"), created=old.isoformat())],
+    )
+    client = RoutedClient(module)
+    install_fake_client(module, monkeypatch, client)
+
+    module.process_pending_hurts(FakeConfig(), pending_file)
+
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == []

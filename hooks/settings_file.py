@@ -11,7 +11,8 @@ read_keys(lookup) returns the Langfuse public and secret key from a set of
 settings, such as an "env" block or the process environment.
 
 read_env_keys(env) is read_keys for an "env" block, and env_holds_keys(env) is
-True when that block holds both keys, not empty.
+True when that block holds both keys, not empty. read_env_host(env) is the
+block's Langfuse address, else EU_CLOUD_HOST.
 
 KEY_NAMES are the names a key goes by, LANGFUSE_ before CC_LANGFUSE_.
 
@@ -32,6 +33,7 @@ from repo_checkout import Checkout
 
 REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
 SETUP_COMMAND = "/mate-record:langfuse-setup"
+EU_CLOUD_HOST = "https://cloud.langfuse.com"
 PUBLIC_KEY_NAMES = ("LANGFUSE_PUBLIC_KEY", "CC_LANGFUSE_PUBLIC_KEY")
 SECRET_KEY_NAMES = ("LANGFUSE_SECRET_KEY", "CC_LANGFUSE_SECRET_KEY")
 KEY_NAMES = PUBLIC_KEY_NAMES + SECRET_KEY_NAMES
@@ -80,6 +82,10 @@ def read_env_keys(env: Mapping[str, Any]) -> Tuple[str, str]:
 
 def env_holds_keys(env: Mapping[str, Any]) -> bool:
     return all(read_env_keys(env))
+
+
+def read_env_host(env: Mapping[str, Any]) -> str:
+    return env.get("LANGFUSE_BASE_URL") or env.get("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
 
 
 def repo_settings_envs(checkout: Checkout) -> List[Dict[str, Any]]:

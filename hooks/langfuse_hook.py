@@ -84,10 +84,12 @@ from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
 from repo_checkout import Checkout, find_checkout, project_folder  # noqa: E402
 from settings_file import (  # noqa: E402
+    EU_CLOUD_HOST,
     KEY_NAMES,
     SETUP_COMMAND,
     SettingsFileError,
     env_holds_keys,
+    read_env_host,
     read_env_keys,
     repo_settings_env,
     repo_settings_envs,
@@ -147,7 +149,6 @@ NO_KEYS_STEPS_DIR = Path(__file__).resolve().parent / "no_keys_steps"
 REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "mate-record" / "no-keys-steps"
 NO_KEYS_STEPS_NAMES = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
-EU_CLOUD_HOST = "https://cloud.langfuse.com"
 # Langfuse Cloud's regions outside the EU, by hostname: https://langfuse.com/docs/data-regions
 NON_EU_CLOUD_REGIONS = {
     "us.cloud.langfuse.com": "US",
@@ -333,7 +334,7 @@ def get_langfuse_config(checkout: Checkout, cwd: Optional[str]) -> Optional[Lang
     pattern is logged and left unset.
     """
     env = repo_settings_env(checkout)
-    host = env.get("LANGFUSE_BASE_URL") or env.get("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
+    host = read_env_host(env)
     check_host_allowed(host)
 
     if not env_holds_keys(env):
