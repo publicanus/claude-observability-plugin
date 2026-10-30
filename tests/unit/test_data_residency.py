@@ -115,3 +115,15 @@ def test_a_self_hosted_address_that_looks_like_a_cloud_host_still_gets_traces(
     assert built_for == [address]
     assert fake_langfuse.observations
     assert out == ""
+
+
+def test_the_sdk_client_gets_the_repos_address_whatever_address_is_set_outside(hook_module, monkeypatch):
+    # The langfuse SDK takes its API address from base_url, else from LANGFUSE_BASE_URL.
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com")
+    built: list = []
+    monkeypatch.setattr(hook_module, "Langfuse", lambda **kwargs: built.append(kwargs))
+    config = hook_module.LangfuseConfig("pk-lf-test", "sk-lf-test", "https://self.example.test", None, repo_name="shop")
+
+    hook_module.create_langfuse_client(config)
+
+    assert [kwargs.get("base_url") for kwargs in built] == ["https://self.example.test"]

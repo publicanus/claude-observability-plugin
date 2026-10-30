@@ -398,7 +398,8 @@ def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
         return Langfuse(
             public_key=config.public_key,
             secret_key=config.secret_key,
-            host=config.host,
+            # base_url, not host: the SDK prefers a LANGFUSE_BASE_URL from the environment over host.
+            base_url=config.host,
             span_exporter=WaitingTurnExporter(config),
         )
     except Exception:
