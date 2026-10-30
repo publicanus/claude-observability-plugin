@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.0.0](https://github.com/publicanus/claude-observability-plugin/compare/v2.0.1...v3.0.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **hook:** tracing now uses only the Langfuse keys and address in the repo's own .claude/settings.local.json (in a worktree: the main checkout's file when it holds both keys, else the worktree's own). Keys or an address set in the terminal, in direnv, or with /plugin configure (machine-wide userConfig) are no longer used, and the userConfig fields LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and LANGFUSE_BASE_URL are gone. Without an address in that file, traces go to Langfuse Cloud EU. To keep tracing a repo, run
+
+### Bug Fixes
+
+* **hook:** a session is traced only with its repo's own keys ([#56](https://github.com/publicanus/claude-observability-plugin/issues/56)) ([82c75d1](https://github.com/publicanus/claude-observability-plugin/commit/82c75d1c9c10dcf5d8a9d1bd36c55988c8f46670))
+* **hook:** the session's reply to a finished agent reaches Langfuse ([#60](https://github.com/publicanus/claude-observability-plugin/issues/60)) ([#66](https://github.com/publicanus/claude-observability-plugin/issues/66)) ([a243fdc](https://github.com/publicanus/claude-observability-plugin/commit/a243fdc1ea7f518e69b217a7f85e25e41b64bcb1))
+
 ## [2.0.1](https://github.com/publicanus/claude-observability-plugin/compare/v2.0.0...v2.0.1) (2026-10-30)
 
 
