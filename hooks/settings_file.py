@@ -68,12 +68,12 @@ def env_holds_keys(env: Mapping[str, Any]) -> bool:
 def repo_settings_env(checkout: Checkout) -> Dict[str, Any]:
     """The env block of the repo's own REPO_SETTINGS_FILE.
 
-    The file that counts is the one at checkout.root when it holds both keys, else
-    the one in checkout.main; outside git, only the one at checkout.root. A missing
-    file gives {}.
+    The file that counts is the one in checkout.main when it holds both keys, else the
+    one at checkout.root, such as a worktree's own; outside git, only the one at
+    checkout.root. A missing file gives {}.
     Raises SettingsFileError, naming the file, when a file it reads is broken.
     """
-    roots = [root for root in (checkout.root, checkout.main) if root is not None]
+    roots = [checkout.root] if checkout.main in (None, checkout.root) else [checkout.main, checkout.root]
     env: Dict[str, Any] = {}
     for root in roots:
         env = load_settings(root / REPO_SETTINGS_FILE).get("env", {})

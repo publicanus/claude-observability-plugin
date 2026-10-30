@@ -1,6 +1,6 @@
 """Pins that a session is traced only with the keys and the address in its repo's
-own .claude/settings.local.json: the worktree's own file when it holds both keys,
-else the main checkout's. Keys and addresses set anywhere else are not used.
+own .claude/settings.local.json: the main checkout's file when it holds both keys,
+else the worktree's own. Keys and addresses set anywhere else are not used.
 """
 
 from __future__ import annotations
@@ -115,10 +115,10 @@ def test_without_keys_set_outside_the_not_traced_line_has_no_not_used_line(
     assert NOT_USED_LINE not in message
 
 
-def test_in_a_worktree_with_empty_keys_the_main_checkouts_keys_and_address_are_used(
+def test_in_a_worktree_the_main_checkouts_keys_and_address_win_over_the_worktrees_own(
     hook_module, clients_built, monkeypatch, capsys, tmp_path, repo, worktree
 ):
-    write_settings(worktree, EMPTY_KEYS)
+    write_settings(worktree, {"LANGFUSE_PUBLIC_KEY": "pk-lf-wt", "LANGFUSE_SECRET_KEY": "sk-lf-wt"})
     write_settings(repo, {**KEYS_A, "LANGFUSE_BASE_URL": "https://main.example.test"})
 
     run_main(hook_module, monkeypatch, capsys, stop_payload(worktree, tmp_path))
@@ -126,11 +126,13 @@ def test_in_a_worktree_with_empty_keys_the_main_checkouts_keys_and_address_are_u
     assert [sent_with(config) for config in clients_built] == [("pk-lf-a", "sk-lf-a", "https://main.example.test")]
 
 
-def test_in_a_worktree_with_both_keys_its_own_keys_and_address_are_used(
-    hook_module, clients_built, monkeypatch, capsys, tmp_path, repo, worktree
+@pytest.mark.parametrize("main_env", [None, EMPTY_KEYS], ids=["no main file", "empty main keys"])
+def test_in_a_worktree_without_keys_in_the_main_checkout_the_worktrees_own_are_used(
+    hook_module, clients_built, monkeypatch, capsys, tmp_path, repo, worktree, main_env
 ):
     write_settings(worktree, {"LANGFUSE_PUBLIC_KEY": "pk-lf-wt", "LANGFUSE_SECRET_KEY": "sk-lf-wt"})
-    write_settings(repo, {**KEYS_A, "LANGFUSE_BASE_URL": "https://main.example.test"})
+    if main_env is not None:
+        write_settings(repo, main_env)
 
     run_main(hook_module, monkeypatch, capsys, stop_payload(worktree, tmp_path))
 
