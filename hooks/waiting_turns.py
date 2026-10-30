@@ -102,6 +102,7 @@ def _send_batch(
         "x-langfuse-sdk-name": "python",
         "x-langfuse-sdk-version": sdk_version,
         "x-langfuse-public-key": target.public_key,
+        "x-langfuse-ingestion-version": "4",
     }
     response = LangfuseClient(target).post_bytes(TRACES_PATH, base64.b64decode(batch["body"]), headers)
     if 200 <= response.status < 300:

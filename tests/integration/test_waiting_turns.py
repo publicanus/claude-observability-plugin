@@ -362,6 +362,7 @@ def test_a_session_in_a_repo_without_keys_sends_the_turns_another_session_left_w
     assert headers["x-langfuse-public-key"] == KEYS_A[0]
     assert headers["x-langfuse-sdk-name"] == "python"
     assert headers["x-langfuse-sdk-version"]
+    assert headers["x-langfuse-ingestion-version"] == "4"
 
 
 def test_a_turn_sent_while_langfuse_answers_normally_arrives_once(machine: Machine, servers: Any) -> None:
