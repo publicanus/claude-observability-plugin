@@ -791,3 +791,65 @@ def test_a_reply_and_the_next_prompt_sent_at_session_end_are_two_traces(
         ["LLM Call 1", "LLM Call 2", "LLM Call 3"],
         ["LLM Call 1"],
     ]
+
+
+OTHER_LAUNCH = "toolu_launch_other"
+
+
+def two_agent_launch_turn() -> List[Dict[str, Any]]:
+    """A turn that launches the usual agent and one other background agent."""
+    return [
+        user_row("main-user-1", "Launch two agents.", 0),
+        assistant_row("main-launch", [
+            tool_use(LAUNCH, "Agent", {"description": DESCRIPTION, "prompt": "Research the topic.",
+                                       "subagent_type": AGENT_TYPE, "run_in_background": True}),
+            tool_use(OTHER_LAUNCH, "Agent", {"description": "Other", "prompt": "Do the other thing.",
+                                             "subagent_type": "general-purpose", "run_in_background": True}),
+        ], 1),
+        launch_result(2),
+        tool_result_row("main-launch-other-result", OTHER_LAUNCH, "Async agent launched successfully.", 2.1,
+                        {"status": "async_launched", "isAsync": True, "agentId": "a-other"}),
+        agent_says("main-launched", "Both are running.", 3),
+    ]
+
+
+@pytest.mark.parametrize("second_result", [
+    pytest.param(round_1_notification(), id="notification"),
+    pytest.param(hand_back("main-hand-back-1", "Round 1 report.", 33), id="hand-back"),
+])
+def test_a_result_that_arrives_during_the_reply_still_reaches_the_launch_turn_of_the_same_batch(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent, second_result
+):
+    continued_agent.add_agent(*round_1())
+    reply_rows = reply(30)
+    continued_agent.add_main(
+        *two_agent_launch_turn(),
+        turn_end(4),
+        notification("main-note-other", OTHER_LAUNCH, "Other done.", 30),
+        *reply_rows[:2],
+        second_result,
+        *reply_rows[2:],
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+
+    assert [root_input(trace) for trace in traces(fake_langfuse)] == [
+        "Launch two agents.", notification("main-note-other", OTHER_LAUNCH, "Other done.", 30)["message"]["content"],
+    ]
+
+
+def test_a_result_that_arrives_during_the_next_prompt_still_reaches_the_launch_turn_of_the_same_batch(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(
+        *launch_turn(),
+        user_row("main-user-2", "Next question.", 20),
+        agent_says("main-working-2", "Working on it.", 21),
+        round_1_notification(),
+        agent_says("main-answer-2", "Next answer.", 31),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+
+    assert [root_input(trace) for trace in traces(fake_langfuse)] == ["Launch the researcher.", "Next question."]
