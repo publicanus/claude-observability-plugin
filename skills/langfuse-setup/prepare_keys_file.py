@@ -8,10 +8,12 @@
     sh hooks/run_hook.sh prepare_keys_file.py --project-dir <dir>
 
     --project-dir  the folder the Claude Code session started in, inside a git repository
-    target         .claude/settings.local.json in the repository's main checkout
+    target         .claude/settings.local.json in the repository's main checkout, the folder
+                   that holds its git folder (for a bare repository with worktrees, the
+                   folder that holds the bare repository, outside every checkout)
     writes         only what is missing, in this order:
                    - the line **/.claude/settings.local.json in the clone's .git/info/exclude,
-                     when git does not ignore the target yet
+                     when the target is inside a checkout and git does not ignore it yet
                    - LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY as "" in the target's env
                      block; values already there and every other setting stay as they are
                    - the line .claude/settings.local.json in .worktreeinclude at the root of
@@ -32,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 # The plugin's hooks folder, so its shared modules import however this script is run.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hooks"))
+from repo_checkout import find_checkout  # noqa: E402
 from settings_file import SettingsFileError, load_settings  # noqa: E402
 
 SETTINGS = Path(".claude") / "settings.local.json"
@@ -60,10 +63,15 @@ def git_output(cwd: Path, *args: str) -> str:
 
 
 def main_checkout(project_dir: Path) -> Path:
-    for line in git_output(project_dir, "worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            return Path(line[len("worktree "):])
-    raise SetupError(f"`git worktree list` named no checkout for {project_dir}")
+    main = find_checkout(project_dir).main
+    if main is None:
+        raise SetupError(f"git names no main checkout for {project_dir}")
+    return main
+
+
+def in_work_tree(root: Path) -> bool:
+    result = git(root, "rev-parse", "--is-inside-work-tree")
+    return result.returncode == 0 and result.stdout.strip() == "true"
 
 
 def is_ignored(root: Path) -> bool:
@@ -134,7 +142,7 @@ def prepare(project_dir: Path) -> Dict[str, Any]:
     target = root / SETTINGS
     settings = load_settings(target)
 
-    changed = ensure_ignored(root)
+    changed = ensure_ignored(root) if in_work_tree(root) else []
     if add_placeholders(settings) or not target.exists():
         write_json(target, settings)
         changed.append(target)

@@ -82,7 +82,19 @@ STATE_MAX_AGE = timedelta(days=30)
 from hurt_annotations import process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
-from settings_file import SettingsFileError, load_settings, read_keys  # noqa: E402
+from repo_checkout import Checkout, find_checkout, project_folder  # noqa: E402
+from settings_file import (  # noqa: E402
+    EU_CLOUD_HOST,
+    KEY_NAMES,
+    SETUP_COMMAND,
+    SettingsFileError,
+    env_holds_keys,
+    read_env_host,
+    read_env_keys,
+    repo_settings_env,
+    repo_settings_envs,
+    repo_settings_paths,
+)
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
 
@@ -91,10 +103,7 @@ import work_item  # noqa: E402
 def _opt(name: str) -> str:
     """Read a config value: plain env var first, plugin userConfig (CLAUDE_PLUGIN_OPTION_<NAME>) as fallback.
 
-    Claude Code stores userConfig at user (machine) scope only, while an `env` block in a
-    project's .claude/settings.local.json is per-repo. The plain env var wins so that a
-    multi-project machine can route each repo to its own Langfuse project; the wizard's
-    machine-wide value applies exactly where no repo-level value is set.
+    Not for the keys or the Langfuse address: those come only from repo_settings_env.
     """
     return os.environ.get(name) or os.environ.get(f"CLAUDE_PLUGIN_OPTION_{name}") or ""
 
@@ -126,7 +135,12 @@ class LangfuseConfig:
     work_item_branch_pattern: Optional[re.Pattern] = None
 
 NO_KEYS_WARNING = "Langfuse: no keys for this repo, this session is not traced."
-SETUP_COMMAND = "/mate-record:langfuse-setup"
+OUTSIDE_KEYS_NOT_USED = (
+    "Langfuse: keys set outside this repo's .claude/settings.local.json, such as in your "
+    "terminal or the plugin's settings, are not used."
+)
+# Ends every text that tells the user to fix the repo's settings file.
+SETTINGS_REREAD = "The hook reads that file again at the end of each turn."
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 
 # The manual steps shown at SessionStart without keys: one text per system. A repo's
@@ -135,7 +149,6 @@ NO_KEYS_STEPS_DIR = Path(__file__).resolve().parent / "no_keys_steps"
 REPO_NO_KEYS_STEPS_DIR = Path(".claude") / "mate-record" / "no-keys-steps"
 NO_KEYS_STEPS_NAMES = {"darwin": "macos", "linux": "linux", "win32": "windows"}
 
-EU_CLOUD_HOST = "https://cloud.langfuse.com"
 # Langfuse Cloud's regions outside the EU, by hostname: https://langfuse.com/docs/data-regions
 NON_EU_CLOUD_REGIONS = {
     "us.cloud.langfuse.com": "US",
@@ -160,8 +173,8 @@ def check_host_allowed(host: str) -> None:
     raise RefusedHostError(
         f"Langfuse: {host} is Langfuse Cloud's {region} region. This plugin sends only to "
         f"the EU region or to your own Langfuse server, so this session is not traced and "
-        f"nothing is sent. Set LANGFUSE_BASE_URL to {EU_CLOUD_HOST}, with keys from an "
-        f"EU project, then restart Claude Code."
+        f"nothing is sent. In this repo's .claude/settings.local.json, set LANGFUSE_BASE_URL "
+        f"to {EU_CLOUD_HOST}, with keys from an EU project. {SETTINGS_REREAD}"
     )
 
 class TraceUserError(Exception):
@@ -205,42 +218,17 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
         )
     return result.stdout.strip() or None
 
-def session_dir(cwd: Optional[str]) -> Path:
-    """cwd as a Path; None means the process's working directory."""
-    return Path(cwd) if cwd else Path.cwd()
-
-def git_rev_parse(cwd: Optional[str], *flags: str) -> Optional[str]:
-    """The output of `git rev-parse <flags>` in session_dir(cwd), or None when that
-    folder is not in a git checkout or git cannot run."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", *flags], cwd=session_dir(cwd), capture_output=True, text=True
-        )
-    except OSError as e:
-        debug(f"git rev-parse could not run: {type(e).__name__}: {e}")
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-def find_main_checkout(cwd: Optional[str]) -> Optional[Path]:
-    """The main checkout of the git repo that holds cwd (None: the process's working
-    directory), the same for all its worktrees; None outside a git checkout or
-    without git installed."""
-    common_dir = git_rev_parse(cwd, "--path-format=absolute", "--git-common-dir")
-    return Path(common_dir).parent if common_dir is not None else None
-
-def read_repo_name(cwd: Optional[str]) -> str:
-    """The name of the repo that holds cwd (None: the process's working directory).
+def read_repo_name(checkout: Checkout) -> str:
+    """The name of the repo of checkout.
 
     With a git remote: the last part of the address of `origin`, else of the first
     remote `git remote` lists, without a `.git` ending. Without a remote: the name of
     the main checkout's folder, the same for all its worktrees. Outside a git checkout,
-    or without git installed: the name of cwd's own folder.
+    or without git installed: the name of checkout.root.
     Raises subprocess.CalledProcessError when git fails inside a checkout.
     """
-    base = session_dir(cwd)
-    main_checkout = find_main_checkout(cwd)
+    base = checkout.root
+    main_checkout = checkout.main
     if main_checkout is None:
         return base.name
 
@@ -327,27 +315,31 @@ def read_plugin_versions(project_dir: Path) -> Dict[str, Optional[str]]:
         versions[key.split("@", 1)[0]] = plugin_version(winner.get("version"))
     return versions
 
-def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
-    """The hook's Langfuse settings, or None when no keys are set.
+def get_langfuse_config(checkout: Checkout, cwd: Optional[str]) -> Optional[LangfuseConfig]:
+    """The hook's Langfuse settings, or None when the repo's own settings file has no keys.
 
-    The host is LANGFUSE_BASE_URL or CC_LANGFUSE_BASE_URL (env var or plugin userConfig),
-    else EU_CLOUD_HOST. Raises RefusedHostError for a refused host, with or without keys.
+    checkout: the session's repo; cwd: the session's directory (None: the process's
+    working directory), for the trace user's git email.
+    The keys and the host come only from repo_settings_env(checkout), and fail as that does.
+    The host is its LANGFUSE_BASE_URL or CC_LANGFUSE_BASE_URL, else EU_CLOUD_HOST.
+    Raises RefusedHostError for a refused host, with or without keys.
 
     The trace user is, in order: LANGFUSE_USER_ID or CC_LANGFUSE_USER_ID (env var or
     plugin userConfig), the Claude login email, `git config user.email` in cwd, or None.
     When a source exists but cannot be read, the user is None and user_warning says why.
-    The repo name is read_repo_name(cwd), and fails as that does. The plugin versions
-    are read_plugin_versions() for the repo's main checkout, or for cwd outside git,
-    and fail as that does. The work item branch pattern is
+    The repo name is read_repo_name(checkout), and fails as that does. The plugin
+    versions are read_plugin_versions() for the repo's main checkout, or for
+    checkout.root outside git, and fail as that does. The work item branch pattern is
     CC_LANGFUSE_WORK_ITEM_BRANCH_PATTERN (env var or plugin userConfig); a refused
     pattern is logged and left unset.
     """
-    host = _opt("LANGFUSE_BASE_URL") or _opt("CC_LANGFUSE_BASE_URL") or EU_CLOUD_HOST
+    env = repo_settings_env(checkout)
+    host = read_env_host(env)
     check_host_allowed(host)
 
-    public_key, secret_key = read_keys(_opt)
-    if not public_key or not secret_key:
+    if not env_holds_keys(env):
         return None
+    public_key, secret_key = read_env_keys(env)
 
     user_id = None
     user_warning = None
@@ -368,10 +360,10 @@ def get_langfuse_config(cwd: Optional[str]) -> Optional[LangfuseConfig]:
         secret_key=secret_key,
         host=host,
         user_id=user_id,
-        repo_name=read_repo_name(cwd),
+        repo_name=read_repo_name(checkout),
         trace_seed=trace_seed,
         user_warning=user_warning,
-        plugin_versions=read_plugin_versions(find_main_checkout(cwd) or session_dir(cwd)),
+        plugin_versions=read_plugin_versions(checkout.main or checkout.root),
         work_item_branch_pattern=read_work_item_branch_pattern(),
     )
 
@@ -409,7 +401,8 @@ def create_langfuse_client(config: LangfuseConfig) -> Optional[Langfuse]:
         return Langfuse(
             public_key=config.public_key,
             secret_key=config.secret_key,
-            host=config.host,
+            # base_url, not host: the SDK prefers a LANGFUSE_BASE_URL from the environment over host.
+            base_url=config.host,
             span_exporter=WaitingTurnExporter(config),
         )
     except Exception:
@@ -535,55 +528,82 @@ def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
     return hook_event_name(payload) == "UserPromptExpansion"
 
 
-# ----------------- Setup check -----------------
-REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
-
-def settings_file_holds_keys(path: Path) -> bool:
-    """True when the settings file at path has both keys, not empty, in its env
-    block; False when the file does not exist. Raises SettingsFileError."""
-    env = load_settings(path).get("env", {})
-    public_key, secret_key = read_keys(lambda name: env.get(name) or "")
-    return bool(public_key and secret_key)
-
-def repo_settings_hold_keys(cwd: Optional[str]) -> bool:
-    """True when the REPO_SETTINGS_FILE of the checkout that holds cwd (None: the
-    process's working directory), or else of its repo's main checkout, holds both
-    keys. Keys set anywhere else do not count. Raises SettingsFileError."""
-    roots = [find_repo_root(cwd), find_main_checkout(cwd)]
-    return any(settings_file_holds_keys(root / REPO_SETTINGS_FILE) for root in roots if root is not None)
-
-
 # ----------------- No-keys message -----------------
-def find_repo_root(cwd: Optional[str]) -> Path:
-    """The root of the git checkout that holds cwd (None: the process's working
-    directory), or that directory itself when it is not in a git checkout or git
-    cannot run."""
-    toplevel = git_rev_parse(cwd, "--show-toplevel")
-    return Path(toplevel) if toplevel is not None else session_dir(cwd)
-
-def read_no_keys_steps(cwd: Optional[str]) -> Optional[str]:
+def read_no_keys_steps(checkout: Checkout) -> Optional[str]:
     """The manual steps for this system, or None on a system with no text.
 
-    cwd: the session's directory; the repo's own texts are looked up at the root of
-    its git checkout (see find_repo_root).
+    The repo's own texts are looked up at checkout.root.
     A text that exists but cannot be read gives a line naming the file instead.
     """
     name = NO_KEYS_STEPS_NAMES.get(sys.platform)
     if name is None:
         return None
-    repo_text = find_repo_root(cwd) / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
+    repo_text = checkout.root / REPO_NO_KEYS_STEPS_DIR / f"{name}.txt"
     path = repo_text if repo_text.exists() else NO_KEYS_STEPS_DIR / f"{name}.txt"
     try:
         return path.read_text(encoding="utf-8").rstrip("\n")
     except (OSError, UnicodeDecodeError) as e:
         return f"Langfuse: cannot read {path}: {e}"
 
-def format_no_keys_message(cwd: Optional[str]) -> str:
-    lines = [NO_KEYS_WARNING, f"To add keys, run {SETUP_COMMAND}, or by hand:"]
-    steps = read_no_keys_steps(cwd)
+def keys_set_outside(checkout: Checkout) -> bool:
+    """True when a key name holds a value, as an env var or in the plugin's userConfig,
+    that no repo settings file of checkout holds under that name. Claude Code copies
+    the project's own file into the environment, so those values do not count."""
+    own_envs = repo_settings_envs(checkout)
+    for name in KEY_NAMES:
+        for value in (os.environ.get(name), os.environ.get(f"CLAUDE_PLUGIN_OPTION_{name}")):
+            if value and all(env.get(name) != value for env in own_envs):
+                return True
+    return False
+
+def format_no_keys_message(checkout: Checkout) -> str:
+    lines = [NO_KEYS_WARNING]
+    if keys_set_outside(checkout):
+        lines.append(OUTSIDE_KEYS_NOT_USED)
+    lines.append(f"To add keys, run {SETUP_COMMAND}, or by hand:")
+    steps = read_no_keys_steps(checkout)
     if steps is not None:
         lines.append(steps)
     return "\n".join(lines)
+
+def format_broken_settings_message(error: SettingsFileError) -> str:
+    return f"Langfuse: {error}. This session is not traced until the file is fixed. {SETTINGS_REREAD}"
+
+# The broken settings files already reported, as {path: error text}, so a break is
+# named once on Stop or SessionEnd, not on every turn.
+BROKEN_SETTINGS_STATE_KEY = "_broken_settings"
+
+def record_broken_settings(error: SettingsFileError) -> bool:
+    """Records error as reported for its file; True when that file had no record of
+    this same error yet. True also when the state cannot be locked, so a break is
+    never hidden."""
+    try:
+        with FileLock(LOCK_FILE):
+            state = load_hook_state()
+            reported = state.get(BROKEN_SETTINGS_STATE_KEY)
+            reported = reported if isinstance(reported, dict) else {}
+            if reported.get(str(error.path)) == str(error):
+                return False
+            reported[str(error.path)] = str(error)
+            state[BROKEN_SETTINGS_STATE_KEY] = reported
+            save_hook_state(state)
+    except TimeoutError as e:
+        debug(f"broken settings lock timeout, reporting anyway: {e}")
+    return True
+
+def forget_broken_settings(paths: List[Path]) -> None:
+    """Drops the records of paths, which now read fine, so a new break is reported again."""
+    try:
+        with FileLock(LOCK_FILE):
+            state = load_hook_state()
+            reported = state.get(BROKEN_SETTINGS_STATE_KEY)
+            if not isinstance(reported, dict) or not any(str(path) in reported for path in paths):
+                return
+            for path in paths:
+                reported.pop(str(path), None)
+            save_hook_state(state)
+    except TimeoutError as e:
+        debug(f"broken settings lock timeout, records kept: {e}")
 
 
 # ----------------- State file reading and writing -----------------
@@ -3505,6 +3525,8 @@ def emit_new_turns_from_transcript(
 # endpoint the SDK authenticates against, made with LangfuseClient rather than
 # the SDK's blocking, retrying auth_check().
 
+# The last verdict per credential fingerprint, as {fingerprint: {"status", "detail", "updated"}},
+# so the repos of one machine, each with its own keys, keep their own verdict.
 DELIVERY_HEALTH_STATE_KEY = "_delivery_health"
 # Re-verified at most this often: a blocking round trip on every
 # Stop/SessionEnd firing is not acceptable, but a rejected or revoked
@@ -3540,9 +3562,21 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
     return "unreachable", f"HTTP {response.status} from {config.host}"
 
 
+def _delivery_verdicts(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    verdicts = state.get(DELIVERY_HEALTH_STATE_KEY)
+    if not isinstance(verdicts, dict):
+        return {}
+    return {fingerprint: verdict for fingerprint, verdict in verdicts.items() if isinstance(verdict, dict)}
+
+
+def _checked_since(verdict: Dict[str, Any], moment: datetime) -> bool:
+    checked_at = parse_timestamp(verdict.get("updated"))
+    return checked_at is not None and checked_at > moment
+
+
 def _cached_delivery_status(state: Dict[str, Any], fingerprint: str) -> Optional[Tuple[str, str]]:
-    cached = state.get(DELIVERY_HEALTH_STATE_KEY)
-    if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+    cached = _delivery_verdicts(state).get(fingerprint)
+    if cached is None:
         return None
     checked_at = parse_timestamp(cached.get("updated"))
     status = cached.get("status")
@@ -3585,12 +3619,14 @@ def get_delivery_status(config: LangfuseConfig) -> Tuple[str, str]:
     try:
         with FileLock(LOCK_FILE):
             state = load_hook_state()
-            state[DELIVERY_HEALTH_STATE_KEY] = {
-                "fingerprint": fingerprint,
-                "status": status,
-                "detail": detail,
-                "updated": datetime.now(timezone.utc).isoformat(),
+            now = datetime.now(timezone.utc)
+            verdicts = {
+                other: verdict
+                for other, verdict in _delivery_verdicts(state).items()
+                if _checked_since(verdict, now - STATE_MAX_AGE)
             }
+            verdicts[fingerprint] = {"status": status, "detail": detail, "updated": now.isoformat()}
+            state[DELIVERY_HEALTH_STATE_KEY] = verdicts
             save_hook_state(state)
     except TimeoutError as e:
         debug(f"delivery health lock timeout while caching result: {e}")
@@ -3615,8 +3651,8 @@ def peek_delivery_status(config: LangfuseConfig) -> Optional[Tuple[str, str]]:
             state = load_hook_state()
     except TimeoutError:
         return None
-    cached = state.get(DELIVERY_HEALTH_STATE_KEY)
-    if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+    cached = _delivery_verdicts(state).get(fingerprint)
+    if cached is None:
         return None
     status = cached.get("status")
     if not isinstance(status, str):
@@ -3652,11 +3688,8 @@ def format_delivery_warning(status: str, detail: str, host: str) -> Optional[str
     """The user-visible warning for a known-bad delivery status, surfaced via
     the hook's JSON `systemMessage` field — not the log file nobody opens.
 
-    A repair recipe, not just a diagnosis: this process's environment is
-    frozen at launch, so editing credentials or the base URL now does
-    nothing until the session restarts — the single most common way this
-    warning gets misread. Each branch ends on the concrete command to run
-    and the restart it can't skip.
+    A repair recipe, not just a diagnosis: each branch names what to change
+    in the repo's .claude/settings.local.json, and ends on SETTINGS_REREAD.
 
     Returns None for "ok" or any status this session has no verdict on yet;
     a working (or unverified) session must stay completely silent, or the
@@ -3672,29 +3705,27 @@ def format_delivery_warning(status: str, detail: str, host: str) -> Optional[str
             f"Cloud's EU region ({EU_CLOUD_HOST}) by default. Keys from a "
             "project in another region do not work there: you need keys from "
             "an EU project. A rotated key fails the same way.\n"
-            "Fix: set LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY to the EU "
-            "project's keys, then exit and restart Claude Code — this "
-            "session's env vars are frozen at launch."
+            "Fix: in this repo's .claude/settings.local.json, set "
+            "LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY to the EU project's keys. "
+            f"{SETTINGS_REREAD}"
         )
     if status == "rejected":
         return (
             f"Langfuse tracing is broken: credentials rejected ({detail}) — "
-            "no traces are being recorded. Likely a rotated key, and this "
-            "session is stuck on the old one (its env vars are frozen at "
-            "launch — editing the secrets file now won't fix it).\n"
-            "Fix: run `echo $LANGFUSE_PUBLIC_KEY`, compare it to the current "
-            "keypair, then exit and restart Claude Code from a shell that "
-            "already has the corrected LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY."
+            "no traces are being recorded. Likely a rotated key.\n"
+            "Fix: in this repo's .claude/settings.local.json, compare "
+            "LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY to the current keypair "
+            f"and correct them. {SETTINGS_REREAD}"
         )
     if status == "unreachable":
         return (
             f"Langfuse cannot be reached: {detail}. The turns wait on this "
-            "computer and are sent once Langfuse answers again. Check LANGFUSE_BASE_URL: unset defaults to "
+            "computer and are sent once Langfuse answers again. Check LANGFUSE_BASE_URL "
+            "in this repo's .claude/settings.local.json: unset defaults to "
             f"{EU_CLOUD_HOST}, and a self-hosted Langfuse needs its own "
             "address.\n"
-            "Fix the value or your network/VPN access to that host, then "
-            "restart Claude Code — this session's env vars are frozen and "
-            "won't pick up the change on their own."
+            "Fix the value or your network/VPN access to that host. "
+            f"{SETTINGS_REREAD}"
         )
     return None
 
@@ -3727,8 +3758,9 @@ def main() -> int:
     payload = read_hook_payload()
     is_session_start = is_session_start_hook_payload(payload)
     is_setup_check = is_setup_check_hook_payload(payload)
+    checkout = find_checkout(project_folder(payload.get("cwd")), log=debug)
     try:
-        config = get_langfuse_config(payload.get("cwd"))
+        config = get_langfuse_config(checkout, payload.get("cwd"))
     except RefusedHostError as e:
         info(str(e))
         if is_session_start:
@@ -3736,10 +3768,19 @@ def main() -> int:
         elif is_setup_check:
             print(json.dumps({"decision": "block", "reason": str(e)}))
         return 0
+    except SettingsFileError as e:
+        info(str(e))
+        if is_setup_check:
+            raise
+        # A break is named at SessionStart, and once on the first Stop or SessionEnd that meets it.
+        if record_broken_settings(e) or is_session_start:
+            print(json.dumps({"systemMessage": format_broken_settings_message(e)}))
+        return 0
+    forget_broken_settings(repo_settings_paths(checkout))
 
     # The setup skill reads "no output" as "the hook cannot run", so this always answers.
     if is_setup_check:
-        if repo_settings_hold_keys(payload.get("cwd")):
+        if config is not None:
             print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
         else:
             print(json.dumps({}))
@@ -3748,7 +3789,7 @@ def main() -> int:
     # SessionStart exists only to say, once, that this session goes untraced.
     if is_session_start:
         if config is None:
-            print(json.dumps({"systemMessage": format_no_keys_message(payload.get("cwd"))}))
+            print(json.dumps({"systemMessage": format_no_keys_message(checkout)}))
         return 0
 
     if config is not None:
@@ -3762,9 +3803,9 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
     reports the delivery status in the log and, when it is bad, to the user."""
     # Runs on every firing, independent of this run's hook_context/payload —
     # the pending queue is global to the machine, not scoped to this session,
-    # so a healthy hook run in any project can drain hurts left behind by a
-    # session whose hook never runs again. Never allowed to block turn
-    # emission below.
+    # so a run with the same keys can attach hurts left behind by a session
+    # whose hook never runs again (and any run those without a target).
+    # Never allowed to block turn emission below.
     try:
         with FileLock(HURT_PENDING_LOCK_FILE):
             attached = process_pending_hurts(config, HURT_PENDING_FILE, log=info)

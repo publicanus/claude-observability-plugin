@@ -6,6 +6,7 @@ import importlib.util
 import json
 import logging
 import random
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -132,9 +133,123 @@ def load_hook_module() -> Any:
     return module
 
 
+def write_settings(checkout: Path, env: dict) -> Path:
+    """Writes {"env": env} as checkout's .claude/settings.local.json; returns its path."""
+    path = checkout / ".claude" / "settings.local.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"env": env}), encoding="utf-8")
+    return path
+
+
+def git(cwd: Path, *args: str) -> None:
+    """Runs git with args in cwd, as a test user; raises when git fails."""
+    subprocess.run(
+        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A git repo with one commit, at tmp_path/shop."""
+    path = (tmp_path / "shop").resolve()
+    path.mkdir()
+    git(path, "init", "-q")
+    git(path, "commit", "-q", "--allow-empty", "-m", "first")
+    return path
+
+
+@pytest.fixture
+def worktree(repo: Path, tmp_path: Path) -> Path:
+    """A worktree of repo, at tmp_path/shop-feature."""
+    path = (tmp_path / "shop-feature").resolve()
+    git(repo, "worktree", "add", "-q", str(path))
+    return path
+
+
+def config_for(hook_module: Any, folder: Any) -> Any:
+    """get_langfuse_config for a session in folder (None: the working directory)."""
+    from repo_checkout import session_dir  # not at the top: state_writer.py imports this file without hooks/ on its path
+
+    cwd = str(folder) if folder is not None else None
+    return hook_module.get_langfuse_config(hook_module.find_checkout(session_dir(cwd)), cwd)
+
+
 @pytest.fixture(scope="session")
 def hook_module() -> Any:
     return load_hook_module()
+
+
+# The names the keys and the Langfuse address go by, in a settings file or elsewhere.
+LANGFUSE_CONFIG_VARS = [
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_BASE_URL",
+    "CC_LANGFUSE_PUBLIC_KEY",
+    "CC_LANGFUSE_SECRET_KEY",
+    "CC_LANGFUSE_BASE_URL",
+]
+
+
+@pytest.fixture
+def no_langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removes every LANGFUSE_CONFIG_VARS name, plain and as CLAUDE_PLUGIN_OPTION_<name>,
+    from the environment."""
+    for name in LANGFUSE_CONFIG_VARS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
+
+
+@pytest.fixture
+def nothing_may_be_sent(hook_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every path in main() that talks to Langfuse fails the test when reached."""
+    monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: pytest.fail("trace client built"))
+    monkeypatch.setattr(hook_module, "LangfuseClient", lambda *a, **k: pytest.fail("delivery probe sent"))
+    monkeypatch.setattr(hook_module, "process_pending_hurts", lambda *a, **k: pytest.fail("/hurt notes sent"))
+
+
+class AcceptingLangfuse:
+    """Answers the delivery probe as a Langfuse that accepts the keys."""
+
+    def get(self, path: str) -> Any:
+        return type("Response", (), {"status": 200, "body": None})()
+
+
+def run_main(hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, payload: dict) -> str:
+    """Runs the hook's main() on payload; asserts it returns 0 and returns what it printed."""
+    monkeypatch.setattr(hook_module, "read_hook_payload", lambda: payload)
+    assert hook_module.main() == 0
+    return capsys.readouterr().out
+
+
+def write_one_turn_transcript(tmp_path: Path) -> Path:
+    """Writes tmp_path/transcript.jsonl with one turn of session "sess"; returns its path."""
+    rows = [
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "sessionId": "sess",
+            "uuid": "user-1",
+            "message": {"role": "user", "content": "A question."},
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "sessionId": "sess",
+            "uuid": "assistant-1",
+            "message": {
+                "id": "msg-1",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "An answer."}],
+            },
+        },
+    ]
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    return transcript
 
 
 @pytest.fixture
@@ -291,6 +406,7 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(home)
     # _get_logger() caches its handler in this module-level global on first
     # use, and logging.getLogger("langfuse_hook") is itself a process-wide

@@ -7,76 +7,38 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from conftest import write_settings
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 LAUNCHER_COMMAND = 'sh "${CLAUDE_PLUGIN_ROOT}"/hooks/run_hook.sh "${CLAUDE_PLUGIN_ROOT}"/hooks/langfuse_hook.py'
-CONFIG_VARS = [
-    "LANGFUSE_PUBLIC_KEY",
-    "LANGFUSE_SECRET_KEY",
-    "LANGFUSE_BASE_URL",
-    "CC_LANGFUSE_PUBLIC_KEY",
-    "CC_LANGFUSE_SECRET_KEY",
-    "CC_LANGFUSE_BASE_URL",
-]
 
-
-@pytest.fixture(autouse=True)
-def clean_env(isolated_hook_state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in CONFIG_VARS:
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
-
-
-@pytest.fixture(autouse=True)
-def nothing_may_be_sent(hook_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hook_module, "create_langfuse_client", lambda config: pytest.fail("trace client built"))
-    monkeypatch.setattr(hook_module, "process_pending_hurts", lambda *a, **k: pytest.fail("/hurt notes sent"))
-
+pytestmark = pytest.mark.usefixtures("isolated_hook_state", "no_langfuse_env", "nothing_may_be_sent")
 
 ALREADY_CONFIGURED = {"decision": "block", "reason": "Langfuse: tracing is already configured for this repo."}
 BOTH_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-test", "LANGFUSE_SECRET_KEY": "sk-lf-test"}
 EMPTY_KEYS = {"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""}
 
 
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
+@pytest.fixture
+def repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The shared repo, as the working directory: the setup check runs as the skill
+    runs it, with no cwd in the input."""
+    monkeypatch.chdir(repo)
+    return repo
 
 
 @pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A git repo the setup check runs in, as the skill runs it: no cwd in the input."""
-    path = (tmp_path / "shop").resolve()
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "commit", "-q", "--allow-empty", "-m", "first")
-    monkeypatch.chdir(path)
-    return path
-
-
-@pytest.fixture
-def worktree(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = (tmp_path / "shop-feature").resolve()
-    git(repo, "worktree", "add", "-q", str(path))
-    monkeypatch.chdir(path)
-    return path
-
-
-def write_settings(checkout: Path, env: dict) -> None:
-    path = checkout / ".claude" / "settings.local.json"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({"env": env}), encoding="utf-8")
+def worktree(worktree: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The shared worktree, as the working directory."""
+    monkeypatch.chdir(worktree)
+    return worktree
 
 
 def run_setup_check(hook_module: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> Any:
@@ -132,8 +94,8 @@ def test_an_unreadable_settings_file_fails_naming_the_file(hook_module, monkeypa
         hook_module.main()
 
 
-def test_refused_address_blocks_with_the_refusal(hook_module, monkeypatch, capsys):
-    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com")
+def test_refused_address_blocks_with_the_refusal(hook_module, monkeypatch, capsys, repo):
+    write_settings(repo, {"LANGFUSE_BASE_URL": "https://us.cloud.langfuse.com"})
 
     answer = run_setup_check(hook_module, monkeypatch, capsys)
 

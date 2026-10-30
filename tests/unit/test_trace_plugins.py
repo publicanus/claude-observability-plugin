@@ -12,11 +12,12 @@ folder (see isolated_hook_state); the git checkouts they use are real, in a temp
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
+
+from conftest import config_for, git, write_settings
 
 
 # ----------------- installed_plugins.json -----------------
@@ -109,31 +110,21 @@ def test_an_unreadable_plugins_file_fails_naming_the_file(hook_module, isolated_
         hook_module.read_plugin_versions(tmp_path / "shop")
 
 
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
-
-
 def test_a_session_in_a_worktree_uses_the_installs_of_the_main_checkout(
     hook_module, isolated_hook_state, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
     main = tmp_path / "shop"
     main.mkdir()
     git(main, "init", "-q")
     git(main, "commit", "-q", "--allow-empty", "-m", "first")
+    write_settings(main, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
     worktree = tmp_path / "shop-feature"
     git(main, "worktree", "add", "-q", str(worktree))
     write_installed_plugins(hook_module, {
         "mate-core@mate-marketplace": [install("project", "8.9.0-0ae331d8a58b", main)],
     })
 
-    config = hook_module.get_langfuse_config(str(worktree))
+    config = config_for(hook_module, worktree)
 
     assert config.plugin_versions == {"mate-core": "8.9.0"}
 

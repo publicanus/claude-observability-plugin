@@ -29,30 +29,14 @@ To set keys for one repo, run this in a Claude Code session in that repo:
 /mate-record:langfuse-setup
 ```
 
-The skill prepares `.claude/settings.local.json` in the repo's main checkout with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When the repo's own `.claude/settings.local.json` already holds both keys, the skill says so and changes nothing. In a worktree, that is the worktree's own file, or else the main checkout's. Keys set anywhere else, such as for every repo on the machine, do not count. When the hook cannot run on the machine, it offers to install uv.
+The skill prepares `.claude/settings.local.json` in the repo's main checkout with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When the repo's own `.claude/settings.local.json` already holds both keys, the skill says so and changes nothing. In a worktree, that is the main checkout's file, or else the worktree's own. The repo is the one the Claude Code session started in, also after the session changes to another folder. Keys set anywhere else, such as for every repo on the machine, do not count. When the hook cannot run on the machine, it offers to install uv.
 
-To set keys for every repo on the machine instead, configure the plugin from within a Claude Code session. This is a Claude Code slash command, not a shell command:
+The keys and the Langfuse address go only in the `env` block of the repo's own `.claude/settings.local.json`: `LANGFUSE_PUBLIC_KEY` (`pk-lf-...`), `LANGFUSE_SECRET_KEY` (`sk-lf-...`) and, for your own Langfuse server, `LANGFUSE_BASE_URL`. Without an address there, traces go to https://cloud.langfuse.com, Langfuse Cloud EU. Keys and addresses set anywhere else, such as in your terminal or in the plugin's settings, are not used. The plugin refuses Langfuse Cloud's US, HIPAA and Japan regions: it sends nothing there and says so when the session starts.
 
-```text
-/plugin configure mate-record@mate-marketplace
-```
-
-Alternatively, pass configuration values during install:
-
-```bash
-claude plugin install mate-record@mate-marketplace \
-  --config LANGFUSE_PUBLIC_KEY=pk-lf-... \
-  --config LANGFUSE_SECRET_KEY=sk-lf-... \
-  --config LANGFUSE_BASE_URL=https://cloud.langfuse.com
-```
-
-The plugin requires or accepts:
+The plugin's other settings are read from an environment variable, else from the plugin's settings (`/plugin configure`):
 
 | Field                 | Description                                                                                          |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
-| `LANGFUSE_SECRET_KEY` | Your Langfuse secret key (`sk-lf-...`). Stored in your OS keychain.                                  |
-| `LANGFUSE_PUBLIC_KEY` | Your Langfuse public key (`pk-lf-...`).                                                              |
-| `LANGFUSE_BASE_URL`   | https://cloud.langfuse.com (Langfuse Cloud EU, the default) or your self-hosted URL. The plugin refuses Langfuse Cloud's US, HIPAA and Japan regions: it sends nothing there and says so when the session starts. |
 | `LANGFUSE_USER_ID`    | Optional. User identifier attached to every trace (shown as the user in Langfuse). Leave it empty to use your login email. See [Trace user](#trace-user). |
 | `CC_LANGFUSE_DEBUG`   | Verbose logging to `~/.claude/state/langfuse_hook.log`.                                              |
 | `CC_LANGFUSE_MAX_CHARS` | Truncate captured inputs/outputs to this many characters (default 20000).                          |
@@ -255,21 +239,22 @@ teammate sub-traces to move it.
 | `comment`    | The operator's own words.                                         |
 | `created`    | ISO 8601 UTC timestamp.                                            |
 | `session_id` | For log correlation only.                                         |
+| `target`     | Optional. A hash of the Langfuse address and public key in the repo's own `.claude/settings.local.json` when the hurt was queued. |
 
-This hook is the sole consumer (`hooks/hurt_annotations.py`): on every `Stop`/`SessionEnd` firing, before anything else, it attempts every queued entry using its own already-configured Langfuse credentials — the same ones writing this machine's traces, so a hurt can never be misrouted to the wrong project. For each entry it confirms the trace exists, provisions a `hurt` categorical score config idempotently, then writes the categorical `hurt` score with the operator's text as the score's comment. In Langfuse, find hurts by the `hurt` score.
+This hook is the sole consumer (`hooks/hurt_annotations.py`): on every `Stop`/`SessionEnd` firing, before anything else, it attempts every queued entry whose `target` matches its own repo's keys, or that has no `target`, using those keys — the same ones writing that repo's traces, so a hurt can never be misrouted to the wrong project. For each entry it confirms the trace exists, provisions a `hurt` categorical score config idempotently, then writes the categorical `hurt` score with the operator's text as the score's comment. In Langfuse, find hurts by the `hurt` score.
 
 The trace is looked up through Langfuse's v2 Observations API (`/api/public/v2/observations`), which Langfuse Cloud and self-hosted Langfuse v4 serve. A self-hosted Langfuse v3 server does not, so there hurts stay queued and are not attached. A hurt whose trace is not there yet waits in the queue for a later run.
 
-An entry is removed only once all of that succeeds. One that can't yet be attached — Langfuse unreachable, the trace not yet uploaded, credentials misconfigured — stays queued and is retried the next time *any* Claude Code session's hook fires on this machine (the queue is not scoped to the session that created it, so a healthy project's hook can drain hurts left behind by one whose hook never runs again). Entries older than 30 days that are still unresolvable are dropped rather than retried forever.
+An entry is removed only once all of that succeeds. One that can't yet be attached — Langfuse unreachable, the trace not yet uploaded, credentials misconfigured — stays queued and is retried the next time the hook of a session with the same keys fires on this machine (the queue is not scoped to the session that created it, so another session of the same project can attach hurts left behind by one whose hook never runs again). Entries older than 30 days that are still unresolvable are dropped rather than retried forever.
 
 ## Privacy
 
 This plugin transmits your Claude Code session data — conversation turns, assistant
 generations, tool calls, and token-usage statistics — to the Langfuse endpoint you
-configure (`LANGFUSE_BASE_URL`, default `https://cloud.langfuse.com`, Langfuse Cloud
+configure (`LANGFUSE_BASE_URL` in the repo's `.claude/settings.local.json`, default `https://cloud.langfuse.com`, Langfuse Cloud
 EU; self-hosted endpoints are supported, Langfuse Cloud's other regions are refused). Data is sent at the end of each turn (the
 `Stop` hook) and at session end (`SessionEnd`) using the Langfuse API keys you
-provide, which are stored in your OS keychain. No data is sent anywhere other than
+put in that file. No data is sent anywhere other than
 the endpoint you configure. This also includes any queued `/hurt` annotation's category and operator-written
 comment, sent to the same endpoint (see [Flagging what hurt with /hurt](#flagging-what-hurt-with-hurt)).
 
@@ -287,7 +272,7 @@ stays within your own infrastructure.
 
 ## Reconfigure
 
-In Claude Code, run:
+To change the keys or the address, edit the repo's `.claude/settings.local.json`; the hook reads it again at the end of each turn. To change the other settings, run in Claude Code:
 
 ```text
 /plugin configure mate-record@mate-marketplace

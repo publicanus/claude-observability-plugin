@@ -28,7 +28,7 @@ If nothing in the text supports any of the first five, use `other` — don't for
 Run, via the Bash tool:
 
 ```
-sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/hurt.py" --category "<chosen-category>" --comment '<text>'
+cd "${CLAUDE_PROJECT_DIR}" && sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/hurt.py" --category "<chosen-category>" --comment '<text>'
 ```
 
 `<text>` is the operator's text with the override token stripped. Put it in single quotes, as above, and write each `'` inside it as `'\''`, so that a `$` or a backtick in the operator's words reaches the queue as typed.

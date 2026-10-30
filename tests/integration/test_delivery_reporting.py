@@ -5,6 +5,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from conftest import write_settings
+
+
+REPO_FILE = ".claude/settings.local.json"
+REREAD = "The hook reads that file again at the end of each turn."
+
+
+def assert_points_at_the_repo_file(warning: str) -> None:
+    """The repair text names the repo's own settings file as the place to fix,
+    and sends the user neither to the terminal nor to a restart."""
+    assert REPO_FILE in warning
+    assert warning.endswith(REREAD)
+    assert "echo $LANGFUSE_PUBLIC_KEY" not in warning
+    assert "frozen" not in warning
+    assert "restart" not in warning
+
 
 class FakeResponse:
     def __init__(self, status: int) -> None:
@@ -128,12 +144,29 @@ def test_get_delivery_status_rechecks_once_the_interval_has_elapsed(hook_module,
     state_file = isolated_hook_state / "langfuse_state.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
     stale = datetime.now(timezone.utc) - hook_module.DELIVERY_HEALTH_CHECK_INTERVAL - timedelta(seconds=1)
-    state[hook_module.DELIVERY_HEALTH_STATE_KEY]["updated"] = stale.isoformat()
+    for verdict in state[hook_module.DELIVERY_HEALTH_STATE_KEY].values():
+        verdict["updated"] = stale.isoformat()
     state_file.write_text(json.dumps(state), encoding="utf-8")
 
     hook_module.get_delivery_status(config)
 
     assert len(FakeDeliveryClient.calls) == 2
+
+
+def test_two_repos_with_their_own_keys_each_keep_their_verdict(hook_module, isolated_hook_state, monkeypatch):
+    config_a = hook_module.LangfuseConfig("public-a", "secret-a", "https://a.example.test", "user-1", repo_name="a")
+    config_b = hook_module.LangfuseConfig("public-b", "secret-b", "https://b.example.test", "user-1", repo_name="b")
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+    hook_module.get_delivery_status(config_a)
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
+    hook_module.get_delivery_status(config_b)
+    FakeDeliveryClient.calls = []
+
+    again = hook_module.get_delivery_status(config_a)
+
+    assert again == ("ok", "")
+    assert FakeDeliveryClient.calls == [], "repo A's verdict was probed again"
+    assert hook_module.peek_delivery_status(config_b)[0] == "rejected"
 
 
 # ----------------- peek_delivery_status: cache-only, never probes -----------------
@@ -165,7 +198,8 @@ def test_peek_delivery_status_returns_a_verdict_however_stale(hook_module, isola
     state_file = isolated_hook_state / "langfuse_state.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
     stale = datetime.now(timezone.utc) - hook_module.DELIVERY_HEALTH_CHECK_INTERVAL * 10
-    state[hook_module.DELIVERY_HEALTH_STATE_KEY]["updated"] = stale.isoformat()
+    for verdict in state[hook_module.DELIVERY_HEALTH_STATE_KEY].values():
+        verdict["updated"] = stale.isoformat()
     state_file.write_text(json.dumps(state), encoding="utf-8")
 
     status, detail = hook_module.peek_delivery_status(config)
@@ -239,13 +273,8 @@ def test_warning_on_authentication_rejection_is_a_repair_recipe(hook_module):
     assert "no traces are being recorded" in warning
     assert "HTTP 401 from https://example.test" in warning
     assert "rotated key" in warning
-    # Says explicitly that a fix in the secrets file won't take effect
-    # without a restart — the exact circle the operator got stuck in.
-    assert "frozen at launch" in warning
-    assert "restart Claude Code" in warning
-    # Gives the actual command to compare against, not just the env var names.
-    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
     assert "LANGFUSE_PUBLIC_KEY" in warning and "LANGFUSE_SECRET_KEY" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 def test_warning_on_unreachable_host_is_a_repair_recipe(hook_module):
@@ -260,8 +289,7 @@ def test_warning_on_unreachable_host_is_a_repair_recipe(hook_module):
     assert "https://cloud.langfuse.com" in warning
     for other_region in ("us.cloud", "hipaa.cloud", "jp.cloud"):
         assert other_region not in warning
-    assert "restart Claude Code" in warning
-    assert "frozen" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 # ----------------- end-to-end through main(): the actual log line written -----------------
@@ -310,13 +338,10 @@ def run_main(
     hook_event_name: str = "Stop",
     base_url: Optional[str] = "https://example.test",
 ) -> tuple[str, Optional[dict]]:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
-    for name in ("LANGFUSE_BASE_URL", "CC_LANGFUSE_BASE_URL"):
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(f"CLAUDE_PLUGIN_OPTION_{name}", raising=False)
+    env = {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"}
     if base_url is not None:
-        monkeypatch.setenv("LANGFUSE_BASE_URL", base_url)
+        env["LANGFUSE_BASE_URL"] = base_url
+    write_settings(Path.cwd(), env)
     monkeypatch.setattr(
         hook_module,
         "read_hook_payload",
@@ -369,8 +394,7 @@ def test_main_logs_rejection_instead_of_processed_on_bad_credentials(
     assert "no traces are being recorded" in warning
     assert "LANGFUSE_PUBLIC_KEY" in warning and "LANGFUSE_SECRET_KEY" in warning
     assert "rotated key" in warning
-    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
-    assert "restart Claude Code" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 def test_rejected_keys_with_no_address_set_point_at_the_eu_region(
@@ -389,7 +413,7 @@ def test_rejected_keys_with_no_address_set_point_at_the_eu_region(
     assert "by default" in warning
     assert "another region" in warning
     assert "EU project" in warning
-    assert "restart Claude Code" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 def test_main_logs_unreachable_instead_of_processed_on_dead_host(
@@ -410,7 +434,7 @@ def test_main_logs_unreachable_instead_of_processed_on_dead_host(
     assert "wait on this computer and are sent once Langfuse answers again" in warning
     assert "LANGFUSE_BASE_URL" in warning
     assert "https://cloud.langfuse.com" in warning
-    assert "restart Claude Code" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 def test_main_warns_on_session_end_too(hook_module, isolated_hook_state, fake_langfuse, monkeypatch, capsys, tmp_path):
@@ -427,8 +451,7 @@ def test_main_warns_on_session_end_too(hook_module, isolated_hook_state, fake_la
     assert system_message is not None
     warning = system_message["systemMessage"]
     assert "no traces are being recorded" in warning
-    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
-    assert "restart Claude Code" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 def test_main_warns_every_firing_even_with_nothing_new_to_send(
@@ -451,8 +474,7 @@ def test_main_warns_every_firing_even_with_nothing_new_to_send(
     assert system_message is not None
     warning = system_message["systemMessage"]
     assert "no traces are being recorded" in warning
-    assert "echo $LANGFUSE_PUBLIC_KEY" in warning
-    assert "restart Claude Code" in warning
+    assert_points_at_the_repo_file(warning)
 
 
 def test_main_stays_silent_with_nothing_new_and_no_verdict_yet(

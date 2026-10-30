@@ -8,19 +8,11 @@ temp one, never the machine's.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
-
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-    )
+from conftest import config_for, git, write_settings
 
 
 def make_repo(path: Path, remotes: dict[str, str]) -> Path:
@@ -37,7 +29,7 @@ def test_origin_names_the_repo(hook_module, isolated_hook_state, tmp_path):
         {"aaa": "git@github.com:acme/till.git", "origin": "git@github.com:acme/shop.git"},
     )
 
-    assert hook_module.read_repo_name(str(repo)) == "shop"
+    assert hook_module.read_repo_name(hook_module.find_checkout(repo)) == "shop"
 
 
 def test_without_origin_the_first_remote_by_name_names_the_repo(
@@ -48,7 +40,7 @@ def test_without_origin_the_first_remote_by_name_names_the_repo(
         {"work": "git@github.com:acme/till.git", "upstream": "git@github.com:acme/shop.git"},
     )
 
-    assert hook_module.read_repo_name(str(repo)) == "shop"
+    assert hook_module.read_repo_name(hook_module.find_checkout(repo)) == "shop"
 
 
 @pytest.mark.parametrize(
@@ -61,14 +53,14 @@ def test_the_name_is_the_last_part_of_the_address_without_dot_git(
 ):
     repo = make_repo(tmp_path / "checkout", {"origin": address})
 
-    assert hook_module.read_repo_name(str(repo)) == "shop"
+    assert hook_module.read_repo_name(hook_module.find_checkout(repo)) == "shop"
 
 
 def test_a_folder_outside_git_is_named_after_the_folder(hook_module, isolated_hook_state, tmp_path):
     folder = tmp_path / "shop"
     folder.mkdir()
 
-    assert hook_module.read_repo_name(str(folder)) == "shop"
+    assert hook_module.read_repo_name(hook_module.find_checkout(folder)) == "shop"
 
 
 def test_all_worktrees_of_a_repo_without_remote_share_the_main_folder_name(
@@ -79,20 +71,19 @@ def test_all_worktrees_of_a_repo_without_remote_share_the_main_folder_name(
     worktree = tmp_path / "shop-feature"
     git(main, "worktree", "add", "-q", str(worktree))
 
-    assert hook_module.read_repo_name(str(main)) == "shop"
-    assert hook_module.read_repo_name(str(worktree)) == "shop"
+    assert hook_module.read_repo_name(hook_module.find_checkout(main)) == "shop"
+    assert hook_module.read_repo_name(hook_module.find_checkout(worktree)) == "shop"
 
 
 def test_every_observation_carries_the_repo_and_never_the_address(
     hook_module, isolated_hook_state, fake_langfuse, fixture_transcript_path, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
     token = "ghp_0123456789abcdefSECRET"
     repo = make_repo(
         tmp_path / "checkout", {"origin": f"https://jaap:{token}@github.com/acme/shop.git"}
     )
-    config = hook_module.get_langfuse_config(str(repo))
+    write_settings(repo, {"LANGFUSE_PUBLIC_KEY": "public", "LANGFUSE_SECRET_KEY": "secret"})
+    config = config_for(hook_module, repo)
 
     emitted = hook_module.emit_new_turns_from_transcript(
         fake_langfuse, config, "session-repo", fixture_transcript_path("async_agent_completed")
