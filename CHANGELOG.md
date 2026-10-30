@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **hook:** tracing now uses only the Langfuse keys and address in the repo's own .claude/settings.local.json (in a worktree: the main checkout's file when it holds both keys, else the worktree's own). Keys or an address set in the terminal, in direnv, or with /plugin configure (machine-wide userConfig) are no longer used, and the userConfig fields LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and LANGFUSE_BASE_URL are gone. Without an address in that file, traces go to Langfuse Cloud EU. To keep tracing a repo, run
+* **hook:** tracing now uses only the Langfuse keys and address in the repo's own .claude/settings.local.json (in a worktree: the main checkout's file when it holds both keys, else the worktree's own). Keys or an address set in the terminal, in direnv, or with /plugin configure (machine-wide userConfig) are no longer used, and the userConfig fields LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and LANGFUSE_BASE_URL are gone. Without an address in that file, traces go to Langfuse Cloud EU. To keep tracing a repo, run /mate-record:langfuse-setup in it and paste the keys into the file it opens.
 
 ### Bug Fixes
 
