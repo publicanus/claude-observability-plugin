@@ -190,8 +190,8 @@ def test_turn_waiting_on_multiple_agents_resolves_only_after_all_notifications(h
     assert remaining == []
     assert state.pending_agent_turns == []
     assert len(resolved) == 1
-    assert resolved[0] == deferred_rows
-    assert resolved[0][-2:] == [first_notification, second_notification]
+    assert resolved[0]["rows"] == deferred_rows
+    assert resolved[0]["rows"][-2:] == [first_notification, second_notification]
 
 
 def test_duplicate_notifications_for_same_agent_are_routed_to_the_deferred_turn(hook_module):
@@ -217,9 +217,9 @@ def test_duplicate_notifications_for_same_agent_are_routed_to_the_deferred_turn(
     assert remaining == []
     assert state.pending_agent_turns == []
     assert len(resolved) == 1
-    assert resolved[0][-2:] == notifications
+    assert resolved[0]["rows"][-2:] == notifications
 
-    turns = hook_module.build_turns(resolved[0])
+    turns = hook_module.build_turns(resolved[0]["rows"])
     assert len(turns) == 1
     assert turns[0].tool_results_by_id["toolu_agent_a"]["final_content"] == "Result (final)"
 

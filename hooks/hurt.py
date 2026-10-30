@@ -122,8 +122,8 @@ def resolve_latest_trace_id(
     trace_id = entry.get("latest_trace_id")
     if not isinstance(trace_id, str) or not trace_id:
         return Resolution(
-            error="This session has no latest_trace_id yet — the most recent "
-            "turn may not have finished uploading to Langfuse."
+            error="This session has no latest_trace_id yet — the hook has not "
+            "seen a turn of this session yet."
         )
 
     return Resolution(trace_id=trace_id)
@@ -208,7 +208,7 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
 
     print(
         f"/hurt: queued '{args.category}' for trace {trace_id}. "
-        "mate-record's hook will attach it (tag, score, comment) the next time it runs."
+        "mate-record's hook attaches it once that trace is in Langfuse."
     )
     return 0
 

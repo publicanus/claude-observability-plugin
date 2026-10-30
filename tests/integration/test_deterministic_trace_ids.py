@@ -207,3 +207,19 @@ def test_forced_context_failure_falls_back_to_auto_generated_trace_id(
     assert emitted == 2
     for root in get_root_observations(fake_langfuse):
         assert root._otel_span.context is None
+
+
+def test_a_root_span_under_a_chosen_trace_id_is_marked_as_the_trace_root(
+    hook_module, fake_langfuse, isolated_hook_state, tmp_path
+):
+    transcript = write_two_turn_transcript(tmp_path)
+    config = hook_module.LangfuseConfig(
+        "public", "secret", "https://example.test", "user-1", repo_name="shop", trace_seed="session-abc"
+    )
+
+    hook_module.emit_new_turns_from_transcript(fake_langfuse, config, "session-seeded", transcript)
+
+    roots = get_root_observations(fake_langfuse)
+    assert len(roots) == 2
+    for root in roots:
+        assert root._otel_span.attributes.get("langfuse.internal.as_root") is True

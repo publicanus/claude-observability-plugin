@@ -31,7 +31,7 @@ def _install_langfuse_stubs() -> None:
             # Mirrors langfuse v4: seeded trace ids are sha256(seed)[:32].
             if seed:
                 return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
-            return "f" * 32
+            return format(random.getrandbits(128), "032x")
 
     @contextlib.contextmanager
     def propagate_attributes(**attributes: Any) -> Iterator[None]:
@@ -41,9 +41,16 @@ def _install_langfuse_stubs() -> None:
         finally:
             _open_propagated_attributes.pop()
 
+    class LangfuseOtelSpanAttributes:
+        AS_ROOT = "langfuse.internal.as_root"
+
     langfuse_module.Langfuse = Langfuse
     langfuse_module.propagate_attributes = propagate_attributes
     sys.modules["langfuse"] = langfuse_module
+    attributes_module = types.ModuleType("langfuse._client.attributes")
+    attributes_module.LangfuseOtelSpanAttributes = LangfuseOtelSpanAttributes
+    sys.modules["langfuse._client"] = types.ModuleType("langfuse._client")
+    sys.modules["langfuse._client.attributes"] = attributes_module
 
     opentelemetry_module = types.ModuleType("opentelemetry")
     trace_module = types.ModuleType("opentelemetry.trace")
@@ -111,8 +118,8 @@ def _install_langfuse_stubs() -> None:
 def load_hook_module() -> Any:
     """Loads hooks/langfuse_hook.py with langfuse and opentelemetry stubbed out.
 
-    Replaces sys.modules["langfuse"], ["opentelemetry"] and ["opentelemetry.trace"]
-    with stubs, and registers the hook as sys.modules["langfuse_hook_under_test"].
+    Replaces sys.modules["langfuse"], ["langfuse._client.attributes"], ["opentelemetry"]
+    and ["opentelemetry.trace"] with stubs, and registers the hook as sys.modules["langfuse_hook_under_test"].
     """
     _install_langfuse_stubs()
     module_path = REPO_ROOT / "hooks" / "langfuse_hook.py"
@@ -161,6 +168,10 @@ class FakeOtelSpan:
         # a random 128-bit trace id, only used when no remote parent context
         # carries a forced one.
         self._auto_span_context = FakeSpanContext(random.getrandbits(128))
+        self.attributes: dict[str, Any] = {}
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        self.attributes[key] = value
 
     def get_span_context(self) -> FakeSpanContext:
         if self.context is not None:
