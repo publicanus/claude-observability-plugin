@@ -3487,6 +3487,8 @@ def emit_new_turns_from_transcript(
 # endpoint the SDK authenticates against, made with LangfuseClient rather than
 # the SDK's blocking, retrying auth_check().
 
+# The last verdict per credential fingerprint, as {fingerprint: {"status", "detail", "updated"}},
+# so the repos of one machine, each with its own keys, keep their own verdict.
 DELIVERY_HEALTH_STATE_KEY = "_delivery_health"
 # Re-verified at most this often: a blocking round trip on every
 # Stop/SessionEnd firing is not acceptable, but a rejected or revoked
@@ -3522,9 +3524,21 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
     return "unreachable", f"HTTP {response.status} from {config.host}"
 
 
+def _delivery_verdicts(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    verdicts = state.get(DELIVERY_HEALTH_STATE_KEY)
+    if not isinstance(verdicts, dict):
+        return {}
+    return {fingerprint: verdict for fingerprint, verdict in verdicts.items() if isinstance(verdict, dict)}
+
+
+def _checked_since(verdict: Dict[str, Any], moment: datetime) -> bool:
+    checked_at = parse_timestamp(verdict.get("updated"))
+    return checked_at is not None and checked_at > moment
+
+
 def _cached_delivery_status(state: Dict[str, Any], fingerprint: str) -> Optional[Tuple[str, str]]:
-    cached = state.get(DELIVERY_HEALTH_STATE_KEY)
-    if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+    cached = _delivery_verdicts(state).get(fingerprint)
+    if cached is None:
         return None
     checked_at = parse_timestamp(cached.get("updated"))
     status = cached.get("status")
@@ -3567,12 +3581,14 @@ def get_delivery_status(config: LangfuseConfig) -> Tuple[str, str]:
     try:
         with FileLock(LOCK_FILE):
             state = load_hook_state()
-            state[DELIVERY_HEALTH_STATE_KEY] = {
-                "fingerprint": fingerprint,
-                "status": status,
-                "detail": detail,
-                "updated": datetime.now(timezone.utc).isoformat(),
+            now = datetime.now(timezone.utc)
+            verdicts = {
+                other: verdict
+                for other, verdict in _delivery_verdicts(state).items()
+                if _checked_since(verdict, now - STATE_MAX_AGE)
             }
+            verdicts[fingerprint] = {"status": status, "detail": detail, "updated": now.isoformat()}
+            state[DELIVERY_HEALTH_STATE_KEY] = verdicts
             save_hook_state(state)
     except TimeoutError as e:
         debug(f"delivery health lock timeout while caching result: {e}")
@@ -3597,8 +3613,8 @@ def peek_delivery_status(config: LangfuseConfig) -> Optional[Tuple[str, str]]:
             state = load_hook_state()
     except TimeoutError:
         return None
-    cached = state.get(DELIVERY_HEALTH_STATE_KEY)
-    if not isinstance(cached, dict) or cached.get("fingerprint") != fingerprint:
+    cached = _delivery_verdicts(state).get(fingerprint)
+    if cached is None:
         return None
     status = cached.get("status")
     if not isinstance(status, str):

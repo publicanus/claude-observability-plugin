@@ -144,12 +144,29 @@ def test_get_delivery_status_rechecks_once_the_interval_has_elapsed(hook_module,
     state_file = isolated_hook_state / "langfuse_state.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
     stale = datetime.now(timezone.utc) - hook_module.DELIVERY_HEALTH_CHECK_INTERVAL - timedelta(seconds=1)
-    state[hook_module.DELIVERY_HEALTH_STATE_KEY]["updated"] = stale.isoformat()
+    for verdict in state[hook_module.DELIVERY_HEALTH_STATE_KEY].values():
+        verdict["updated"] = stale.isoformat()
     state_file.write_text(json.dumps(state), encoding="utf-8")
 
     hook_module.get_delivery_status(config)
 
     assert len(FakeDeliveryClient.calls) == 2
+
+
+def test_two_repos_with_their_own_keys_each_keep_their_verdict(hook_module, isolated_hook_state, monkeypatch):
+    config_a = hook_module.LangfuseConfig("public-a", "secret-a", "https://a.example.test", "user-1", repo_name="a")
+    config_b = hook_module.LangfuseConfig("public-b", "secret-b", "https://b.example.test", "user-1", repo_name="b")
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(200))
+    hook_module.get_delivery_status(config_a)
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
+    hook_module.get_delivery_status(config_b)
+    FakeDeliveryClient.calls = []
+
+    again = hook_module.get_delivery_status(config_a)
+
+    assert again == ("ok", "")
+    assert FakeDeliveryClient.calls == [], "repo A's verdict was probed again"
+    assert hook_module.peek_delivery_status(config_b)[0] == "rejected"
 
 
 # ----------------- peek_delivery_status: cache-only, never probes -----------------
@@ -181,7 +198,8 @@ def test_peek_delivery_status_returns_a_verdict_however_stale(hook_module, isola
     state_file = isolated_hook_state / "langfuse_state.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
     stale = datetime.now(timezone.utc) - hook_module.DELIVERY_HEALTH_CHECK_INTERVAL * 10
-    state[hook_module.DELIVERY_HEALTH_STATE_KEY]["updated"] = stale.isoformat()
+    for verdict in state[hook_module.DELIVERY_HEALTH_STATE_KEY].values():
+        verdict["updated"] = stale.isoformat()
     state_file.write_text(json.dumps(state), encoding="utf-8")
 
     status, detail = hook_module.peek_delivery_status(config)
