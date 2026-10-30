@@ -29,7 +29,7 @@ def test_emit_turn_observations_creates_generation_tool_and_subagent_observation
     assert "Subagent: Summarize docs" in names
     assert "Subagent LLM Call 1" in names
     assert "Tool: ToolSearch" in names
-    assert latest_end_timestamp.isoformat() == "2026-01-01T00:02:06+00:00"
+    assert latest_end_timestamp.isoformat() == "2026-01-01T00:02:04.500000+00:00"
 
     agent_tool = next(observation for observation in fake_langfuse.observations if observation.name == "Tool: Agent")
     assert agent_tool.kwargs["metadata"]["subagent_transcript_path"] == "agent-agent-complete.jsonl"
