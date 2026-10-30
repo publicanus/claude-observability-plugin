@@ -199,8 +199,10 @@ subprocess.run(
 # When the hook uploads the turn, its trace appears in Langfuse under trace_id.
 ```
 
-If derivation or wiring fails for any reason, the hook falls back to an auto-generated
-trace ID (fail-open, like the rest of the hook). Unset or empty seed = unchanged behavior.
+If derivation or wiring fails, a turn sent at once falls back to an auto-generated
+trace ID (fail-open, like the rest of the hook). A turn that waits for a background
+agent is not sent when its trace ID cannot be derived, and the hook log says so.
+Unset or empty seed = unchanged behavior.
 
 ### Reading the latest trace ID without polling
 

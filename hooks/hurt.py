@@ -121,7 +121,7 @@ def resolve_latest_trace_id(
             )
         return Resolution(
             error="No mate-record state entry for this session — "
-            "the hook may not be installed/enabled, or no turn has been emitted yet."
+            "the hook may not be installed/enabled, or it has not seen a turn of this session yet."
         )
 
     trace_id = entry.get("latest_trace_id")
