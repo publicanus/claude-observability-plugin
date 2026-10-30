@@ -98,8 +98,8 @@ def resolve_latest_trace_id(
 ) -> Resolution:
     """The session's latest trace id, or why there is none.
 
-    Without a state entry, it reads the repo's own settings file of the working
-    directory, as the hook does, to say why.
+    Without a state entry, it reads the repo's own settings file, found from
+    CLAUDE_PROJECT_DIR or else the working directory, as the hook does, to say why.
     Raises StateFileError when state_file exists but cannot be read, and
     SettingsFileError when the repo's settings file cannot be read.
     """
@@ -173,8 +173,9 @@ def append_pending_hurt(
 # ----------------- CLI -----------------
 
 def read_queue_target() -> Optional[str]:
-    """queue_target() of the keys and address in the repo's own settings file of the
-    working directory; None when it holds no keys. Raises SettingsFileError."""
+    """queue_target() of the keys and address in the repo's own settings file, found
+    from CLAUDE_PROJECT_DIR or else the working directory; None when it holds no keys.
+    Raises SettingsFileError."""
     env = repo_settings_env(find_checkout(project_folder(None)))
     if not env_holds_keys(env):
         return None

@@ -3803,9 +3803,9 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
     reports the delivery status in the log and, when it is bad, to the user."""
     # Runs on every firing, independent of this run's hook_context/payload —
     # the pending queue is global to the machine, not scoped to this session,
-    # so a healthy hook run in any project can drain hurts left behind by a
-    # session whose hook never runs again. Never allowed to block turn
-    # emission below.
+    # so a run with the same keys can attach hurts left behind by a session
+    # whose hook never runs again (and any run those without a target).
+    # Never allowed to block turn emission below.
     try:
         with FileLock(HURT_PENDING_LOCK_FILE):
             attached = process_pending_hurts(config, HURT_PENDING_FILE, log=info)

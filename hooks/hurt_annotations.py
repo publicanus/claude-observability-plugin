@@ -33,7 +33,8 @@ keeps its hurt queued for a later run.
 
 A hurt that can't yet be attached — Langfuse unreachable, the trace not
 yet uploaded, credentials misconfigured — stays queued and is
-retried the next time any Claude Code session's hook fires; it is never
+retried the next time a hook runs with the keys of its target, or, for a
+hurt without a target, the next time any hook runs; it is never
 dropped optimistically. Entries older than PENDING_MAX_AGE_DAYS that still
 can't resolve are dropped so the queue doesn't grow without bound — logged,
 not silent.
