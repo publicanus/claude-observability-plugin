@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/publicanus/claude-observability-plugin/compare/v2.0.0...v2.0.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **hook:** a /hurt typed while turns wait for an agent reaches their trace ([#65](https://github.com/publicanus/claude-observability-plugin/issues/65)) ([#67](https://github.com/publicanus/claude-observability-plugin/issues/67)) ([1ad60f5](https://github.com/publicanus/claude-observability-plugin/commit/1ad60f5baf072f7f5d3922f7fb20018d120e33a5))
+
 ## [2.0.0](https://github.com/publicanus/claude-observability-plugin/compare/v1.7.0...v2.0.0) (2026-10-29)
 
 
