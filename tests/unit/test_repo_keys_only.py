@@ -214,11 +214,43 @@ def test_a_broken_settings_file_gives_one_not_traced_message_naming_it_at_sessio
     assert hook_module.NO_KEYS_WARNING not in message
 
 
+def message_of(out: str) -> Any:
+    return json.loads(out)["systemMessage"] if out else None
+
+
 @pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
-def test_a_broken_settings_file_sends_nothing_and_stays_quiet_on_later_events(
+def test_a_file_broken_mid_session_is_named_on_the_next_event_once_and_nothing_is_sent(
     hook_module, nothing_may_be_sent, monkeypatch, capsys, tmp_path, repo, broken_file, event
 ):
     monkeypatch.setattr(hook_module, "start_waiting_turns_sender", lambda: pytest.fail("sender started"))
     payload = {**stop_payload(repo, tmp_path), "hook_event_name": event}
 
-    assert run_main(hook_module, monkeypatch, capsys, payload) == ""
+    first = message_of(run_main(hook_module, monkeypatch, capsys, payload))
+    second = run_main(hook_module, monkeypatch, capsys, payload)
+
+    assert str(broken_file) in first
+    assert "This session is not traced until the file is fixed" in first
+    assert second == ""
+
+
+def test_a_break_named_at_session_start_is_not_named_again_on_stop(
+    hook_module, nothing_may_be_sent, monkeypatch, capsys, tmp_path, repo, broken_file
+):
+    run_main(hook_module, monkeypatch, capsys, {"hook_event_name": "SessionStart", "cwd": str(repo)})
+
+    assert run_main(hook_module, monkeypatch, capsys, stop_payload(repo, tmp_path)) == ""
+
+
+def test_a_file_fixed_and_broken_again_is_named_again(
+    hook_module, nothing_may_be_sent, monkeypatch, capsys, tmp_path, repo, broken_file
+):
+    payload = stop_payload(repo, tmp_path)
+    run_main(hook_module, monkeypatch, capsys, payload)
+    broken_file.write_text(json.dumps({"env": EMPTY_KEYS}), encoding="utf-8")
+    fixed = run_main(hook_module, monkeypatch, capsys, payload)
+    broken_file.write_text("{not json", encoding="utf-8")
+
+    again = message_of(run_main(hook_module, monkeypatch, capsys, payload))
+
+    assert fixed == ""
+    assert str(broken_file) in again

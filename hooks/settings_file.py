@@ -15,11 +15,11 @@ True when that block holds both keys, not empty.
 
 KEY_NAMES are the names a key goes by, LANGFUSE_ before CC_LANGFUSE_.
 
-repo_settings_envs(checkout) returns the env blocks of the repo's own settings
-files, in the order they count; repo_settings_env(checkout) and
-repo_settings_hold_keys(checkout) read the repo's
-own REPO_SETTINGS_FILE, the only source of the keys and the Langfuse address, for a
-repo_checkout.Checkout; SETUP_COMMAND is the command that prepares that file.
+The repo's own REPO_SETTINGS_FILE is the only source of the keys and the Langfuse
+address; SETUP_COMMAND is the command that prepares it. For a repo_checkout.Checkout:
+repo_settings_paths and repo_settings_envs return the repo's files and their env
+blocks, in the order they count; repo_settings_env returns the block that counts,
+and repo_settings_hold_keys whether it holds both keys.
 
 Uses only the Python standard library and git, so /hurt can import it without langfuse.
 """
@@ -38,7 +38,12 @@ KEY_NAMES = PUBLIC_KEY_NAMES + SECRET_KEY_NAMES
 
 
 class SettingsFileError(Exception):
-    """A settings file exists but cannot be read as Claude Code settings; str() names the file."""
+    """A settings file exists but cannot be read as Claude Code settings; str() names the
+    file, and path is the file."""
+
+    def __init__(self, message: str, path: Path) -> None:
+        super().__init__(message)
+        self.path = path
 
 
 def load_settings(path: Path) -> Dict[str, Any]:
@@ -47,11 +52,11 @@ def load_settings(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as e:
-        raise SettingsFileError(f"cannot read {path} as JSON: {e}") from e
+        raise SettingsFileError(f"cannot read {path} as JSON: {e}", path) from e
     if not isinstance(data, dict):
-        raise SettingsFileError(f"{path} does not hold a JSON object")
+        raise SettingsFileError(f"{path} does not hold a JSON object", path)
     if not isinstance(data.get("env", {}), dict):
-        raise SettingsFileError(f'the "env" in {path} is not a JSON object')
+        raise SettingsFileError(f'the "env" in {path} is not a JSON object', path)
     return data
 
 
@@ -83,8 +88,13 @@ def repo_settings_envs(checkout: Checkout) -> List[Dict[str, Any]]:
     git, or in the main checkout itself, only checkout.root's. A missing file gives {}.
     Raises SettingsFileError, naming the file, when a file is broken.
     """
+    return [load_settings(path).get("env", {}) for path in repo_settings_paths(checkout)]
+
+
+def repo_settings_paths(checkout: Checkout) -> List[Path]:
+    """The repo's own REPO_SETTINGS_FILE paths, in the order repo_settings_envs reads them."""
     roots = [checkout.root] if checkout.main in (None, checkout.root) else [checkout.main, checkout.root]
-    return [load_settings(root / REPO_SETTINGS_FILE).get("env", {}) for root in roots]
+    return [root / REPO_SETTINGS_FILE for root in roots]
 
 
 def repo_settings_env(checkout: Checkout) -> Dict[str, Any]:

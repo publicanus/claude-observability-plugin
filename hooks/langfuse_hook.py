@@ -91,6 +91,7 @@ from settings_file import (  # noqa: E402
     read_env_keys,
     repo_settings_env,
     repo_settings_envs,
+    repo_settings_paths,
 )
 from waiting_turns import Target, send_waiting_turns, start_sender, waiting_files, write_waiting_batch  # noqa: E402
 import work_item  # noqa: E402
@@ -566,6 +567,42 @@ def format_no_keys_message(checkout: Checkout) -> str:
 
 def format_broken_settings_message(error: SettingsFileError) -> str:
     return f"Langfuse: {error}. This session is not traced until the file is fixed. {SETTINGS_REREAD}"
+
+# The broken settings files already reported, as {path: error text}, so a break is
+# named once on Stop or SessionEnd, not on every turn.
+BROKEN_SETTINGS_STATE_KEY = "_broken_settings"
+
+def record_broken_settings(error: SettingsFileError) -> bool:
+    """Records error as reported for its file; True when that file had no record of
+    this same error yet. True also when the state cannot be locked, so a break is
+    never hidden."""
+    try:
+        with FileLock(LOCK_FILE):
+            state = load_hook_state()
+            reported = state.get(BROKEN_SETTINGS_STATE_KEY)
+            reported = reported if isinstance(reported, dict) else {}
+            if reported.get(str(error.path)) == str(error):
+                return False
+            reported[str(error.path)] = str(error)
+            state[BROKEN_SETTINGS_STATE_KEY] = reported
+            save_hook_state(state)
+    except TimeoutError as e:
+        debug(f"broken settings lock timeout, reporting anyway: {e}")
+    return True
+
+def forget_broken_settings(paths: List[Path]) -> None:
+    """Drops the records of paths, which now read fine, so a new break is reported again."""
+    try:
+        with FileLock(LOCK_FILE):
+            state = load_hook_state()
+            reported = state.get(BROKEN_SETTINGS_STATE_KEY)
+            if not isinstance(reported, dict) or not any(str(path) in reported for path in paths):
+                return
+            for path in paths:
+                reported.pop(str(path), None)
+            save_hook_state(state)
+    except TimeoutError as e:
+        debug(f"broken settings lock timeout, records kept: {e}")
 
 
 # ----------------- State file reading and writing -----------------
@@ -3734,9 +3771,11 @@ def main() -> int:
         info(str(e))
         if is_setup_check:
             raise
-        if is_session_start:
+        # A break is named at SessionStart, and once on the first Stop or SessionEnd that meets it.
+        if record_broken_settings(e) or is_session_start:
             print(json.dumps({"systemMessage": format_broken_settings_message(e)}))
         return 0
+    forget_broken_settings(repo_settings_paths(checkout))
 
     # The setup skill reads "no output" as "the hook cannot run", so this always answers.
     if is_setup_check:
