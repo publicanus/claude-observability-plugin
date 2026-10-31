@@ -1,6 +1,7 @@
 """Pins hooks/run_hook.sh, the one place that decides how the hook's Python runs:
-uv when it is on the PATH, else python3, else a silent exit; at session start,
-the message that the hook cannot run on this machine; and, for a command, the error.
+uv when it is on the PATH, else python3, else a silent exit, also when uv cannot
+download the script's packages; at session start, the message that the session is
+not traced and why; and, for a command, the error.
 """
 
 from __future__ import annotations
@@ -191,6 +192,71 @@ def test_at_session_start_uv_runs_the_script(bin_dir: Path) -> None:
     result = run_launcher(bin_dir, WARN)
 
     assert result.returncode == 0
+    assert result.stdout.splitlines() == ["uv", "run", "--quiet", "--script", SCRIPT, *ARGS]
+
+
+def write_uv_that_cannot_download(bin_dir: Path) -> None:
+    """A uv that fails as uv 0.10 does when the script's packages are not in its
+    cache and no package index can be reached: exit 2, with the error on stderr."""
+    write_stub(bin_dir, "uv", 'echo "error: Request failed after 3 retries" >&2\nexit 2')
+
+
+CANNOT_DOWNLOAD = "Langfuse: this session is not traced, because the hook could not download what it needs to run."
+
+
+def test_when_uv_cannot_download_the_packages_the_hook_exits_0_with_one_line_on_stderr(bin_dir: Path) -> None:
+    write_uv_that_cannot_download(bin_dir)
+
+    result = run_launcher(bin_dir)
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", CANNOT_DOWNLOAD + "\n")
+
+
+def test_at_session_start_when_uv_cannot_download_the_packages_it_says_so_in_one_line(bin_dir: Path) -> None:
+    write_uv_that_cannot_download(bin_dir)
+
+    result = run_launcher(bin_dir, WARN)
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert json.loads(result.stdout) == {"systemMessage": CANNOT_DOWNLOAD}
+
+
+def test_for_a_command_when_uv_cannot_download_the_packages_it_fails_with_uvs_error(bin_dir: Path) -> None:
+    write_uv_that_cannot_download(bin_dir)
+
+    result = run_launcher(bin_dir, FAIL)
+
+    assert (result.returncode, result.stdout) == (2, "")
+    assert result.stderr == "error: Request failed after 3 retries\n"
+
+
+def test_when_uv_has_the_packages_and_no_index_can_be_reached_it_runs_the_script(bin_dir: Path) -> None:
+    # As uv 0.10 does some minutes after its last download: with --offline it finds
+    # the packages in its cache, but without it, it asks the index again.
+    write_stub(
+        bin_dir,
+        "uv",
+        'case "$*" in run*|*--offline*) printf "%s\\n" uv "$@"; exit 0 ;; esac\n'
+        'echo "error: Request failed after 3 retries" >&2\nexit 2',
+    )
+
+    result = run_launcher(bin_dir, WARN)
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.splitlines() == ["uv", "run", "--quiet", "--script", SCRIPT, *ARGS]
+
+
+def test_when_uv_does_not_have_the_packages_but_can_download_them_it_runs_the_script(bin_dir: Path) -> None:
+    write_stub(
+        bin_dir,
+        "uv",
+        'case "$*" in *--offline*) echo "error: not in the cache" >&2; exit 1 ;; esac\n'
+        'printf "%s\\n" uv "$@"',
+    )
+
+    result = run_launcher(bin_dir, WARN)
+
+    assert (result.returncode, result.stderr) == (0, "")
     assert result.stdout.splitlines() == ["uv", "run", "--quiet", "--script", SCRIPT, *ARGS]
 
 
