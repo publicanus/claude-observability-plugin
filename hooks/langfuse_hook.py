@@ -3621,6 +3621,8 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
         return "ok", ""
     if keys_rejected(response.status):
         return "rejected", f"HTTP {response.status} from {config.host}"
+    if response.status == 403:
+        return "rejected", f"HTTP {response.status} from {config.host}"
     if response.status == 0:
         return "unreachable", f"{config.host} did not respond"
     return "unreachable", f"HTTP {response.status} from {config.host}"

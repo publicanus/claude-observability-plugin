@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 from conftest import write_settings
-from waiting_turns import send_waiting_turns
+from waiting_turns import Target, send_waiting_turns, write_waiting_batch
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 
@@ -406,6 +406,26 @@ def test_turns_rejected_for_their_keys_are_dropped(machine: Machine, servers: An
     machine.run_hook("Stop", "s-rejected", transcript, port)
 
     wait_until(lambda: len(server.uploads) >= 1 and not machine.waiting_files(), "the rejected turn dropped")
+
+
+def test_turns_answered_403_wait_and_arrive_once_the_address_takes_them(machine: Machine, servers: Any) -> None:
+    port = free_port()
+    server = servers(port, status=403)
+    body = b"a batch"
+    write_waiting_batch(machine.waiting_dir, Target(f"http://127.0.0.1:{port}", *KEYS_A), body)
+
+    blocked = send_waiting_turns(machine.waiting_dir, "4.2.0", lambda line: None)
+
+    assert blocked == 0
+    assert len(machine.waiting_files()) == 1, "a turn answered with 403 was dropped"
+
+    server.status = 200
+    server.uploads.clear()
+    sent = send_waiting_turns(machine.waiting_dir, "4.2.0", lambda line: None)
+
+    assert sent == 1
+    assert [upload_body for _, upload_body in server.uploads] == [body]
+    assert machine.waiting_files() == []
 
 
 def test_fifty_waiting_turns_do_not_slow_the_hook_down(machine: Machine, tmp_path: Path) -> None:

@@ -10,8 +10,8 @@ A waiting folder holds one JSON file per batch of trace data:
 Any session may send the batch, with these keys and never its own.
 
 write_waiting_batch adds a file. send_waiting_turns sends every file and
-deletes it once Langfuse answers 2xx, or 401/403 (keys rejected). Any other
-answer keeps the file for a later run, and so does a file that cannot be
+deletes it once Langfuse answers 2xx, or 401 (keys rejected). Any other
+answer, 403 included, keeps the file for a later run, and so does a file that cannot be
 read or deleted. A file stored more than WAITING_MAX_AGE_DAYS ago is deleted
 without being sent. start_sender runs a command in the
 background, cut loose from the hook, so the hook does not wait for it.

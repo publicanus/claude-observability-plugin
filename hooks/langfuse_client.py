@@ -28,8 +28,9 @@ class HttpResponse:
 
 
 def keys_rejected(status: int) -> bool:
-    """True when Langfuse answered that it does not accept the keys."""
-    return status in (401, 403)
+    """True when Langfuse answered that it does not accept the keys. Not 403:
+    a network filter between this computer and Langfuse can answer 403 too."""
+    return status == 401
 
 
 def _parse_json(raw: bytes) -> Any:
