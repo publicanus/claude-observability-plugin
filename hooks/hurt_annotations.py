@@ -1,25 +1,32 @@
 """
-Attach pending /hurt annotations onto their target traces.
+Give queued /hurt notes their trace, and attach them onto that trace.
 
-/hurt (hurt.py) queues an annotation locally instead of contacting Langfuse
+/hurt (hurt.py) queues a note locally instead of contacting Langfuse
 itself. This module is the consumer: it uses this hook's own already-resolved
 Langfuse credentials, so a hurt is always attached using the same
 credentials already writing this machine's traces — it can never land in
 the wrong Langfuse project, and /hurt never needs credentials of its own.
 
+Unresolved file: ~/.claude/state/hurt_unresolved.json — a JSON array of the
+notes /hurt queued, each a pending entry below without trace_id. The hook gives
+a note the trace of the turn before the /hurt turn it was typed in, once it has
+built that turn, and moves it to the queue file (place_unresolved_hurts).
+
 Queue file: ~/.claude/state/hurt_pending.json — a JSON array of objects:
     id          str, uuid4, unique per queued hurt
-    trace_id    str, the target trace, resolved once by /hurt
+    trace_id    str, the target trace, filled in by the hook
     category    str, one of CATEGORIES
     comment     str, the operator's own words
-    created     str, ISO 8601 UTC timestamp
-    session_id  str, for log correlation only — never read here
+    created     str, ISO 8601 UTC timestamp, when /hurt ran
+    session_id  str, the session /hurt ran in; read only in the unresolved file
     target      str, optional: queue_target() of the Langfuse address and public
                 key the session sent its traces with. A hurt with a target is
                 attempted only by a hook run with those keys; one without is
                 attempted by any run.
     done        list of str, written by earlier versions of this hook only;
                 never read here
+
+Both files are read and written under HURT_PENDING_LOCK_FILE.
 
 A hurt is attached as one `hurt` score on its trace: the category is the
 score's value and the operator's words are the score's comment. Hurts are
@@ -47,7 +54,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from langfuse_client import HttpResponse, LangfuseClient
@@ -67,7 +74,7 @@ SCORE_CONFIG_NAME = "hurt"
 # dropped, mirroring the hook's own 30-day session-state pruning.
 PENDING_MAX_AGE_DAYS = 30
 
-# The trace lookup needs a time range. A hurt targets the session's latest
+# The trace lookup needs a time range. A hurt targets the turn before its /hurt
 # turn, which started before the hurt was queued — days before when an old
 # session is resumed — so the range reaches this far back from that moment.
 TRACE_LOOKBACK_DAYS = 30
@@ -305,6 +312,70 @@ def _attempt_annotation(
     )
 
 
+def _hurt_turn_index(created: datetime, turn_starts: List[Optional[datetime]]) -> Optional[int]:
+    """Index of the newest turn that started at or before created: the turn the
+    note was typed in. None when no turn did."""
+    started = [index for index, start in enumerate(turn_starts) if start is not None and start <= created]
+    return started[-1] if started else None
+
+
+def place_unresolved_hurts(
+    unresolved_file: Path,
+    pending_file: Path,
+    *,
+    session_id: str,
+    earlier_trace_id: Optional[str],
+    new_turns: List[Tuple[Optional[datetime], Optional[str]]],
+    log: Log = None,
+) -> None:
+    """Moves each unresolved note of session_id whose /hurt turn is among new_turns
+    to pending_file, with the trace id of the turn before that /hurt turn.
+
+    new_turns: the start time and trace id of each turn a hook run built for the
+    session, in transcript order. earlier_trace_id: the session's newest trace
+    before those turns, the target when the /hurt turn is the first of them.
+    A note whose /hurt turn is not among new_turns stays. A note whose /hurt turn
+    has no turn with a trace before it is removed, and so is every note older than
+    PENDING_MAX_AGE_DAYS, whatever its session; each removal is logged.
+    Call under HURT_PENDING_LOCK_FILE; this function does not lock itself.
+    """
+    records = load_pending_hurts(unresolved_file)
+    if not records:
+        return
+    now = datetime.now(timezone.utc)
+    turn_starts = [start for start, _ in new_turns]
+    kept: List[Dict[str, Any]] = []
+    placed: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict) or _is_expired(record, now):
+            note_id = record.get("id") if isinstance(record, dict) else None
+            _log(log, f"Dropping unresolved hurt {note_id}: unreadable or older than {PENDING_MAX_AGE_DAYS} days")
+            continue
+        created = _created_at(record)
+        if record.get("session_id") != session_id or created is None:
+            kept.append(record)
+            continue
+        index = _hurt_turn_index(created, turn_starts)
+        if index is None:
+            kept.append(record)
+            continue
+        target = new_turns[index - 1][1] if index > 0 else earlier_trace_id
+        if not target:
+            _log(log, f"Dropping hurt {record.get('id')}: no turn before its /hurt has a trace")
+            continue
+        placed.append({**record, "trace_id": target})
+
+    if placed:
+        save_pending_hurts(pending_file, load_pending_hurts(pending_file) + placed)
+    if len(kept) != len(records):
+        save_pending_hurts(unresolved_file, kept)
+
+
+def _log(log: Log, message: str) -> None:
+    if log is not None:
+        log(message)
+
+
 def process_pending_hurts(
     config: Any,
     pending_file: Path,
@@ -318,10 +389,6 @@ def process_pending_hurts(
     propagating and blocking turn emission (call under FileLock like the
     hook's own state — this function does not lock itself).
     """
-    def _log(msg: str) -> None:
-        if log is not None:
-            log(msg)
-
     records = load_pending_hurts(pending_file)
     if not records:
         return 0
@@ -346,13 +413,13 @@ def process_pending_hurts(
             try:
                 completed = _attempt_annotation(client, record, config_id_cache, now, log)
             except Exception as e:
-                _log(f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
+                _log(log, f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
 
         if completed:
             attached += 1
         elif _is_expired(record, now):
             dropped += 1
-            _log(f"Dropping pending hurt {record.get('id')}: unresolved after {PENDING_MAX_AGE_DAYS} days")
+            _log(log, f"Dropping pending hurt {record.get('id')}: unresolved after {PENDING_MAX_AGE_DAYS} days")
         else:
             remaining.append(record)
 

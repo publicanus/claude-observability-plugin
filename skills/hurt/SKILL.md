@@ -6,7 +6,7 @@ allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGI
 
 The operator just typed: $ARGUMENTS
 
-This is a complaint about something that went wrong in the current session — queue it as a pending annotation for the Langfuse trace of the session's most recent turn. All of the deterministic work (finding the trace and queuing the record) is done by a script; your job is to read the operator's text, settle on a category, and invoke the script correctly. The actual Langfuse writes (tag, score, comment) happen later, made by this plugin's hook once that turn's trace is in Langfuse — this script never contacts Langfuse and holds no Langfuse credentials.
+This is a complaint about something that went wrong in the current session — queue it as a pending annotation for the Langfuse trace of the turn before this one. All of the deterministic work (queuing the record) is done by a script; your job is to read the operator's text, settle on a category, and invoke the script correctly. The actual Langfuse writes (tag, score, comment) happen later, made by this plugin's hook once that turn's trace is in Langfuse — this script never contacts Langfuse and holds no Langfuse credentials.
 
 ## 1. Determine the category
 
@@ -35,4 +35,4 @@ cd "${CLAUDE_PROJECT_DIR}" && sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CL
 
 ## 3. Report the result
 
-Relay the script's own output line back to the operator verbatim — it already states plainly whether the annotation was queued or why it wasn't (no matching trace, hook not installed/enabled, no turn emitted yet, etc.). Do not add trace or transcript content beyond what the operator themselves typed in $ARGUMENTS. Do not retry automatically on failure; a non-resolution means nothing was queued, which is the correct outcome, not an error to work around. A successful queue is not yet a successful write — the annotation lands in Langfuse once the hook has sent that turn's trace.
+Relay the script's own output line back to the operator verbatim — it already states plainly whether the annotation was queued or why it wasn't (no session id, no Langfuse keys in this repo, the queue stayed busy). Do not add trace or transcript content beyond what the operator themselves typed in $ARGUMENTS. Do not retry automatically on failure; a non-resolution means nothing was queued, which is the correct outcome, not an error to work around. A successful queue is not yet a successful write — the annotation lands in Langfuse once the hook has sent that turn's trace.
