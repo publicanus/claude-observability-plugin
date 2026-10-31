@@ -69,7 +69,7 @@ FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIn0.ZmFrZXNpZ25
             "slack [REDACTED] z",
             id="slack-token",
         ),
-        pytest.param("login password=hunter2 now", "login password=[REDACTED] now", id="password-value"),
+        pytest.param("login password=hunter2", "login password=[REDACTED]", id="password-value"),
     ],
 )
 def test_each_kind_of_secret_is_replaced_by_the_marker(hook_module, text, expected):
@@ -96,9 +96,9 @@ def test_password_value_ends_at_space_ampersand_or_line_end_and_quotes_go_whole(
     ["password", "secret", "token", "api_key", "apikey", "secret_key", "access_key", "private_key"],
 )
 def test_a_text_value_after_a_name_ending_in_a_secret_word_is_masked_in_any_case(hook_module, name):
-    text = f"MY_{name.upper()}=hunter2 and my{name}: hunter2"
+    text = f"MY_{name.upper()}=hunter2\nmy{name}: hunter2"
 
-    assert hook_module.mask_secrets(text) == f"MY_{name.upper()}=[REDACTED] and my{name}: [REDACTED]"
+    assert hook_module.mask_secrets(text) == f"MY_{name.upper()}=[REDACTED]\nmy{name}: [REDACTED]"
 
 
 def test_name_value_json_and_yaml_forms_are_masked(hook_module):
@@ -119,6 +119,20 @@ def test_name_value_json_and_yaml_forms_are_masked(hook_module):
 )
 def test_numbers_and_true_false_stay_visible_under_a_secret_name(hook_module, text):
     assert hook_module.mask_secrets(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("wifi_password: my home wifi\nnext: line", "wifi_password: [REDACTED]\nnext: line"),
+        ("db.password = correct horse battery staple", "db.password = [REDACTED]"),
+        ("db.password=correct horse battery staple\nb=1", "db.password=[REDACTED]\nb=1"),
+        ("pin_token: 1234 5678", "pin_token: [REDACTED]"),
+        ("app_secret: a&b c", "app_secret: [REDACTED]"),
+    ],
+)
+def test_an_unquoted_multi_word_value_is_masked_to_the_end_of_its_line(hook_module, text, expected):
+    assert hook_module.mask_secrets(text) == expected
 
 
 def test_a_value_starting_with_digits_is_still_masked(hook_module):

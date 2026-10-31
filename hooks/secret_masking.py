@@ -27,14 +27,23 @@ SECRET_NAMES = ("password", "secret", "token", "api_key", "apikey", "secret_key"
 # A Bearer token's characters, RFC 6750 section 2.1 (b64token).
 _BEARER_TOKEN = r"[A-Za-z0-9._~+/-]+=*"
 
-# A secret name, optional closing quote, = or :, then the value: a "quoted" or
-# 'quoted' value on one line, or a run up to a space or &. A number or true/false
-# that ends at a space, comma, }, ] or the end of the text is not a value to mask.
+# A secret name and an optional closing quote.
+_SECRET_NAME = r"(?:" + "|".join(SECRET_NAMES) + r")[\"']?[ \t]*"
+# A number or true/false that is the whole value: it ends the line or the text,
+# or a comma, } or ] follows it.
+_NOT_A_KEPT_VALUE = r"(?!(?:-?\d+(?:\.\d+)?|true|false)[ \t]*(?:[,}\]\r\n]|$))"
+_QUOTED_VALUE = r"\"[^\"\n]*\"|'[^'\n]*'"
+# After = a value runs to & or the line end, so a query string's next field
+# stays; after : it runs to the line end.
 _NAMED_SECRET = re.compile(
-    r"(?i)((?:" + "|".join(SECRET_NAMES) + r")[\"']?[ \t]*[=:][ \t]*)"
-    r"(?!(?:-?\d+(?:\.\d+)?|true|false)(?![^\s,}\]]))"
-    r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s&]+)"
+    r"(?i)(" + _SECRET_NAME + r"=[ \t]*)" + _NOT_A_KEPT_VALUE + r"(?:" + _QUOTED_VALUE + r"|[^\s&][^&\n]*)"
+    r"|(" + _SECRET_NAME + r":[ \t]*)" + _NOT_A_KEPT_VALUE + r"(?:" + _QUOTED_VALUE + r"|\S[^\n]*)"
 )
+
+
+def _mask_named_secret(match: "re.Match[str]") -> str:
+    return (match.group(1) or match.group(2)) + MARKER
+
 
 # Applied in this order; a replacement with \1 keeps the first group as written.
 _PATTERNS = [
@@ -54,7 +63,7 @@ _PATTERNS = [
     (re.compile(r"\bxox[A-Za-z]-[A-Za-z0-9-]+"), MARKER),
     # scheme://user: then the password up to the @ before the host.
     (re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s/@]+@"), r"\1" + MARKER + "@"),
-    (_NAMED_SECRET, r"\1" + MARKER),
+    (_NAMED_SECRET, _mask_named_secret),
 ]
 
 # The value of an Authorization dict key: Bearer, a space, then the token.
