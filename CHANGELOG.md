@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.3](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.2...v3.0.3) (2026-10-31)
+
+
+### Bug Fixes
+
+* **hurt:** a /hurt after a turn stopped with Esc, or ended by an API error, lands on that turn ([#73](https://github.com/publicanus/claude-observability-plugin/issues/73)) ([#86](https://github.com/publicanus/claude-observability-plugin/issues/86)) ([43ee9c9](https://github.com/publicanus/claude-observability-plugin/commit/43ee9c920fc758579fa8edb7fff9c84c1114928b))
+
 ## [3.0.2](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.1...v3.0.2) (2026-10-31)
 
 
