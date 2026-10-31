@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.2](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.1...v3.0.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **hook:** Claude stops as usual when uv cannot download the hook's packages ([#72](https://github.com/publicanus/claude-observability-plugin/issues/72)) ([#77](https://github.com/publicanus/claude-observability-plugin/issues/77)) ([69d6032](https://github.com/publicanus/claude-observability-plugin/commit/69d6032aba9d7a82dfb10c5d653e84c52cde6bb9))
+
 ## [3.0.1](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.0...v3.0.1) (2026-10-30)
 
 
