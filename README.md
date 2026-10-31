@@ -260,12 +260,21 @@ put in that file. No data is sent anywhere other than
 the endpoint you configure. This also includes any queued `/hurt` annotation's category and operator-written
 comment, sent to the same endpoint (see [Flagging what hurt with /hurt](#flagging-what-hurt-with-hurt)).
 
-Before any data leaves your machine, eight kinds of secret are replaced by
+Before any data leaves your machine, these kinds of secret are replaced by
 `[REDACTED]` in every input and output: a key that starts with `sk-`, an AWS access
-key (`AKIA…`), a JSON Web Token, the value after `password=` (also `DB_PASSWORD=` and
-other names that end in `password`), a GitHub token (`ghp_…`), a Slack token (such as
-`xoxb-…`), a private-key block, and the token after `Authorization: Bearer`. Other
-kinds of secret are sent as they are. So are the metadata, such as the project folder
+key (`AKIA…`), a JSON Web Token, a GitHub token (`ghp_…`, `gho_…` or `github_pat_…`),
+a Slack token (such as `xoxb-…`), a private-key block, the token after
+`Authorization: Bearer`, and the password in an address such as
+`postgres://user:password@host`.
+
+A value is also replaced when its name ends in `password`, `secret`, `token`,
+`api_key`, `apikey`, `secret_key`, `access_key` or `private_key`, in any case. This
+holds for `name=value`, `name: value`, JSON, and the fields of a tool's input or
+output. So `DB_PASSWORD=hunter2`, `{"api_key": "abc123"}` and
+`AWS_SECRET_ACCESS_KEY: wJalr` all lose their value. Numbers and true/false stay
+visible, so `input_token: 12` is sent as it is.
+
+Other kinds of secret are sent as they are. So are the metadata, such as the project folder
 and the git branch, and the `/hurt` comment.
 
 For how Langfuse Cloud handles data it receives, see the Langfuse privacy policy:
