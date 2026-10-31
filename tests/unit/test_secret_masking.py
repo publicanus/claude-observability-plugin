@@ -87,7 +87,7 @@ def test_each_kind_of_secret_is_replaced_by_the_marker(hook_module, text, expect
         ("PASSWORD=abc\nnext line", "PASSWORD=[REDACTED]\nnext line"),
     ],
 )
-def test_password_value_ends_at_space_ampersand_or_line_end_and_quotes_go_whole(hook_module, text, expected):
+def test_a_value_ends_at_the_line_end_or_a_query_string_ampersand_and_quotes_go_whole(hook_module, text, expected):
     assert hook_module.mask_secrets(text) == expected
 
 
@@ -129,6 +129,8 @@ def test_numbers_and_true_false_stay_visible_under_a_secret_name(hook_module, te
         ("db.password=correct horse battery staple\nb=1", "db.password=[REDACTED]\nb=1"),
         ("pin_token: 1234 5678", "pin_token: [REDACTED]"),
         ("app_secret: a&b c", "app_secret: [REDACTED]"),
+        ("DB_PASSWORD=Xy7&kL9!", "DB_PASSWORD=[REDACTED]"),
+        ("API_KEY=ab&cdef", "API_KEY=[REDACTED]"),
     ],
 )
 def test_an_unquoted_multi_word_value_is_masked_to_the_end_of_its_line(hook_module, text, expected):

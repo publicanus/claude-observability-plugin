@@ -27,17 +27,16 @@ SECRET_NAMES = ("password", "secret", "token", "api_key", "apikey", "secret_key"
 # A Bearer token's characters, RFC 6750 section 2.1 (b64token).
 _BEARER_TOKEN = r"[A-Za-z0-9._~+/-]+=*"
 
-# A secret name and an optional closing quote.
-_SECRET_NAME = r"(?:" + "|".join(SECRET_NAMES) + r")[\"']?[ \t]*"
+_SECRET_WORD = r"(?:" + "|".join(SECRET_NAMES) + r")"
 # A number or true/false that is the whole value: it ends the line or the text,
 # or a comma, } or ] follows it.
 _NOT_A_KEPT_VALUE = r"(?!(?:-?\d+(?:\.\d+)?|true|false)[ \t]*(?:[,}\]\r\n]|$))"
 _QUOTED_VALUE = r"\"[^\"\n]*\"|'[^'\n]*'"
-# After = a value runs to & or the line end, so a query string's next field
-# stays; after : it runs to the line end.
+# In a query string (the name right after ? or &) the value ends at the next &,
+# so the next field stays. Anywhere else a value after = or : runs to the line end.
 _NAMED_SECRET = re.compile(
-    r"(?i)(" + _SECRET_NAME + r"=[ \t]*)" + _NOT_A_KEPT_VALUE + r"(?:" + _QUOTED_VALUE + r"|[^\s&][^&\n]*)"
-    r"|(" + _SECRET_NAME + r":[ \t]*)" + _NOT_A_KEPT_VALUE + r"(?:" + _QUOTED_VALUE + r"|\S[^\n]*)"
+    r"(?i)([?&][\w.~-]*" + _SECRET_WORD + r"=)" + _NOT_A_KEPT_VALUE + r"[^\s&]+"
+    r"|(" + _SECRET_WORD + r"[\"']?[ \t]*[=:][ \t]*)" + _NOT_A_KEPT_VALUE + r"(?:" + _QUOTED_VALUE + r"|\S[^\n]*)"
 )
 
 
