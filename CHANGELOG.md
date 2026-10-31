@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.4](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.3...v3.0.4) (2026-10-31)
+
+
+### Bug Fixes
+
+* **hook:** passwords, tokens and API keys in common forms are masked ([#79](https://github.com/publicanus/claude-observability-plugin/issues/79)) ([#97](https://github.com/publicanus/claude-observability-plugin/issues/97)) ([108d112](https://github.com/publicanus/claude-observability-plugin/commit/108d112449d873346c8b04d368ae331cd37c6904))
+
 ## [3.0.3](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.2...v3.0.3) (2026-10-31)
 
 
