@@ -289,7 +289,8 @@ def test_retried_score_carries_the_same_id_and_timestamp(
 ) -> None:
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
-    record = make_record(module, id="hurt-abc", created="2026-10-01T12:00:00Z")
+    created = datetime.now(timezone.utc) - timedelta(days=1)
+    record = make_record(module, id="hurt-abc", created=created.isoformat().replace("+00:00", "Z"))
     write_pending(pending_file, [record])
     client = RoutedClient(module)
     full_success_routes(module, client)
@@ -304,7 +305,7 @@ def test_retried_score_carries_the_same_id_and_timestamp(
     assert len(score_bodies) == 2
     for body in score_bodies:
         assert body["id"] == "hurt-abc"
-        assert body["timestamp"] == "2026-10-01T12:00:00+00:00"
+        assert body["timestamp"] == created.isoformat()
 
 
 # ----------------- hurts queued by earlier versions -----------------
