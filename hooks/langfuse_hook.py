@@ -81,6 +81,7 @@ WORK_ITEM_FLAG = "--work-item"
 # Session entries in the state file, and work item markers, are dropped at this age.
 STATE_MAX_AGE = timedelta(days=30)
 
+from claude_code_texts import INTERRUPTED_TEXT, LEGACY_USER_REJECTED_TOOL_USE_RESULT  # noqa: E402
 from hurt_annotations import load_pending_hurts, place_unresolved_hurts, process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
@@ -1199,8 +1200,6 @@ def get_async_launch_flag_from_row(row: Dict[str, Any]) -> Optional[bool]:
         return None
     return tool_use_result.get("status") == "async_launched" or tool_use_result.get("isAsync") is True
 
-LEGACY_USER_REJECTED_TOOL_USE_RESULT = "User rejected tool use"
-
 def get_tool_denial_kind_from_row(row: Dict[str, Any]) -> Optional[str]:
     """Read the row-level toolDenialKind Claude Code writes for a denied tool call.
 
@@ -1546,8 +1545,6 @@ def starts_turn_when_none_is_open(row: Dict[str, Any]) -> bool:
     ended: the user row of a task notification, or a hand-back row."""
     is_notification = row.get("type") == "user" and has_task_notification_origin(row)
     return is_notification or hand_back_agent_id(row) is not None
-
-INTERRUPTED_TEXT = "[Request interrupted by user]"
 
 def is_interrupt_row(row: Optional[Dict[str, Any]]) -> bool:
     """True for the user row Claude Code writes when Esc stops a turn."""
