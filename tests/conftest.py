@@ -390,6 +390,7 @@ def isolated_hook_state(tmp_path: Path, hook_module: Any, monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_module, "LOG_FILE", state_dir / "langfuse_hook.log")
     monkeypatch.setattr(hook_module, "HURT_PENDING_FILE", state_dir / "hurt_pending.json")
     monkeypatch.setattr(hook_module, "HURT_PENDING_LOCK_FILE", state_dir / "hurt_pending.lock")
+    monkeypatch.setattr(hook_module, "HURT_UNRESOLVED_FILE", state_dir / "hurt_unresolved.json")
     monkeypatch.setattr(hook_module, "WAITING_DIR", state_dir / "langfuse_waiting")
     monkeypatch.setattr(hook_module, "WAITING_LOCK_FILE", state_dir / "langfuse_waiting.lock")
     monkeypatch.setattr(hook_module, "WORK_ITEMS_DIR", state_dir / "langfuse_work_items")

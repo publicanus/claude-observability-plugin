@@ -1,5 +1,5 @@
-"""Pins hooks/hurt.py, the script behind /mate-record:hurt: which trace it finds for
-the session, what it queues, and what it says when it queues nothing."""
+"""Pins hooks/hurt.py, the script behind /mate-record:hurt: what it queues for the
+hook to place, and what it says when it queues nothing."""
 
 from __future__ import annotations
 
@@ -12,116 +12,89 @@ import pytest
 import hurt
 import hurt_annotations
 from conftest import write_settings
-from state_files import get_session_state_key
-
-
-# ----------------- helpers -----------------
-
-def make_state_file(tmp_path: Path, entries: dict) -> Path:
-    state_file = tmp_path / "langfuse_state.json"
-    state_file.write_text(json.dumps(entries), encoding="utf-8")
-    return state_file
-
-
-def make_transcript(projects_dir: Path, project_slug: str, session_id: str) -> Path:
-    project_dir = projects_dir / project_slug
-    project_dir.mkdir(parents=True, exist_ok=True)
-    transcript = project_dir / f"{session_id}.jsonl"
-    transcript.write_text("", encoding="utf-8")
-    return transcript.resolve()
-
-
-def state_key(session_id: str, transcript: Path) -> str:
-    return get_session_state_key(session_id, str(transcript))
-
-
-@pytest.fixture
-def pending_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    pending_file = tmp_path / "hurt_pending.json"
-    lock_file = tmp_path / "hurt_pending.lock"
-    monkeypatch.setattr(hurt, "HURT_PENDING_FILE", pending_file)
-    monkeypatch.setattr(hurt, "HURT_PENDING_LOCK_FILE", lock_file)
-    # /hurt reads the working directory's repo settings; keep the developer's own repo out.
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    monkeypatch.chdir(tmp_path)
-    return pending_file, lock_file
-
-
-# ----------------- resolution: happy path -----------------
-
-def test_resolve_latest_trace_id_happy_path(tmp_path: Path) -> None:
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    transcript = make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    state_file = make_state_file(tmp_path, {state_key(session_id, transcript): {"latest_trace_id": "deadbeef" * 4}})
-
-    resolution = hurt.resolve_latest_trace_id(
-        session_id, projects_dir=projects_dir, state_file=state_file
-    )
-
-    assert resolution.ok
-    assert resolution.trace_id == "deadbeef" * 4
-
-
-# ----------------- resolution: each non-resolution shape -----------------
-
-def test_resolve_latest_trace_id_no_session_id(tmp_path: Path) -> None:
-    resolution = hurt.resolve_latest_trace_id(
-        None, projects_dir=tmp_path / "projects", state_file=tmp_path / "state.json"
-    )
-    assert not resolution.ok
-    assert "session id" in resolution.error.lower()
-
-
-def test_resolve_latest_trace_id_no_transcript_found(tmp_path: Path) -> None:
-    projects_dir = tmp_path / "projects"
-    projects_dir.mkdir()
-    resolution = hurt.resolve_latest_trace_id(
-        "no-such-session", projects_dir=projects_dir, state_file=tmp_path / "state.json"
-    )
-    assert not resolution.ok
-    assert "transcript" in resolution.error.lower()
-
 
 SETUP_COMMAND = "/mate-record:langfuse-setup"
+OWN_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-a", "LANGFUSE_SECRET_KEY": "sk-lf-a", "LANGFUSE_BASE_URL": "https://a.example"}
 OUTSIDE_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-terminal", "LANGFUSE_SECRET_KEY": "sk-lf-terminal"}
 
 
 @pytest.fixture
-def session_in(monkeypatch: pytest.MonkeyPatch, no_langfuse_env: None) -> Any:
-    """Makes a folder the session's working directory, as the Bash tool runs /hurt."""
-    def _in(folder: Path) -> None:
-        monkeypatch.chdir(folder)
-    return _in
+def queue_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_langfuse_env: None) -> Path:
+    """The unresolved queue /hurt writes, in tmp_path; the session starts in tmp_path."""
+    unresolved_file = tmp_path / "state" / "hurt_unresolved.json"
+    monkeypatch.setattr(hurt, "HURT_UNRESOLVED_FILE", unresolved_file)
+    monkeypatch.setattr(hurt, "HURT_PENDING_LOCK_FILE", tmp_path / "state" / "hurt_pending.lock")
+    # /hurt reads the working directory's repo settings; keep the developer's own repo out.
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    return unresolved_file
 
 
-def resolve_with_no_state_entry(tmp_path: Path) -> hurt.Resolution:
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    state_file = make_state_file(tmp_path, {})  # empty state
-    return hurt.resolve_latest_trace_id(session_id, projects_dir=projects_dir, state_file=state_file)
+@pytest.fixture
+def keyed_repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """repo, with Langfuse keys in its settings file, as the session's working directory."""
+    write_settings(repo, OWN_KEYS)
+    monkeypatch.chdir(repo)
+    return repo
 
 
-@pytest.mark.parametrize(
-    "own_env",
-    [
-        {"LANGFUSE_PUBLIC_KEY": "pk-lf-test", "LANGFUSE_SECRET_KEY": "sk-lf-test"},
-        {"CC_LANGFUSE_PUBLIC_KEY": "pk-lf-test", "CC_LANGFUSE_SECRET_KEY": "sk-lf-test"},
-    ],
-)
-def test_no_state_entry_with_keys_in_the_repos_file_points_at_the_hook(
-    tmp_path: Path, repo: Path, session_in: Any, own_env: dict
+def run_hurt(comment: str = "went in circles", category: str = "stalled-loop", session_id: Any = "sess-1") -> int:
+    env = {"CLAUDE_CODE_SESSION_ID": session_id} if session_id else {}
+    return hurt.run(["--category", category, "--comment", comment], env=env)
+
+
+def read_queue(path: Path) -> list:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ----------------- What is queued -----------------
+
+def test_a_note_is_queued_without_a_trace_for_the_hook_to_place(
+    queue_file: Path, keyed_repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    write_settings(repo, own_env)
-    session_in(repo)
+    exit_code = run_hurt()
 
-    resolution = resolve_with_no_state_entry(tmp_path)
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        "/hurt: queued 'stalled-loop' for the turn before this one. "
+        "mate-record's hook attaches it to that turn's trace once the trace is in Langfuse.\n"
+    )
+    [record] = read_queue(queue_file)
+    # No trace or transcript content beyond what the operator typed.
+    assert set(record) == {"id", "category", "comment", "created", "session_id", "target"}
+    assert record["category"] == "stalled-loop"
+    assert record["comment"] == "went in circles"
+    assert record["session_id"] == "sess-1"
+    assert record["target"] == hurt_annotations.queue_target("https://a.example", "pk-lf-a")
+    assert record["id"] and record["created"]
 
-    assert not resolution.ok
-    assert "no mate-record state entry" in resolution.error.lower()
-    assert "installed/enabled" in resolution.error
-    assert "keys" not in resolution.error.lower()
+
+def test_a_note_is_appended_after_earlier_notes(queue_file: Path, keyed_repo: Path) -> None:
+    run_hurt("first")
+    run_hurt("second", category="ci-escape")
+
+    records = read_queue(queue_file)
+    assert [r["comment"] for r in records] == ["first", "second"]
+    assert len({r["id"] for r in records}) == 2
+
+
+def test_a_missing_state_folder_is_created(queue_file: Path, keyed_repo: Path) -> None:
+    assert not queue_file.parent.exists()
+
+    assert run_hurt() == 0
+
+    assert read_queue(queue_file)
+
+
+# ----------------- When nothing is queued -----------------
+
+def test_without_a_session_id_nothing_is_queued(
+    queue_file: Path, keyed_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_hurt(session_id=None) == 1
+
+    assert "session id" in capsys.readouterr().out.lower()
+    assert not queue_file.exists()
 
 
 @pytest.mark.parametrize(
@@ -134,243 +107,43 @@ def test_no_state_entry_with_keys_in_the_repos_file_points_at_the_hook(
     ids=["no file", "public key only", "secret key only"],
 )
 @pytest.mark.parametrize("outside", [{}, OUTSIDE_KEYS], ids=["no keys outside", "keys in the terminal"])
-def test_no_state_entry_without_keys_in_the_repos_file_points_at_that_file_and_the_setup(
-    tmp_path: Path, repo: Path, session_in: Any, monkeypatch: pytest.MonkeyPatch, own_env: Any, outside: dict
+def test_without_keys_in_the_repos_file_nothing_is_queued_and_it_points_at_the_setup(
+    queue_file: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    own_env: Any, outside: dict,
 ) -> None:
     if own_env is not None:
         write_settings(repo, own_env)
     for name, value in outside.items():
         monkeypatch.setenv(name, value)
-    session_in(repo)
+    monkeypatch.chdir(repo)
 
-    resolution = resolve_with_no_state_entry(tmp_path)
+    assert run_hurt() == 1
 
-    assert not resolution.ok
-    assert ".claude/settings.local.json" in resolution.error
-    assert SETUP_COMMAND in resolution.error
-    assert "installed/enabled" not in resolution.error
-    for phrase in ("direnv", ".envrc", "terminal", "not visible"):
-        assert phrase not in resolution.error
-    for value in [*(own_env or {}).values(), *outside.values()]:
-        assert value not in resolution.error
-
-
-def test_resolve_latest_trace_id_no_latest_trace_id_field(tmp_path: Path) -> None:
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    transcript = make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    # entry exists (e.g. teammate-only entry) but the field is absent
-    state_file = make_state_file(tmp_path, {state_key(session_id, transcript): {"turn_count": 3}})
-
-    resolution = hurt.resolve_latest_trace_id(
-        session_id, projects_dir=projects_dir, state_file=state_file
-    )
-    assert not resolution.ok
-    assert "latest_trace_id" in resolution.error.lower()
-
-
-def test_resolve_latest_trace_id_null_latest_trace_id_field(tmp_path: Path) -> None:
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    transcript = make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    state_file = make_state_file(tmp_path, {state_key(session_id, transcript): {"latest_trace_id": None}})
-
-    resolution = hurt.resolve_latest_trace_id(
-        session_id, projects_dir=projects_dir, state_file=state_file
-    )
-    assert not resolution.ok
-
-
-# ----------------- run(): queuing behaviour -----------------
-
-def test_run_queues_nothing_when_trace_unresolved(
-    monkeypatch: pytest.MonkeyPatch, pending_paths: tuple[Path, Path]
-) -> None:
-    pending_file, _ = pending_paths
-    monkeypatch.setattr(
-        hurt, "resolve_latest_trace_id", lambda session_id, **_: hurt.Resolution(error="no dice")
-    )
-
-    exit_code = hurt.run(["--category", "other", "--comment", "it broke"], env={"CLAUDE_CODE_SESSION_ID": "s"})
-
-    assert exit_code == 1
-    assert not pending_file.exists()
-
-
-def test_run_queues_a_well_formed_record(
-    monkeypatch: pytest.MonkeyPatch, pending_paths: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    pending_file, _ = pending_paths
-    monkeypatch.setattr(
-        hurt, "resolve_latest_trace_id", lambda session_id, **_: hurt.Resolution(trace_id="tid-123")
-    )
-
-    exit_code = hurt.run(
-        ["--category", "stalled-loop", "--comment", "went in circles"],
-        env={"CLAUDE_CODE_SESSION_ID": "sess-1"},
-    )
-
-    assert exit_code == 0
-    assert "attaches it once that trace is in Langfuse" in capsys.readouterr().out
-    records = json.loads(pending_file.read_text(encoding="utf-8"))
-    assert len(records) == 1
-    record = records[0]
-    assert record["trace_id"] == "tid-123"
-    assert record["category"] == "stalled-loop"
-    assert record["comment"] == "went in circles"
-    assert record["session_id"] == "sess-1"
-    assert isinstance(record["id"], str) and record["id"]
-    assert isinstance(record["created"], str) and record["created"]
-    # No trace or transcript content beyond what the operator typed: the
-    # record is exactly these six fields, nothing more.
-    assert set(record.keys()) == {"id", "trace_id", "category", "comment", "created", "session_id"}
-
-
-def test_a_queued_hurt_names_the_project_of_the_repos_keys(
-    monkeypatch: pytest.MonkeyPatch, pending_paths: tuple[Path, Path], repo: Path, session_in: Any
-) -> None:
-    pending_file, _ = pending_paths
-    write_settings(
-        repo,
-        {"LANGFUSE_PUBLIC_KEY": "pk-lf-a", "LANGFUSE_SECRET_KEY": "sk-lf-a", "LANGFUSE_BASE_URL": "https://a.example"},
-    )
-    session_in(repo)
-    monkeypatch.setattr(
-        hurt, "resolve_latest_trace_id", lambda session_id, **_: hurt.Resolution(trace_id="tid-123")
-    )
-
-    hurt.run(["--category", "other", "--comment", "x"], env={"CLAUDE_CODE_SESSION_ID": "sess-1"})
-
-    [record] = json.loads(pending_file.read_text(encoding="utf-8"))
-    assert record["target"] == hurt_annotations.queue_target("https://a.example", "pk-lf-a")
-
-
-def test_run_appends_without_disturbing_earlier_queued_hurts(
-    monkeypatch: pytest.MonkeyPatch, pending_paths: tuple[Path, Path]
-) -> None:
-    pending_file, _ = pending_paths
-    monkeypatch.setattr(
-        hurt, "resolve_latest_trace_id", lambda session_id, **_: hurt.Resolution(trace_id="tid-1")
-    )
-    hurt.run(["--category", "other", "--comment", "first"], env={"CLAUDE_CODE_SESSION_ID": "s"})
-
-    monkeypatch.setattr(
-        hurt, "resolve_latest_trace_id", lambda session_id, **_: hurt.Resolution(trace_id="tid-2")
-    )
-    hurt.run(["--category", "ci-escape", "--comment", "second"], env={"CLAUDE_CODE_SESSION_ID": "s"})
-
-    records = json.loads(pending_file.read_text(encoding="utf-8"))
-    assert [r["comment"] for r in records] == ["first", "second"]
-    assert len({r["id"] for r in records}) == 2
-
-
-def test_append_pending_hurt_creates_a_missing_state_dir(tmp_path: Path) -> None:
-    state_dir = tmp_path / "not-yet-created" / "state"
-    pending_file = state_dir / "hurt_pending.json"
-    lock_file = state_dir / "hurt_pending.lock"
-
-    hurt.append_pending_hurt(
-        trace_id="tid",
-        category="other",
-        comment="x",
-        session_id="s",
-        pending_file=pending_file,
-        lock_file=lock_file,
-    )
-
-    assert json.loads(pending_file.read_text(encoding="utf-8"))
-
-
-def test_load_pending_hurts_tolerates_missing_and_corrupt_file(tmp_path: Path) -> None:
-    missing = tmp_path / "missing.json"
-    assert hurt.load_pending_hurts(missing) == []
-
-    corrupt = tmp_path / "corrupt.json"
-    corrupt.write_text("{not json", encoding="utf-8")
-    assert hurt.load_pending_hurts(corrupt) == []
-
-
-def test_a_state_file_that_is_not_json_queues_nothing_and_says_why(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    pending_paths: tuple[Path, Path],
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    pending_file, _ = pending_paths
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    state_file = tmp_path / "langfuse_state.json"
-    state_file.write_text("{not json", encoding="utf-8")
-    monkeypatch.setattr(hurt, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(hurt, "STATE_FILE", state_file)
-
-    exit_code = hurt.run(
-        ["--category", "other", "--comment", "x"],
-        env={"CLAUDE_CODE_SESSION_ID": session_id, "LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk"},
-    )
-
-    assert exit_code == 1
     out = capsys.readouterr().out
-    assert out.startswith(f"/hurt: cannot read {state_file}: ")
-    assert out.rstrip().endswith("Nothing queued.")
-    assert not pending_file.exists()
-
-
-def test_without_a_state_file_or_keys_it_points_at_the_repos_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    pending_paths: tuple[Path, Path],
-    capsys: pytest.CaptureFixture[str],
-    repo: Path,
-    session_in: Any,
-) -> None:
-    session_in(repo)
-    pending_file, _ = pending_paths
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    monkeypatch.setattr(hurt, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(hurt, "STATE_FILE", tmp_path / "never-written" / "langfuse_state.json")
-
-    exit_code = hurt.run(["--category", "other", "--comment", "x"], env={"CLAUDE_CODE_SESSION_ID": session_id})
-
-    assert exit_code == 1
-    out = capsys.readouterr().out
-    assert ".claude/settings.local.json" in out
-    assert SETUP_COMMAND in out
-    assert not pending_file.exists()
+    assert out == (
+        "/hurt: This repo's .claude/settings.local.json holds no Langfuse keys, so this session is not traced. "
+        f"To add keys, run {SETUP_COMMAND}. Nothing queued.\n"
+    )
+    assert not queue_file.exists()
 
 
 def test_a_broken_repo_settings_file_queues_nothing_and_names_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    pending_paths: tuple[Path, Path],
-    capsys: pytest.CaptureFixture[str],
-    repo: Path,
-    session_in: Any,
+    queue_file: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pending_file, _ = pending_paths
-    session_id = "abc-123"
-    projects_dir = tmp_path / "projects"
-    make_transcript(projects_dir, "-Users-op-myrepo", session_id)
-    monkeypatch.setattr(hurt, "PROJECTS_DIR", projects_dir)
-    monkeypatch.setattr(hurt, "STATE_FILE", tmp_path / "never-written" / "langfuse_state.json")
     settings = repo / ".claude" / "settings.local.json"
     settings.parent.mkdir()
     settings.write_text("{not json", encoding="utf-8")
-    session_in(repo)
+    monkeypatch.chdir(repo)
 
-    exit_code = hurt.run(["--category", "other", "--comment", "x"], env={"CLAUDE_CODE_SESSION_ID": session_id})
+    assert run_hurt() == 1
 
-    assert exit_code == 1
     out = capsys.readouterr().out
     assert out.startswith(f"/hurt: cannot read {settings} as JSON: ")
     assert out.rstrip().endswith("Nothing queued.")
-    assert not pending_file.exists()
+    assert not queue_file.exists()
 
 
-# ----------------- out-of-taxonomy rejection -----------------
+# ----------------- Categories -----------------
 
 def test_out_of_taxonomy_category_rejected() -> None:
     with pytest.raises(SystemExit):
