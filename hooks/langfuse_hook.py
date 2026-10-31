@@ -3551,6 +3551,10 @@ def emit_new_turns_from_transcript(
         finally:
             save_hook_state(state)
 
+    # Stores the turns on disk before the /hurt notes are placed: placing can wait
+    # for the queue lock, a SessionEnd hook can be stopped during that wait, and the
+    # turn position is already saved.
+    langfuse.flush()
     # After the state lock is released, so the hook never holds both locks at once.
     place_hurts_typed_in(session_id, earlier_trace_id, new_turns)
     return emitted
@@ -3895,9 +3899,6 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
             transcript_path,
             flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
-        # Stores the turns on disk now: a SessionEnd hook can be stopped during
-        # the delivery check below, and the turn position is already saved.
-        langfuse.flush()
         work_item.prune(WORK_ITEMS_DIR, datetime.now(timezone.utc) - STATE_MAX_AGE, info)
 
         dur = time.time() - start

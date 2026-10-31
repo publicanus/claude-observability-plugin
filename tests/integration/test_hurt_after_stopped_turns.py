@@ -9,6 +9,7 @@ reads which trace the note was given in the /hurt queue.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -16,7 +17,7 @@ import pytest
 
 import hurt
 from conftest import write_settings
-from test_continued_agent_runs import agent_says, append_jsonl, assistant_row, at, text, tool_use, user_row
+from test_continued_agent_runs import BASE_TIME, agent_says, append_jsonl, assistant_row, at, text, tool_use, user_row
 
 SESSION_ID = "session-stopped"
 INTERRUPTED = "[Request interrupted by user]"
@@ -177,6 +178,32 @@ def test_a_hurt_as_the_sessions_first_prompt_is_removed_and_logged(session: Sess
     assert session.pending() == []
     assert session.unresolved() == []
     assert queued["id"] in session.log()
+
+
+def seconds_from_now(offset: float) -> float:
+    """The row time, as seconds after BASE_TIME, offset seconds from now."""
+    return (datetime.now(timezone.utc) - BASE_TIME).total_seconds() + offset
+
+
+def test_a_turn_typed_after_the_hurt_turn_does_not_move_the_note(session: Session) -> None:
+    session.add(*normal_turn("First question.", seconds_from_now(-60)))
+    session.add(*hurt_turn(seconds_from_now(-30)))
+    session.run_hurt()
+    session.add(*normal_turn("Third question.", seconds_from_now(5)))
+    session.run_hook()
+
+    [note] = session.pending()
+    assert note["trace_id"] == session.trace_of("First question.")
+
+
+def test_a_note_whose_hurt_turn_the_hook_has_not_built_yet_stays(session: Session) -> None:
+    session.run_hurt()
+    session.add(*normal_turn("A later question.", seconds_from_now(60)))
+    session.run_hook()
+
+    assert session.pending() == []
+    [note] = session.unresolved()
+    assert note["comment"] == "it kept looping"
 
 
 # ----------------- What is sent -----------------

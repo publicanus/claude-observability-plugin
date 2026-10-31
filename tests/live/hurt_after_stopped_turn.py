@@ -1,13 +1,13 @@
 """Live ticket test: a /hurt after a turn stopped with Esc, or ended by an API error,
 lands on that turn's trace in Langfuse.
 
-    python3 tests/live/hurt_after_stopped_turn.py [--plugin-dir <dir>] [--keys-file <file>] [--project A|B]
+    python3 tests/live/hurt_after_stopped_turn.py
 
-    --plugin-dir  the plugin checkout to test; defaults to this repo
-    --keys-file   KEY=VALUE lines with LANGFUSE_<project>_PUBLIC_KEY and
-                  LANGFUSE_<project>_SECRET_KEY; defaults to
-                  ~/.config/mate-record-test/keys.env. The keys are never printed.
-    --project     the Langfuse Cloud EU test project, A by default
+    tests         this repo's checkout as the plugin, against Langfuse Cloud EU
+                  test project A
+    reads         ~/.config/mate-record-test/keys.env: KEY=VALUE lines with
+                  LANGFUSE_A_PUBLIC_KEY and LANGFUSE_A_SECRET_KEY. The keys are
+                  never printed.
     needs         claude on the PATH, logged in; network access to Anthropic and
                   to https://cloud.langfuse.com
     stdout        one line per check, then PASS or FAIL
@@ -25,7 +25,6 @@ types /mate-record:hurt.
 
 from __future__ import annotations
 
-import argparse
 import base64
 import glob
 import json
@@ -47,6 +46,7 @@ from typing import Any, Dict, List, Optional
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 LANGFUSE_HOST = "https://cloud.langfuse.com"
+KEYS_FILE = Path.home() / ".config" / "mate-record-test" / "keys.env"
 INTERRUPTED = "[Request interrupted by user]"
 MODEL = "sonnet"
 TURN_TIMEOUT_S = 180
@@ -63,21 +63,21 @@ class CannotRun(Exception):
 
 # ----------------- Keys and Langfuse -----------------
 
-def read_keys(keys_file: Path, project: str) -> Dict[str, str]:
-    """The project's public and secret key from KEY=VALUE lines. Raises CannotRun."""
-    if not keys_file.is_file():
-        raise CannotRun(f"no keys file at {keys_file}")
+def read_keys() -> Dict[str, str]:
+    """Project A's public and secret key from KEYS_FILE. Raises CannotRun."""
+    if not KEYS_FILE.is_file():
+        raise CannotRun(f"no keys file at {KEYS_FILE}")
     values: Dict[str, str] = {}
-    for line in keys_file.read_text(encoding="utf-8").splitlines():
+    for line in KEYS_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         name, value = line.removeprefix("export ").split("=", 1)
         values[name.strip()] = value.strip().strip("'\"")
-    names = {"public": f"LANGFUSE_{project}_PUBLIC_KEY", "secret": f"LANGFUSE_{project}_SECRET_KEY"}
+    names = {"public": "LANGFUSE_A_PUBLIC_KEY", "secret": "LANGFUSE_A_SECRET_KEY"}
     missing = [name for name in names.values() if not values.get(name)]
     if missing:
-        raise CannotRun(f"{keys_file} lacks {', '.join(missing)}")
+        raise CannotRun(f"{KEYS_FILE} lacks {', '.join(missing)}")
     return {role: values[name] for role, name in names.items()}
 
 
@@ -142,10 +142,10 @@ def score_trace_id(score: Dict[str, Any]) -> Optional[str]:
 class Session:
     """One claude -p process; all its turns go through it."""
 
-    def __init__(self, folder: Path, plugin_dir: Path, env: Dict[str, str]) -> None:
+    def __init__(self, folder: Path, env: Dict[str, str]) -> None:
         self.events: List[Dict[str, Any]] = []
         self.process = subprocess.Popen(
-            ["claude", "-p", "--plugin-dir", str(plugin_dir), "--input-format", "stream-json",
+            ["claude", "-p", "--plugin-dir", str(REPO_ROOT), "--input-format", "stream-json",
              "--output-format", "stream-json", "--verbose", "--model", MODEL],
             cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
@@ -201,6 +201,22 @@ def text_of(row: Dict[str, Any]) -> str:
     return ""
 
 
+def tool_results(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The tool_result blocks of a row's message."""
+    content = (row.get("message") or {}).get("content")
+    blocks = content if isinstance(content, list) else []
+    return [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+
+def result_text(block: Dict[str, Any]) -> str:
+    """The text of a tool_result block, whose content is a string or text blocks."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    parts = content if isinstance(content, list) else []
+    return "\n".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
+
+
 def rows_after_prompt(rows: List[Dict[str, Any]], prompt: str) -> Optional[List[Dict[str, Any]]]:
     """The rows from the prompt's own user row up to the next user prompt row; None
     when the prompt row is not in the transcript."""
@@ -209,7 +225,7 @@ def rows_after_prompt(rows: List[Dict[str, Any]], prompt: str) -> Optional[List[
         return None
     end = next((i for i in range(start + 1, len(rows))
                 if rows[i].get("type") == "user" and not rows[i].get("isMeta")
-                and text_of(rows[i]) not in ("", INTERRUPTED) and "tool_result" not in json.dumps(rows[i]["message"])),
+                and text_of(rows[i]) not in ("", INTERRUPTED) and not tool_results(rows[i])),
                len(rows))
     return rows[start:end]
 
@@ -217,10 +233,9 @@ def rows_after_prompt(rows: List[Dict[str, Any]], prompt: str) -> Optional[List[
 def hurt_line(rows: List[Dict[str, Any]]) -> str:
     """The line /hurt's script printed, from its tool result."""
     for row in rows:
-        for block in (row.get("message") or {}).get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_result" and "/hurt:" in json.dumps(block):
-                content = block.get("content")
-                return content if isinstance(content, str) else json.dumps(content)
+        for block in tool_results(row):
+            if "/hurt:" in result_text(block):
+                return result_text(block)
     return ""
 
 
@@ -242,7 +257,7 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def run(plugin_dir: Path, keys: Dict[str, str]) -> int:
+def run(keys: Dict[str, str]) -> int:
     checks = Checks()
     langfuse = Langfuse(keys)
     started = datetime.now(timezone.utc)
@@ -264,7 +279,7 @@ def run(plugin_dir: Path, keys: Dict[str, str]) -> int:
             proxy = subprocess.Popen([sys.executable, "-I", str(HERE / "fault_proxy.py"), str(port)])
             try:
                 # Session 1: turn 2 stopped mid-reply.
-                s = Session(folder, plugin_dir, env)
+                s = Session(folder, env)
                 s.turn("Say hi in one word.")
                 s.turn("Write a 2000-word essay about rivers.", stop_after_s=10)
                 s.turn("/mate-record:hurt it kept looping")
@@ -281,7 +296,7 @@ def run(plugin_dir: Path, keys: Dict[str, str]) -> int:
                 normal_first[sid] = "Say hi in one word."
 
                 # Session 2: turn 2 ends in an API error.
-                s = Session(folder, plugin_dir, {**env, "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}"})
+                s = Session(folder, {**env, "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}"})
                 s.turn("Say hi in one word.")
                 s.turn("Say yes. FAIL-THIS-TURN")
                 s.turn("/mate-record:hurt the API failed")
@@ -299,7 +314,7 @@ def run(plugin_dir: Path, keys: Dict[str, str]) -> int:
                 # Session 3: the first turn stopped before any reply.
                 essay = "Think very carefully, then write a long essay about mountains."
                 for stop_after_s in EARLY_STOPS_S:
-                    s = Session(folder, plugin_dir, env)
+                    s = Session(folder, env)
                     s.turn(essay, stop_after_s=stop_after_s)
                     s.turn("/mate-record:hurt it kept looping")
                     sid = s.close()
@@ -327,7 +342,7 @@ def run(plugin_dir: Path, keys: Dict[str, str]) -> int:
                     break
                 time.sleep(SCORE_POLL_S)
                 poll = subprocess.run(
-                    ["claude", "-p", "--plugin-dir", str(plugin_dir), "--model", MODEL, "--output-format", "json", "Say ok."],
+                    ["claude", "-p", "--plugin-dir", str(REPO_ROOT), "--model", MODEL, "--output-format", "json", "Say ok."],
                     cwd=folder, env=env, capture_output=True, text=True, timeout=TURN_TIMEOUT_S, check=False,
                 )
                 try:
@@ -365,19 +380,14 @@ def cleanup(langfuse: Langfuse, session_ids: List[str], started: datetime, check
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--plugin-dir", type=Path, default=REPO_ROOT)
-    parser.add_argument("--keys-file", type=Path, default=Path.home() / ".config" / "mate-record-test" / "keys.env")
-    parser.add_argument("--project", choices=("A", "B"), default="A")
-    args = parser.parse_args()
     try:
         if shutil.which("claude") is None:
             raise CannotRun("claude is not on the PATH")
-        keys = read_keys(args.keys_file, args.project)
+        keys = read_keys()
     except CannotRun as e:
         print(f"cannot run: {e}", file=sys.stderr)
         return 2
-    return run(args.plugin_dir.resolve(), keys)
+    return run(keys)
 
 
 if __name__ == "__main__":
