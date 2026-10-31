@@ -6,6 +6,7 @@ import importlib.util
 import json
 import logging
 import random
+import socket
 import subprocess
 import sys
 import types
@@ -149,6 +150,16 @@ def git(cwd: Path, *args: str) -> None:
         check=True,
         capture_output=True,
     )
+
+
+@pytest.fixture
+def silent_langfuse() -> Iterator[str]:
+    """The address of a Langfuse that takes the connection but never answers."""
+    with socket.socket() as silent:
+        # Listening without ever accepting: the connection is made, no answer comes.
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(8)
+        yield f"http://127.0.0.1:{silent.getsockname()[1]}"
 
 
 @pytest.fixture

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import socket
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -364,7 +363,7 @@ def test_process_pending_hurts_keeps_record_queued_when_client_raises(
 
 
 def test_three_hurts_wait_no_longer_than_one_when_langfuse_takes_the_connection_but_never_answers(
-    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any, silent_langfuse: str
 ) -> None:
     module = hurt_annotations_module
     pending_file = tmp_path / "hurt_pending.json"
@@ -373,16 +372,12 @@ def test_three_hurts_wait_no_longer_than_one_when_langfuse_takes_the_connection_
     answer_timeout_s = 1.0
     real_client = module.LangfuseClient
     monkeypatch.setattr(module, "LangfuseClient", lambda config: real_client(config, timeout=answer_timeout_s))
+    config = FakeConfig()
+    config.host = silent_langfuse
 
-    with socket.socket() as silent:
-        # Listening without ever accepting: the connection is made, no answer comes.
-        silent.bind(("127.0.0.1", 0))
-        silent.listen(8)
-        config = FakeConfig()
-        config.host = f"http://127.0.0.1:{silent.getsockname()[1]}"
-        started = time.monotonic()
-        attached = module.process_pending_hurts(config, pending_file)
-        waited = time.monotonic() - started
+    started = time.monotonic()
+    attached = module.process_pending_hurts(config, pending_file)
+    waited = time.monotonic() - started
 
     assert waited < 2 * answer_timeout_s
     assert attached == 0
