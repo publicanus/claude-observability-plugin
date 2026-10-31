@@ -17,6 +17,15 @@ find_checkout(folder, log=None) returns the Checkout that holds folder.
           the same for all its worktrees: the folder that holds the repo's git
           folder (for a bare repo with worktrees, the folder that holds the bare
           repo), or None outside git
+
+find_remote(root) returns the Remote a checkout's repo is reached through: origin,
+else the first remote by name, with its address as configured (url.<base>.insteadOf
+not applied); None when the repo has no remote. Raises
+subprocess.CalledProcessError when git fails.
+
+github_repo(address) returns "<owner>/<name>" when address is a github.com address,
+in URL form (https://github.com/o/n.git, ssh://git@github.com/o/n) or scp form
+(git@github.com:o/n.git); else None.
 """
 
 from __future__ import annotations
@@ -26,14 +35,22 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 Log = Optional[Callable[[str], None]]
+GITHUB_HOST = "github.com"
 
 
 @dataclass(frozen=True)
 class Checkout:
     root: Path
     main: Optional[Path]
+
+
+@dataclass(frozen=True)
+class Remote:
+    name: str
+    address: str
 
 
 def session_dir(cwd: Optional[str]) -> Path:
@@ -66,3 +83,37 @@ def find_checkout(folder: Path, log: Log = None) -> Checkout:
     common_dir = git_output(folder, "rev-parse", "--path-format=absolute", "--git-common-dir", log=log)
     main = Path(common_dir).parent if common_dir is not None else None
     return Checkout(root=Path(toplevel), main=main)
+
+
+def find_remote(root: Path) -> Optional[Remote]:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, stdout=subprocess.PIPE, text=True, check=True
+        ).stdout.strip()
+
+    names = sorted(git("remote").split())
+    if not names:
+        return None
+    name = "origin" if "origin" in names else names[0]
+    return Remote(name, git("config", "--get", f"remote.{name}.url"))
+
+
+def github_repo(address: str) -> Optional[str]:
+    if "://" in address:
+        parts = urlsplit(address)
+        host, path = parts.hostname or "", parts.path
+    else:
+        # scp form: [user@]host:path
+        host_part, separator, path = address.partition(":")
+        if not separator:
+            return None
+        host = host_part.rpartition("@")[2]
+    if host.lower() != GITHUB_HOST:
+        return None
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    owner_and_name = path.split("/")
+    if len(owner_and_name) != 2 or not all(owner_and_name):
+        return None
+    return path

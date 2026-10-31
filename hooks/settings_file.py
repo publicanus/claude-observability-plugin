@@ -17,7 +17,8 @@ block's Langfuse address, else EU_CLOUD_HOST.
 KEY_NAMES are the names a key goes by, LANGFUSE_ before CC_LANGFUSE_.
 
 The repo's own REPO_SETTINGS_FILE is the only source of the keys and the Langfuse
-address; SETUP_COMMAND is the command that prepares it. For a repo_checkout.Checkout:
+address; SETUP_COMMAND is the command that prepares it, and on a GitHub repo
+fills it from the branch KEYS_BRANCH. For a repo_checkout.Checkout:
 repo_settings_paths and repo_settings_envs return the repo's files and their env
 blocks, in the order they count; repo_settings_env returns the block that counts.
 
@@ -32,6 +33,8 @@ from repo_checkout import Checkout
 
 REPO_SETTINGS_FILE = Path(".claude") / "settings.local.json"
 SETUP_COMMAND = "/mate-record:langfuse-setup"
+# The branch on GitHub that holds the repo's keys, locked, for every laptop let in.
+KEYS_BRANCH = "mate-record-keys"
 EU_CLOUD_HOST = "https://cloud.langfuse.com"
 PUBLIC_KEY_NAMES = ("LANGFUSE_PUBLIC_KEY", "CC_LANGFUSE_PUBLIC_KEY")
 SECRET_KEY_NAMES = ("LANGFUSE_SECRET_KEY", "CC_LANGFUSE_SECRET_KEY")

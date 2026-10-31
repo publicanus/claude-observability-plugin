@@ -15,6 +15,8 @@ from typing import Any, Callable
 
 STATE_DIR = Path.home() / ".claude" / "state"
 STATE_FILE = STATE_DIR / "langfuse_state.json"
+# The hook's log, which the setup also writes to.
+LOG_FILE = STATE_DIR / "langfuse_hook.log"
 # The local queue of /hurt notes waiting to be attached to their traces; see
 # hurt_annotations.py for the format.
 HURT_PENDING_FILE = STATE_DIR / "hurt_pending.json"

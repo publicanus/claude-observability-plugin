@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from conftest import write_settings
+from conftest import git, write_settings
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -127,3 +127,10 @@ def test_every_hook_entry_runs_through_the_launcher():
 
     assert commands.pop("SessionStart") == {session_start_command}
     assert commands and all(event_commands == {LAUNCHER_COMMAND} for event_commands in commands.values())
+
+
+def test_keys_in_a_repo_on_github_do_not_block_so_setup_can_share_them(hook_module, monkeypatch, capsys, repo):
+    write_settings(repo, BOTH_KEYS)
+    git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+
+    assert run_setup_check(hook_module, monkeypatch, capsys) == {}
