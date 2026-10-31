@@ -12,7 +12,8 @@ Any session may send the batch, with these keys and never its own.
 write_waiting_batch adds a file. send_waiting_turns sends every file and
 deletes it once Langfuse answers 2xx, or 401/403 (keys rejected). Any other
 answer keeps the file for a later run, and so does a file that cannot be
-read or deleted. start_sender runs a command in the
+read or deleted. A file stored more than WAITING_MAX_AGE_DAYS ago is deleted
+without being sent. start_sender runs a command in the
 background, cut loose from the hook, so the hook does not wait for it.
 """
 
@@ -33,6 +34,7 @@ from langfuse_client import LangfuseClient, keys_rejected
 
 TRACES_PATH = "/api/public/otel/v1/traces"
 NO_ANSWER = 0
+WAITING_MAX_AGE_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,10 @@ def send_waiting_turns(waiting_dir: Path, sdk_version: str, log: Callable[[str],
 def _send_batch(
     path: Path, sdk_version: str, unanswered: Set[Tuple[str, str]], log: Callable[[str], None]
 ) -> int:
+    if time.time() - path.stat().st_mtime > WAITING_MAX_AGE_DAYS * 24 * 60 * 60:
+        log(f"Dropped waiting file {path.name}: not sent within {WAITING_MAX_AGE_DAYS} days")
+        path.unlink()
+        return 0
     batch = json.loads(path.read_text(encoding="utf-8"))
     target = Target(batch["host"], batch["public_key"], batch["secret_key"])
     destination = (target.host, target.public_key)

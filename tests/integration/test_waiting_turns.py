@@ -265,6 +265,23 @@ def turn_name(session_id: str, turn: int) -> str:
     return f"Claude Code - Turn {turn} ({session_id})"
 
 
+def write_waiting_file(path: Path, port: int, body: bytes, age_days: float = 0) -> None:
+    """A waiting batch for the Langfuse stand-in on `port`, stored `age_days` before now."""
+    path.write_text(
+        json.dumps(
+            {
+                "host": f"http://127.0.0.1:{port}",
+                "public_key": KEYS_A[0],
+                "secret_key": KEYS_A[1],
+                "body": base64.b64encode(body).decode("ascii"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    stored_at = time.time() - age_days * 24 * 60 * 60
+    os.utime(path, (stored_at, stored_at))
+
+
 def nanoseconds(timestamp: str) -> int:
     return int(datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()) * 1_000_000_000
 
@@ -400,17 +417,7 @@ def test_fifty_waiting_turns_do_not_slow_the_hook_down(machine: Machine, tmp_pat
     other = Machine(tmp_path / "other")
     other.waiting_dir.mkdir(parents=True)
     for index in range(50):
-        (other.waiting_dir / f"{index:04d}.json").write_text(
-            json.dumps(
-                {
-                    "host": f"http://127.0.0.1:{port}",
-                    "public_key": KEYS_A[0],
-                    "secret_key": KEYS_A[1],
-                    "body": base64.b64encode(b"x" * 20_000).decode("ascii"),
-                }
-            ),
-            encoding="utf-8",
-        )
+        write_waiting_file(other.waiting_dir / f"{index:04d}.json", port, b"x" * 20_000)
     other_transcript = other.tmp_path / "transcript.jsonl"
     append_rows(other_transcript, turn_rows("s-slow", 1))
     _, with_waiting = other.run_hook("Stop", "s-slow", other_transcript, port)
@@ -472,17 +479,7 @@ def test_a_waiting_file_that_cannot_be_read_does_not_hold_back_the_others(
     broken = machine.waiting_dir / "0000-empty.json"
     broken.write_text("", encoding="utf-8")
     body = b"a batch"
-    (machine.waiting_dir / "0001-good.json").write_text(
-        json.dumps(
-            {
-                "host": f"http://127.0.0.1:{port}",
-                "public_key": KEYS_A[0],
-                "secret_key": KEYS_A[1],
-                "body": base64.b64encode(body).decode("ascii"),
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_waiting_file(machine.waiting_dir / "0001-good.json", port, body)
     log: List[str] = []
 
     sent = send_waiting_turns(machine.waiting_dir, "4.2.0", log.append)
@@ -491,3 +488,34 @@ def test_a_waiting_file_that_cannot_be_read_does_not_hold_back_the_others(
     assert [upload_body for _, upload_body in server.uploads] == [body]
     assert machine.waiting_files() == [broken]
     assert any("0000-empty.json" in line for line in log)
+
+
+def test_a_turn_stored_more_than_30_days_ago_is_dropped_without_being_sent(
+    machine: Machine, servers: Any
+) -> None:
+    port = free_port()
+    server = servers(port)
+    machine.waiting_dir.mkdir(parents=True)
+    write_waiting_file(machine.waiting_dir / "0000-old.json", port, b"an old batch", age_days=31)
+    log: List[str] = []
+
+    sent = send_waiting_turns(machine.waiting_dir, "4.2.0", log.append)
+
+    assert sent == 0
+    assert server.uploads == []
+    assert machine.waiting_files() == []
+    assert any("0000-old.json" in line for line in log)
+
+
+def test_a_turn_stored_less_than_30_days_ago_is_still_sent(machine: Machine, servers: Any) -> None:
+    port = free_port()
+    server = servers(port)
+    machine.waiting_dir.mkdir(parents=True)
+    body = b"a batch from last month"
+    write_waiting_file(machine.waiting_dir / "0000-recent.json", port, body, age_days=29)
+
+    sent = send_waiting_turns(machine.waiting_dir, "4.2.0", lambda _: None)
+
+    assert sent == 1
+    assert [upload_body for _, upload_body in server.uploads] == [body]
+    assert machine.waiting_files() == []
