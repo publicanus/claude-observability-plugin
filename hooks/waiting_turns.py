@@ -10,8 +10,8 @@ A waiting folder holds one JSON file per batch of trace data:
 Any session may send the batch, with these keys and never its own.
 
 write_waiting_batch adds a file. send_waiting_turns sends every file and
-deletes it once Langfuse answers 2xx, or 401/403 (keys rejected). Any other
-answer keeps the file for a later run, and so does a file that cannot be
+deletes it once Langfuse answers 2xx, or 401 (keys rejected). Any other
+answer, 403 included, keeps the file for a later run, and so does a file that cannot be
 read or deleted. A file stored more than WAITING_MAX_AGE_DAYS ago is deleted
 without being sent. start_sender runs a command in the
 background, cut loose from the hook, so the hook does not wait for it.
@@ -30,11 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Set, Tuple
 
-from langfuse_client import LangfuseClient, keys_rejected
+from langfuse_client import LangfuseClient
 
 TRACES_PATH = "/api/public/otel/v1/traces"
 NO_ANSWER = 0
 WAITING_MAX_AGE_DAYS = 30
+# Not 403: a network filter between this computer and Langfuse can answer 403 too.
+KEYS_REJECTED = 401
 
 
 @dataclass(frozen=True)
@@ -114,7 +116,7 @@ def _send_batch(
     if 200 <= response.status < 300:
         path.unlink()
         return 1
-    if keys_rejected(response.status):
+    if response.status == KEYS_REJECTED:
         log(f"Dropped a waiting batch: {target.host} rejected its keys (HTTP {response.status})")
         path.unlink()
         return 0
