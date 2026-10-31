@@ -91,3 +91,46 @@ def test_meta_rows_do_not_start_or_flush_turns(hook_module):
     assert len(turns) == 1
     assert turns[0].injected_by_tool_id == {"toolu_skill": "Injected skill instructions"}
     assert turns[0].tool_results_by_id["toolu_skill"]["content"] == "Skill result"
+
+
+def _prompt(text, second):
+    return {"type": "user", "timestamp": f"2026-01-01T00:00:{second:02d}.000Z", "message": {"role": "user", "content": text}}
+
+
+def _interrupted(second):
+    return {"type": "user", "timestamp": f"2026-01-01T00:00:{second:02d}.000Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}
+
+
+def _reply(message_id, second):
+    return {"type": "assistant", "timestamp": f"2026-01-01T00:00:{second:02d}.000Z",
+            "message": {"id": message_id, "role": "assistant", "content": [{"type": "text", "text": "Done."}]}}
+
+
+def _prompts(hook_module, turns):
+    return [hook_module.extract_text_from_content(hook_module.get_content_from_row(t.user_msg)) for t in turns]
+
+
+def test_a_prompt_stopped_before_any_reply_is_a_turn_of_the_main_session(hook_module):
+    rows = [_prompt("Write an essay.", 0), _interrupted(1), _prompt("Next.", 2), _reply("m", 3)]
+
+    turns = hook_module.build_turns(rows, keep_prompts_stopped_before_reply=True)
+
+    assert _prompts(hook_module, turns) == ["Write an essay.", "Next."]
+    assert turns[0].assistant_msgs == []
+
+
+def test_an_interrupt_row_with_no_prompt_before_it_is_no_turn(hook_module):
+    rows = [_prompt("First.", 0), _reply("m1", 1), _interrupted(2), _interrupted(3), _prompt("Next.", 4), _reply("m2", 5)]
+
+    turns = hook_module.build_turns(rows, keep_prompts_stopped_before_reply=True)
+
+    assert _prompts(hook_module, turns) == ["First.", "Next."]
+
+
+def test_without_the_main_session_switch_a_prompt_with_no_reply_is_no_turn(hook_module):
+    rows = [_prompt("Write an essay.", 0), _interrupted(1), _prompt("Next.", 2), _reply("m", 3)]
+
+    turns = hook_module.build_turns(rows)
+
+    assert _prompts(hook_module, turns) == ["Next."]

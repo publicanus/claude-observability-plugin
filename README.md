@@ -231,12 +231,12 @@ teammate sub-traces to move it.
 
 ## Flagging what hurt with /hurt
 
-`/mate-record:hurt <what happened>` lets an operator flag something that went wrong in the current session. It holds no Langfuse credentials and never contacts Langfuse itself — it resolves the target trace id from `latest_trace_id` (see above) and queues the annotation locally at `~/.claude/state/hurt_pending.json`, a JSON array of:
+`/mate-record:hurt <what happened>` lets an operator flag something that went wrong in the current session. It holds no Langfuse credentials and never contacts Langfuse itself. It queues the note locally at `~/.claude/state/hurt_unresolved.json`, without a trace id. Once the hook has built the turn before the `/hurt`, it moves the note to `~/.claude/state/hurt_pending.json` with that turn's trace id. That turn may have been stopped with Esc, also before any reply, or have ended in an API error. `hurt_pending.json` is a JSON array of:
 
 | Field        | Meaning                                                          |
 | ------------ | ----------------------------------------------------------------- |
 | `id`         | uuid4, unique per queued hurt.                                    |
-| `trace_id`   | The target trace, resolved once by /hurt.                         |
+| `trace_id`   | The target trace, filled in by the hook.                          |
 | `category`   | One of a fixed six-value taxonomy (`correction-repeated`, `redone-work`, `stalled-loop`, `missed-trigger`, `ci-escape`, `other`). |
 | `comment`    | The operator's own words.                                         |
 | `created`    | ISO 8601 UTC timestamp.                                            |

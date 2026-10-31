@@ -18,7 +18,12 @@ STATE_FILE = STATE_DIR / "langfuse_state.json"
 # The local queue of /hurt notes waiting to be attached to their traces; see
 # hurt_annotations.py for the format.
 HURT_PENDING_FILE = STATE_DIR / "hurt_pending.json"
+# The /hurt notes the hook has not yet given a trace; see hurt_annotations.py.
+HURT_UNRESOLVED_FILE = STATE_DIR / "hurt_unresolved.json"
+# Guards both /hurt queue files.
 HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
+# How long /hurt, and the hook when it places notes, wait for that lock.
+HURT_LOCK_TIMEOUT_S = 60.0
 
 
 class StateFileError(Exception):

@@ -19,8 +19,7 @@ KEY_NAMES are the names a key goes by, LANGFUSE_ before CC_LANGFUSE_.
 The repo's own REPO_SETTINGS_FILE is the only source of the keys and the Langfuse
 address; SETUP_COMMAND is the command that prepares it. For a repo_checkout.Checkout:
 repo_settings_paths and repo_settings_envs return the repo's files and their env
-blocks, in the order they count; repo_settings_env returns the block that counts,
-and repo_settings_hold_keys whether it holds both keys.
+blocks, in the order they count; repo_settings_env returns the block that counts.
 
 Uses only the Python standard library and git, so /hurt can import it without langfuse.
 """
@@ -109,7 +108,3 @@ def repo_settings_env(checkout: Checkout) -> Dict[str, Any]:
     envs = repo_settings_envs(checkout)
     return next((env for env in envs if env_holds_keys(env)), envs[-1])
 
-
-def repo_settings_hold_keys(checkout: Checkout) -> bool:
-    """True when repo_settings_env(checkout) holds both keys. Raises SettingsFileError."""
-    return env_holds_keys(repo_settings_env(checkout))

@@ -44,8 +44,10 @@ except Exception:
 # but the test harness loads this file via importlib without doing so).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from state_files import (  # noqa: E402
+    HURT_LOCK_TIMEOUT_S,
     HURT_PENDING_FILE,
     HURT_PENDING_LOCK_FILE,
+    HURT_UNRESOLVED_FILE,
     STATE_DIR,
     STATE_FILE,
     FileLock,
@@ -79,7 +81,7 @@ WORK_ITEM_FLAG = "--work-item"
 # Session entries in the state file, and work item markers, are dropped at this age.
 STATE_MAX_AGE = timedelta(days=30)
 
-from hurt_annotations import process_pending_hurts  # noqa: E402
+from hurt_annotations import load_pending_hurts, place_unresolved_hurts, process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
 from repo_checkout import Checkout, find_checkout, project_folder  # noqa: E402
@@ -1452,10 +1454,12 @@ def merge_assistant_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     base["message"] = merged_message
     return base
 
-def build_turn_from_state(state: TurnAssemblyState) -> Optional[Turn]:
+def build_turn_from_state(state: TurnAssemblyState, allow_no_reply: bool = False) -> Optional[Turn]:
+    """The open turn; None when there is none, or when it has no reply and
+    allow_no_reply is False."""
     if state.current_turn_user_row is None:
         return None
-    if not state.assistant_rows_by_message_id:
+    if not state.assistant_rows_by_message_id and not allow_no_reply:
         return None
 
     # Rebuild one assistant message per message.id, in the order the ids
@@ -1519,10 +1523,27 @@ def starts_turn_when_none_is_open(row: Dict[str, Any]) -> bool:
     is_notification = row.get("type") == "user" and has_task_notification_origin(row)
     return is_notification or hand_back_agent_id(row) is not None
 
-def close_and_start_turn(row: Dict[str, Any], state: TurnAssemblyState, turns: List[Turn]) -> None:
+INTERRUPTED_TEXT = "[Request interrupted by user]"
+
+def is_interrupt_row(row: Optional[Dict[str, Any]]) -> bool:
+    """True for the user row Claude Code writes when Esc stops a turn."""
+    if row is None or get_user_or_assistant_role_from_row(row) != "user":
+        return False
+    return extract_text_from_content(get_content_from_row(row)).strip() == INTERRUPTED_TEXT
+
+def close_and_start_turn(row: Dict[str, Any], state: TurnAssemblyState, turns: List[Turn],
+                         keep_prompt_stopped_before_reply: bool = False) -> None:
     """Add the open turn, if it can be built, to turns and to
-    state.closed_turns_by_call_id, and start a new turn at row."""
-    turn = build_turn_from_state(state)
+    state.closed_turns_by_call_id, and start a new turn at row.
+
+    With keep_prompt_stopped_before_reply, an open turn with no reply is kept when
+    row is an interrupt row and the open turn was not itself opened by one."""
+    stopped_prompt = (
+        keep_prompt_stopped_before_reply
+        and is_interrupt_row(row)
+        and not is_interrupt_row(state.current_turn_user_row)
+    )
+    turn = build_turn_from_state(state, allow_no_reply=stopped_prompt)
     if turn is not None:
         turns.append(turn)
         for call_id in turn.tool_use_timestamps_by_id:
@@ -1534,6 +1555,8 @@ def build_turns(
     rows: List[Dict[str, Any]],
     task_id_to_tool_use_id: Optional[Dict[str, str]] = None,
     agent_calls: Optional[Dict[str, AgentCalls]] = None,
+    *,
+    keep_prompts_stopped_before_reply: bool = False,
 ) -> List[Turn]:
     """
     Groups incremental transcript rows into turns:
@@ -1545,6 +1568,10 @@ def build_turns(
     - assistant rows merged by message.id (all content blocks concatenated)
     - tool results dedupe by tool_use_id (latest wins)
     agent_calls maps an agent's id to its AgentCalls, for its hand-back rows.
+    keep_prompts_stopped_before_reply keeps a prompt that Esc stopped before any
+    reply as a turn with no assistant messages; only the main session's turns
+    take it, because the senders of agent runs and teammates read every turn's
+    last reply.
     """
     turns: List[Turn] = []
     state = TurnAssemblyState()
@@ -1578,7 +1605,7 @@ def build_turns(
         role = get_user_or_assistant_role_from_row(row)
 
         if role == "user":
-            close_and_start_turn(row, state, turns)
+            close_and_start_turn(row, state, turns, keep_prompts_stopped_before_reply)
             continue
 
         if role == "assistant":
@@ -1624,13 +1651,14 @@ def get_new_turns_from_transcript(
     # rows are always chronologically older than anything in the batch).
     turns: List[Turn] = []
     for deferred_turn in deferred_turns:
-        rebuilt = build_turns(deferred_turn["rows"], task_id_to_tool_use_id, agent_calls)
+        rebuilt = build_turns(deferred_turn["rows"], task_id_to_tool_use_id, agent_calls,
+                              keep_prompts_stopped_before_reply=True)
         if rebuilt:
             rebuilt[0].number = deferred_turn.get("turn_number")
             rebuilt[0].trace_id = deferred_turn.get("trace_id")
         turns.extend(rebuilt)
     if rows:
-        turns.extend(build_turns(rows, task_id_to_tool_use_id, agent_calls))
+        turns.extend(build_turns(rows, task_id_to_tool_use_id, agent_calls, keep_prompts_stopped_before_reply=True))
 
     return turns, session_state
 
@@ -3017,11 +3045,15 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
     user_text, user_text_meta = mask_and_truncate(user_text_raw)
 
-    last_assistant = turn.assistant_msgs[-1]
-    final_assistant_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
+    # A prompt stopped before any reply is sent with an empty output.
+    final_assistant_text = ""
+    last_assistant_ts: Optional[datetime] = None
+    if turn.assistant_msgs:
+        last_assistant = turn.assistant_msgs[-1]
+        final_assistant_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
+        last_assistant_ts = parse_timestamp(last_assistant)
 
     user_ts = parse_timestamp(turn.user_msg)
-    last_assistant_ts = parse_timestamp(last_assistant)
     turn_end_ts = get_turn_end_timestamp(turn)
     trace_metadata = build_trace_metadata(session_id, turn_num, turn, transcript_path, user_text_meta)
     trace_metadata[PLUGINS_METADATA_KEY] = describe_plugins(
@@ -3465,6 +3497,8 @@ def emit_new_turns_from_transcript(
             flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
 
+        earlier_trace_id = session_state.latest_trace_id
+        new_turns: List[Turn] = []
         emitted = 0
         if turns:
             new_turns = [turn for turn in turns if turn.number is None]
@@ -3516,7 +3550,37 @@ def emit_new_turns_from_transcript(
             info(f"teammate capture pass failed: {type(e).__name__}: {e}")
         finally:
             save_hook_state(state)
-        return emitted
+
+    # Stores the turns on disk before the /hurt notes are placed: placing can wait
+    # for the queue lock, a SessionEnd hook can be stopped during that wait, and the
+    # turn position is already saved.
+    langfuse.flush()
+    # After the state lock is released, so the hook never holds both locks at once.
+    place_hurts_typed_in(session_id, earlier_trace_id, new_turns)
+    return emitted
+
+
+def place_hurts_typed_in(session_id: str, earlier_trace_id: Optional[str], new_turns: List[Turn]) -> None:
+    """Gives the session's /hurt notes typed in one of new_turns, the turns this run
+    built in transcript order, the trace of the turn before; see place_unresolved_hurts.
+    earlier_trace_id is the session's newest trace before new_turns."""
+    if not new_turns:
+        return
+    turn_starts = [(parse_timestamp(turn.user_msg), turn.trace_id) for turn in new_turns]
+    try:
+        with FileLock(HURT_PENDING_LOCK_FILE, timeout_s=HURT_LOCK_TIMEOUT_S):
+            place_unresolved_hurts(
+                HURT_UNRESOLVED_FILE,
+                HURT_PENDING_FILE,
+                session_id=session_id,
+                earlier_trace_id=earlier_trace_id,
+                new_turns=turn_starts,
+                log=info,
+            )
+    except TimeoutError:
+        waiting = [r.get("id") for r in load_pending_hurts(HURT_UNRESOLVED_FILE)
+                   if isinstance(r, dict) and r.get("session_id") == session_id]
+        info(f"/hurt queue stayed busy for {HURT_LOCK_TIMEOUT_S:g} s; these notes stay unresolved: {waiting}")
 
 
 # ----------------- Delivery health -----------------
@@ -3835,9 +3899,6 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
             transcript_path,
             flush_deferred_agent_turns=flush_deferred_agent_turns,
         )
-        # Stores the turns on disk now: a SessionEnd hook can be stopped during
-        # the delivery check below, and the turn position is already saved.
-        langfuse.flush()
         work_item.prune(WORK_ITEMS_DIR, datetime.now(timezone.utc) - STATE_MAX_AGE, info)
 
         dur = time.time() - start
