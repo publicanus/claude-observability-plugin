@@ -83,6 +83,10 @@ TRACE_LOOKBACK_DAYS = 30
 Log = Optional[Callable[[str], None]]
 
 
+class LangfuseNoAnswer(Exception):
+    """Langfuse gave no answer to a request: no network, a refused connection or a timeout."""
+
+
 def _report_failure(log: Log, step: str, resp: HttpResponse) -> None:
     """Say in the hook log which write Langfuse refused, and why, so a
     rejected request is not mistaken for a trace that is not ready yet."""
@@ -106,8 +110,8 @@ def trace_exists(
     """True once at least one observation of the trace is in the project.
 
     queued_at is when the hurt was queued; the trace is looked for from
-    TRACE_LOOKBACK_DAYS before it up to now. A refused lookup is logged;
-    an unreachable Langfuse is not."""
+    TRACE_LOOKBACK_DAYS before it up to now. A refused lookup is logged.
+    Raises LangfuseNoAnswer when no answer came."""
     query = urlencode(
         {
             "traceId": trace_id,
@@ -118,9 +122,10 @@ def trace_exists(
         }
     )
     resp = client.get(f"/api/public/v2/observations?{query}")
+    if resp.status == 0:
+        raise LangfuseNoAnswer(f"no answer to the trace lookup of {trace_id}")
     if resp.status != 200 or not isinstance(resp.body, dict):
-        if resp.status != 0:
-            _report_failure(log, "trace lookup", resp)
+        _report_failure(log, "trace lookup", resp)
         return False
     rows = resp.body.get("data")
     if not isinstance(rows, list):
@@ -387,7 +392,8 @@ def process_pending_hurts(
     Returns the number of hurts fully attached this run. Never raises: a
     failure for one record leaves it queued for the next run instead of
     propagating and blocking turn emission (call under FileLock like the
-    hook's own state — this function does not lock itself).
+    hook's own state — this function does not lock itself). Once Langfuse
+    gives no answer, the hurts after it are not attempted this run either.
     """
     records = load_pending_hurts(pending_file)
     if not records:
@@ -402,6 +408,7 @@ def process_pending_hurts(
     remaining: List[Dict[str, Any]] = []
     attached = 0
     dropped = 0
+    answering = True
 
     for record in records:
         if not _is_well_formed(record):
@@ -409,9 +416,12 @@ def process_pending_hurts(
             continue
 
         completed = False
-        if record.get("target") in (None, this_target):
+        if answering and record.get("target") in (None, this_target):
             try:
                 completed = _attempt_annotation(client, record, config_id_cache, now, log)
+            except LangfuseNoAnswer as e:
+                answering = False
+                _log(log, f"{e}; the queued /hurt notes wait for a later run")
             except Exception as e:
                 _log(log, f"hurt annotation attempt failed for {record.get('id')}: {type(e).__name__}: {e}")
 
