@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -359,6 +361,32 @@ def test_process_pending_hurts_keeps_record_queued_when_client_raises(
 
     assert attached == 0
     assert json.loads(pending_file.read_text(encoding="utf-8")) == [record]
+
+
+def test_three_hurts_wait_no_longer_than_one_when_langfuse_takes_the_connection_but_never_answers(
+    hurt_annotations_module: Any, tmp_path: Path, monkeypatch: Any
+) -> None:
+    module = hurt_annotations_module
+    pending_file = tmp_path / "hurt_pending.json"
+    records = [make_record(module, id=f"hurt-{n}", trace_id=f"tid-{n}") for n in range(3)]
+    write_pending(pending_file, records)
+    answer_timeout_s = 1.0
+    real_client = module.LangfuseClient
+    monkeypatch.setattr(module, "LangfuseClient", lambda config: real_client(config, timeout=answer_timeout_s))
+
+    with socket.socket() as silent:
+        # Listening without ever accepting: the connection is made, no answer comes.
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(8)
+        config = FakeConfig()
+        config.host = f"http://127.0.0.1:{silent.getsockname()[1]}"
+        started = time.monotonic()
+        attached = module.process_pending_hurts(config, pending_file)
+        waited = time.monotonic() - started
+
+    assert waited < 2 * answer_timeout_s
+    assert attached == 0
+    assert json.loads(pending_file.read_text(encoding="utf-8")) == records
 
 
 def test_process_pending_hurts_never_raises_when_pending_file_is_corrupt(
