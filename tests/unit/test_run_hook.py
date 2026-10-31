@@ -201,12 +201,15 @@ def write_uv_that_cannot_download(bin_dir: Path) -> None:
     write_stub(bin_dir, "uv", 'echo "error: Request failed after 3 retries" >&2\nexit 2')
 
 
-def test_when_uv_cannot_download_the_packages_the_hook_exits_0_and_shows_nothing(bin_dir: Path) -> None:
+CANNOT_DOWNLOAD = "Langfuse: this session is not traced, because the hook could not download what it needs to run."
+
+
+def test_when_uv_cannot_download_the_packages_the_hook_exits_0_with_one_line_on_stderr(bin_dir: Path) -> None:
     write_uv_that_cannot_download(bin_dir)
 
     result = run_launcher(bin_dir)
 
-    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", CANNOT_DOWNLOAD + "\n")
 
 
 def test_at_session_start_when_uv_cannot_download_the_packages_it_says_so_in_one_line(bin_dir: Path) -> None:
@@ -215,10 +218,7 @@ def test_at_session_start_when_uv_cannot_download_the_packages_it_says_so_in_one
     result = run_launcher(bin_dir, WARN)
 
     assert (result.returncode, result.stderr) == (0, "")
-    assert json.loads(result.stdout) == {
-        "systemMessage": "Langfuse: this session is not traced, because the hook could not download"
-        " what it needs to run."
-    }
+    assert json.loads(result.stdout) == {"systemMessage": CANNOT_DOWNLOAD}
 
 
 def test_for_a_command_when_uv_cannot_download_the_packages_it_fails_with_uvs_error(bin_dir: Path) -> None:
@@ -238,6 +238,20 @@ def test_when_uv_has_the_packages_and_no_index_can_be_reached_it_runs_the_script
         "uv",
         'case "$*" in run*|*--offline*) printf "%s\\n" uv "$@"; exit 0 ;; esac\n'
         'echo "error: Request failed after 3 retries" >&2\nexit 2',
+    )
+
+    result = run_launcher(bin_dir, WARN)
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.splitlines() == ["uv", "run", "--quiet", "--script", SCRIPT, *ARGS]
+
+
+def test_when_uv_does_not_have_the_packages_but_can_download_them_it_runs_the_script(bin_dir: Path) -> None:
+    write_stub(
+        bin_dir,
+        "uv",
+        'case "$*" in *--offline*) echo "error: not in the cache" >&2; exit 1 ;; esac\n'
+        'printf "%s\\n" uv "$@"',
     )
 
     result = run_launcher(bin_dir, WARN)

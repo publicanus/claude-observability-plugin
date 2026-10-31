@@ -13,13 +13,15 @@
 #   --fail-if-cannot-run  when there is no uv and no such python3, print one line
 #              to stderr, and exit 1 without running <script>; when uv cannot
 #              download the packages, uv's own error and exit code
+#   neither    when uv cannot download the packages, print one line to stderr,
+#              and exit 0 without running <script>
 #   <script>   path of the Python script; stdin and [args...] are passed on to it
 #   runs with  uv (uv run --script) when uv is on the PATH, else python3
 #   exit       the script's own exit code; 0 when the script does not run, except
 #              with --fail-if-cannot-run
 
 CANNOT_RUN_MESSAGE='{"systemMessage": "Langfuse: the hook cannot run on this machine, this session is not traced. It needs uv (on Windows, uv is required). To fix it, run /mate-record:langfuse-setup."}'
-CANNOT_DOWNLOAD_MESSAGE='{"systemMessage": "Langfuse: this session is not traced, because the hook could not download what it needs to run."}'
+CANNOT_DOWNLOAD_TEXT='Langfuse: this session is not traced, because the hook could not download what it needs to run.'
 CANNOT_RUN_COMMAND_MESSAGE='langfuse-work-item: cannot run: needs uv or a suitable python3; run /mate-record:langfuse-setup'
 
 # Exit 0 when python3 is Python 3.10+ with langfuse 4.2 or later installed.
@@ -32,9 +34,9 @@ sys.exit(sys.version_info < (3, 10) or (major, minor) < (4, 2))' \
     </dev/null >/dev/null 2>&1
 }
 
-# Exit 0 when uv has the packages script $1 needs, downloading them when they are
-# not on this machine yet.
-uv_has_packages() {
+# Installs the packages script $1 needs, downloading them when they are not on this
+# machine yet. Exit 0 when uv has them.
+uv_sync_packages() {
   # Offline first: some minutes after a download, uv without --offline asks the
   # package index again, and fails when there is no network.
   uv sync --offline --quiet --script "$1" </dev/null >/dev/null 2>&1 ||
@@ -49,12 +51,14 @@ case "$1" in
 esac
 
 if command -v uv >/dev/null 2>&1; then
-  if [ "$if_cannot_run" = fail ] || uv_has_packages "$1"; then
+  if [ "$if_cannot_run" = fail ] || uv_sync_packages "$1"; then
     exec uv run --quiet --script "$@"
   fi
-  if [ "$if_cannot_run" = warn ]; then
-    printf '%s\n' "$CANNOT_DOWNLOAD_MESSAGE"
-  fi
+  # Claude never sees the stderr of a hook that exits 0; a skill's Bash call does.
+  case "$if_cannot_run" in
+    warn) printf '{"systemMessage": "%s"}\n' "$CANNOT_DOWNLOAD_TEXT" ;;
+    *) printf '%s\n' "$CANNOT_DOWNLOAD_TEXT" >&2 ;;
+  esac
   exit 0
 fi
 if command -v python3 >/dev/null 2>&1; then
