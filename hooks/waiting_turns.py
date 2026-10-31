@@ -30,13 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Set, Tuple
 
-from langfuse_client import LangfuseClient
+from langfuse_client import LangfuseClient, keys_rejected
 
 TRACES_PATH = "/api/public/otel/v1/traces"
 NO_ANSWER = 0
 WAITING_MAX_AGE_DAYS = 30
-# Not 403: a network filter between this computer and Langfuse can answer 403 too.
-KEYS_REJECTED = 401
 
 
 @dataclass(frozen=True)
@@ -116,7 +114,7 @@ def _send_batch(
     if 200 <= response.status < 300:
         path.unlink()
         return 1
-    if response.status == KEYS_REJECTED:
+    if keys_rejected(response.status):
         log(f"Dropped a waiting batch: {target.host} rejected its keys (HTTP {response.status})")
         path.unlink()
         return 0
