@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.0.5](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.4...v3.0.5) (2026-10-31)
+
+
+### Bug Fixes
+
+* **hook:** a 403 answer keeps the turns waiting to be sent ([#81](https://github.com/publicanus/claude-observability-plugin/issues/81)) ([#102](https://github.com/publicanus/claude-observability-plugin/issues/102)) ([894522c](https://github.com/publicanus/claude-observability-plugin/commit/894522cdbebd04c0b7426e954609c0802e2778c3))
+* **hook:** waiting turns are dropped after 30 days ([#82](https://github.com/publicanus/claude-observability-plugin/issues/82)) ([#99](https://github.com/publicanus/claude-observability-plugin/issues/99)) ([5510af6](https://github.com/publicanus/claude-observability-plugin/commit/5510af662ce1f14d89d24abc5236c7cf15d8dbdd))
+* **hurt:** the end of a reply waits once for a silent Langfuse, however many notes are queued ([#78](https://github.com/publicanus/claude-observability-plugin/issues/78)) ([#101](https://github.com/publicanus/claude-observability-plugin/issues/101)) ([92e8e76](https://github.com/publicanus/claude-observability-plugin/commit/92e8e76fd92fd8d25d689e379daefc705d43a2a1))
+
 ## [3.0.4](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.3...v3.0.4) (2026-10-31)
 
 
