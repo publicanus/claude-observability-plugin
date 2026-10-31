@@ -24,7 +24,8 @@ Note its exit code, its stdout and its stderr.
 ## 2. Act on the answer
 
 - **Exit 0, nothing on stderr, and stdout is a JSON object with `"decision": "block"`:** say only the text of its `reason`, and stop. Change no file.
-- **Exit 0, nothing on stderr, and stdout is exactly `{}`:** go on to step 7.
+- **Exit 0, nothing on stderr, and stdout is a JSON object with `hookSpecificOutput`:** the repo is on GitHub. Go on to step 7.
+- **Exit 0, nothing on stderr, and stdout is exactly `{}`:** the repo's own `.claude/settings.local.json` has no keys. Go on to step 4.
 - **`sh` was not found:** say that the Langfuse hook needs a POSIX `sh`, which on Windows comes with Git for Windows. Stop, and change no file.
 - **Anything else** (no output at all, a non-zero exit, text on stderr, or other stdout): run `uv --version`.
   - If `uv --version` fails, go on to step 3.
@@ -70,7 +71,7 @@ If that command fails, give the developer the path and ask them to open the file
 
 ## 7. Share the keys through GitHub
 
-On a GitHub repo, the repo carries its own Langfuse keys, locked so that only laptops let in can open them; elsewhere this step sends you to steps 4 to 6.
+On a GitHub repo, the repo carries its own Langfuse keys, locked so that only laptops let in can open them.
 
 1. Run `uv --version`. If it fails, go to step 3: the sharing needs uv to load its locking library.
 2. Run the command below. On Windows, put `UV_PYTHON=cpython-3.13-windows-x86_64-none ` in front of it, because Windows on ARM can load the locking library only into that Python.
@@ -85,7 +86,7 @@ On a GitHub repo, the repo carries its own Langfuse keys, locked so that only la
      - `not-github`: go on to step 4.
      - `ready` or `locked`: say "Tracing is ready. Your next session in this repo is traced." Stop.
      - `joining`: start the command of step 2 again, with `wait` in place of `setup`, with the Monitor tool and a 15-minute deadline. Then say "Setting up tracing for this repo. This takes a minute or two. I'll tell you when it's ready." and end your turn, so the developer can go on working. When the watch reports a line, say that line word for word. When the watch ends without a line, say "Tracing is not ready yet. Run /mate-record:langfuse-setup again later, or ask whoever manages this repo."
-     - `not-admin`: say "This repo is not set up for tracing yet. Ask whoever manages this repo to run /mate-record:langfuse-setup first. If you manage it, install the GitHub CLI from https://cli.github.com, run `gh auth login` in a terminal, and run /mate-record:langfuse-setup again." Then, when `settings_hold_keys` is false, go on to step 4; when it is true, stop.
+     - `not-admin`: say "This repo is not set up for tracing yet. Ask whoever manages this repo to run /mate-record:langfuse-setup first. If you manage it, install the GitHub CLI, version 2.81 or later, from https://cli.github.com, run `gh auth login` in a terminal, and run /mate-record:langfuse-setup again." Then, when `settings_hold_keys` is false, go on to step 4; when it is true, stop.
      - `need-keys`: do steps 4 and 5. Then say "This repo is not set up for tracing yet. Paste its Langfuse keys into the file that just opened (Langfuse → project → Settings → API keys), save it, and say done. Never paste them in this chat." When the developer says done, do this step 7 again.
      - `need-workflow-scope`: say "Run `gh auth refresh -h github.com -s workflow` in a terminal, then run /mate-record:langfuse-setup again." Stop.
    - **Anything else** (a non-zero exit, or no JSON on stdout): say "Tracing is not ready yet. Run /mate-record:langfuse-setup again later, or ask whoever manages this repo.", then the last line of its stderr. Stop.

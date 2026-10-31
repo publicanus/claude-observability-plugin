@@ -129,8 +129,16 @@ def test_every_hook_entry_runs_through_the_launcher():
     assert commands and all(event_commands == {LAUNCHER_COMMAND} for event_commands in commands.values())
 
 
-def test_keys_in_a_repo_on_github_do_not_block_so_setup_can_share_them(hook_module, monkeypatch, capsys, repo):
-    write_settings(repo, BOTH_KEYS)
+@pytest.mark.parametrize("env", [BOTH_KEYS, None], ids=["keys", "no-keys"])
+def test_a_repo_on_github_sends_setup_to_sharing_the_keys_through_the_repo(
+    hook_module, monkeypatch, capsys, repo, env
+):
+    if env is not None:
+        write_settings(repo, env)
     git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git")
 
-    assert run_setup_check(hook_module, monkeypatch, capsys) == {}
+    answer = run_setup_check(hook_module, monkeypatch, capsys)
+
+    assert answer["hookSpecificOutput"]["hookEventName"] == "UserPromptExpansion"
+    assert "on GitHub" in answer["hookSpecificOutput"]["additionalContext"]
+    assert "decision" not in answer

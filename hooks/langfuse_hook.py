@@ -147,6 +147,14 @@ SETTINGS_REREAD = "The hook reads that file again at the end of each turn."
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 # At SessionStart without keys, in a repo whose keys branch was fetched: setup is the one step.
 NOT_TRACED_RUN_SETUP = f"Langfuse: this session is not traced. To trace this repo, run {SETUP_COMMAND}."
+# The setup check's answer on a GitHub repo, which sends the setup skill to sharing the keys
+# through the repo. additionalContext is the field this event's output takes for added text.
+SETUP_ON_GITHUB = {
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptExpansion",
+        "additionalContext": "Langfuse: this repo is on GitHub, so setup shares its keys through the repo.",
+    }
+}
 
 # The manual steps shown at SessionStart without keys: one text per system. A repo's
 # own text, at the root of its git checkout, wins over the plugin's for that system.
@@ -3860,8 +3868,10 @@ def main() -> int:
 
     # The setup skill reads "no output" as "the hook cannot run", so this always answers.
     if is_setup_check:
-        # On GitHub, setup shares keys that are already set, so it is not blocked.
-        if config is not None and not is_on_github(checkout):
+        # On GitHub, setup shares the keys through the repo, also keys that are already set.
+        if is_on_github(checkout):
+            print(json.dumps(SETUP_ON_GITHUB))
+        elif config is not None:
             print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
         else:
             print(json.dumps({}))

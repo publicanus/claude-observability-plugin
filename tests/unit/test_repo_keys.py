@@ -2,8 +2,8 @@
 the branch mate-record-keys, against real git repositories.
 
 A bare repo under tmp_path stands in for GitHub: git's url.<base>.insteadOf sends
-https://github.com/ there, so each checkout's remote still reads as a GitHub address.
-gh is replaced by FakeGh. The CI job is relock.py, run as the workflow runs it.
+https://github.com/ there, and the script's github_repo names that bare repo's address
+acme/widgets. gh is replaced by FakeGh. The CI job is relock.py, run as the workflow runs it.
 """
 
 from __future__ import annotations
@@ -79,12 +79,17 @@ class FakeGh:
         self.permission = "ADMIN"
         self.scopes = "gist, read:org, repo, workflow"
         self.secrets: Dict[str, str] = {}
+        # (exit code, stderr) for a gh command that fails, keyed by its first two words.
+        self.failures: Dict[tuple, tuple] = {}
 
     def __call__(self, args: List[str], input: Optional[str] = None) -> Optional[subprocess.CompletedProcess]:
         if not self.installed:
             return None
         if not self.logged_in:
             return subprocess.CompletedProcess(args, 4, "", "not logged in")
+        if tuple(args[:2]) in self.failures:
+            code, stderr = self.failures[tuple(args[:2])]
+            return subprocess.CompletedProcess(args, code, "", stderr)
         if args[:2] == ["repo", "view"]:
             return subprocess.CompletedProcess(args, 0, json.dumps({"viewerPermission": self.permission}), "")
         if args[:2] == ["auth", "status"]:
@@ -169,8 +174,16 @@ class World:
 
 
 @pytest.fixture
-def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relock: Any) -> World:
-    return World(tmp_path, monkeypatch, relock)
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relock: Any, repo_keys: Any) -> World:
+    world = World(tmp_path, monkeypatch, relock)
+    real_github_repo = repo_keys.github_repo
+    stand_in = world.bare.as_posix()
+
+    def github_repo(address: str) -> Optional[str]:
+        return "acme/widgets" if address == stand_in else real_github_repo(address)
+
+    monkeypatch.setattr(repo_keys, "github_repo", github_repo)
+    return world
 
 
 @pytest.fixture
@@ -381,7 +394,9 @@ def test_a_push_refused_once_is_tried_again(world, repo_keys, gh, capsys):
     first_person_locks(world, repo_keys, gh, capsys)
     marker = world.tmp_path / "refused-once"
     hook = world.bare / "hooks" / "pre-receive"
-    hook.write_text(f'#!/bin/sh\nif [ ! -e "{marker.as_posix()}" ]; then touch "{marker.as_posix()}"; exit 1; fi\n')
+    hook.write_text(
+        f'#!/bin/sh\nif [ ! -e "{marker.as_posix()}" ]; then touch "{marker.as_posix()}"; exit 1; fi\n', newline="\n"
+    )
     hook.chmod(0o755)
     world.use_laptop("laptop-2")
 
@@ -391,7 +406,46 @@ def test_a_push_refused_once_is_tried_again(world, repo_keys, gh, capsys):
     assert len([f for f in world.branch_files() if f.startswith("mate-record/laptops/")]) == 2
 
 
+def test_a_consultant_who_can_push_but_does_not_manage_the_repo_joins_without_gh(
+    world, repo_keys, gh, capsys, monkeypatch
+):
+    first_person_locks(world, repo_keys, gh, capsys)
+
+    def no_gh_on_this_path(args: List[str], input: Optional[str] = None) -> None:
+        raise AssertionError(f"joining must not call gh: {args}")
+
+    monkeypatch.setattr(repo_keys, "run_gh", no_gh_on_this_path)
+    world.use_laptop("laptop-2")
+
+    assert setup(repo_keys, capsys, world.checkout("second")) == {"result": "joining"}
+
+    assert len([f for f in world.branch_files() if f.startswith("mate-record/laptops/")]) == 2
+
+
 # ----------------- Failures -----------------
+
+
+@pytest.mark.parametrize(
+    "failing, message",
+    [
+        (("repo", "view"), "error connecting to api.github.com"),
+        (("auth", "status"), "unknown flag: --json"),
+    ],
+    ids=["repo-view-offline", "auth-status-on-old-gh"],
+)
+def test_a_gh_failure_on_the_first_persons_path_fails_with_gh_s_message(
+    world, repo_keys, gh, capsys, log_file, failing, message
+):
+    gh.failures[failing] = (1, message)
+    checkout = world.checkout("first")
+    write_settings(checkout, KEYS)
+
+    code, out, err = run(repo_keys, capsys, "setup", checkout)
+
+    assert (code, out) == (1, "")
+    assert message in err and "2.81.0" in err
+    assert not world.has_branch()
+    assert gh.secrets == {}
 
 
 def test_a_remote_that_cannot_be_reached_fails_in_plain_words_and_logs_the_detail(

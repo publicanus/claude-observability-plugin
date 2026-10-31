@@ -10,8 +10,8 @@ that only the laptops let in, and the repo's CI job, can open them.
     sh hooks/run_hook.sh repo_keys.py wait --project-dir <dir>
 
     --project-dir  the folder the Claude Code session started in
-    needs          uv (for pyrage) and git; gh, logged in, only for the first person
-                   on a repo; on Windows, run it with
+    needs          uv (for pyrage) and git; gh 2.81.0 or later, logged in, only for the
+                   first person on a repo; on Windows, run it with
                    UV_PYTHON=cpython-3.13-windows-x86_64-none
     reads          the repo's .claude/settings.local.json, git's settings, and this
                    laptop's key in <home>/.config/mate-record/laptop-key.txt
@@ -20,8 +20,9 @@ that only the laptops let in, and the repo's CI job, can open them.
                    ready                this laptop was let in; the settings file now
                                         holds the repo's values
                    joining              this laptop asked to be let in
-                   not-admin            no keys on GitHub yet, and gh does not show that
-                                        the consultant manages the repo; the object also
+                   not-admin            no keys on GitHub yet, and gh is missing, is not
+                                        logged in, or shows that the consultant does not
+                                        manage the repo; the object also
                                         has "settings_hold_keys": true or false
                    need-workflow-scope  gh's login lacks the workflow scope
                    need-keys            the settings file holds no keys to share
@@ -50,12 +51,14 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Dict, List, Optional, Sequence
 
-from pyrage import DecryptError, decrypt, encrypt, x25519
+from pyrage import DecryptError, decrypt, x25519
 
 HERE = Path(__file__).resolve().parent
 # The plugin's hooks folder and this folder, so the shared modules import however this script is run.
 sys.path.insert(0, str(HERE.parents[1] / "hooks"))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "keys_branch"))
+import relock  # noqa: E402
 import state_files  # noqa: E402
 from prepare_keys_file import SetupError, write_keys  # noqa: E402
 from repo_checkout import Remote, find_checkout, find_remote, github_repo  # noqa: E402
@@ -71,11 +74,11 @@ from settings_file import (  # noqa: E402
 READY = "Tracing is ready. Your next session in this repo is traced."
 NOT_READY = "Tracing is not ready yet. Run /mate-record:langfuse-setup again later, or ask whoever manages this repo."
 
-LOCK_PATH = "mate-record/langfuse-keys.age"
-CI_PUB_PATH = "mate-record/ci.pub"
-LAPTOPS_DIR = "mate-record/laptops"
+LOCK_PATH = relock.LOCK.as_posix()
+CI_PUB_PATH = relock.CI_PUB.as_posix()
+LAPTOPS_DIR = relock.LAPTOPS.as_posix()
 BRANCH_TEMPLATES = {
-    "mate-record/relock.py": HERE / "keys_branch" / "relock.py",
+    (relock.ROOT / "relock.py").as_posix(): HERE / "keys_branch" / "relock.py",
     ".github/workflows/mate-record-keys.yml": HERE / "keys_branch" / "mate-record-keys.yml",
 }
 CI_SECRET = "MATE_RECORD_CI_KEY"
@@ -97,7 +100,9 @@ WRITE = "Setup could not write the settings file."
 LAPTOP = "Setup could not find this laptop's own setup file."
 READ_SETTINGS = "Setup could not read the settings file."
 SECRET = "Setup could not store the GitHub secret."
+GH_CHECK = "Setup could not check your rights on GitHub with gh (it needs gh 2.81.0 or later)."
 FIRST_PUSH = "Setup could not push the new branch to GitHub."
+GH_NOT_LOGGED_IN = 4
 
 
 class StepFailed(Exception):
@@ -135,18 +140,29 @@ def run_gh(args: List[str], input: Optional[str] = None) -> Optional[subprocess.
         return None
 
 
+def gh_checked(args: List[str]) -> str:
+    """gh's stdout; raises StepFailed, with gh's own message, when gh fails."""
+    result = run_gh(args)
+    if result is None:
+        raise StepFailed(GH_CHECK, "gh could not run", show_detail=True)
+    if result.returncode != 0:
+        raise StepFailed(GH_CHECK, result.stderr.strip(), show_detail=True)
+    return result.stdout
+
+
 def is_admin(repo: str) -> bool:
+    """False when gh is missing or not logged in, or the permission is not ADMIN; raises
+    StepFailed for any other gh failure, such as no network."""
     result = run_gh(["repo", "view", repo, "--json", "viewerPermission"])
-    if result is None or result.returncode != 0:
+    if result is None or result.returncode == GH_NOT_LOGGED_IN:
         return False
+    if result.returncode != 0:
+        raise StepFailed(GH_CHECK, result.stderr.strip(), show_detail=True)
     return json.loads(result.stdout)["viewerPermission"] == "ADMIN"
 
 
 def has_workflow_scope() -> bool:
-    result = run_gh(["auth", "status", "--json", "hosts"])
-    if result is None or result.returncode != 0:
-        return False
-    accounts = json.loads(result.stdout)["hosts"].get("github.com", [])
+    accounts = json.loads(gh_checked(["auth", "status", "--json", "hosts"]))["hosts"].get("github.com", [])
     active = [account for account in accounts if account.get("active")]
     if not active:
         return False
@@ -251,11 +267,6 @@ def make_laptop_key() -> x25519.Identity:
     return identity
 
 
-def lock(values: Dict[str, str], recipients: List[x25519.Recipient]) -> bytes:
-    locked = encrypt(json.dumps(values).encode("utf-8"), recipients, armored=True)
-    return locked if isinstance(locked, bytes) else locked.encode("ascii")
-
-
 def unlock(data: bytes, identity: x25519.Identity) -> Optional[Dict[str, str]]:
     """The values in data, or None when identity cannot open it."""
     try:
@@ -335,7 +346,7 @@ def lock_in(project_dir: Path, root: Path, remote: Remote, repo: str) -> Dict[st
     laptop = read_laptop_key() or make_laptop_key()
     ci = x25519.Identity.generate()
     files = {path: template.read_bytes() for path, template in BRANCH_TEMPLATES.items()}
-    files[LOCK_PATH] = lock(values, [laptop.to_public(), ci.to_public()])
+    files[LOCK_PATH] = relock.lock(json.dumps(values).encode("utf-8"), [laptop.to_public(), ci.to_public()])
     files[CI_PUB_PATH] = f"{ci.to_public()}\n".encode("ascii")
     files[laptop_file(root, laptop)] = f"{laptop.to_public()}\n".encode("ascii")
     # The secret comes first: the first push starts the CI job, which needs it.

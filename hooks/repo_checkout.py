@@ -19,18 +19,21 @@ find_checkout(folder, log=None) returns the Checkout that holds folder.
           repo), or None outside git
 
 find_remote(root) returns the Remote a checkout's repo is reached through: origin,
-else the first remote by name, with its address as configured (url.<base>.insteadOf
-not applied); None when the repo has no remote. Raises
-subprocess.CalledProcessError when git fails.
+else the first remote by name, with the address git uses for it (`git remote
+get-url`, so url.<base>.insteadOf applied); None when the repo has no remote.
+Raises subprocess.CalledProcessError when git fails.
 
 github_repo(address) returns "<owner>/<name>" when address is a github.com address,
 in URL form (https://github.com/o/n.git, ssh://git@github.com/o/n) or scp form
-(git@github.com:o/n.git); else None.
+(git@github.com:o/n.git); else None. An SSH address whose host is an alias, such as
+git@github-work:o/n.git, counts when `ssh -G <alias>` names github.com as its
+hostname; without ssh on the PATH, or when ssh fails, it does not count.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,20 +98,25 @@ def find_remote(root: Path) -> Optional[Remote]:
     if not names:
         return None
     name = "origin" if "origin" in names else names[0]
-    return Remote(name, git("config", "--get", f"remote.{name}.url"))
+    return Remote(name, git("remote", "get-url", name))
+
+
+SSH_SCHEMES = ("ssh", "git+ssh", "ssh+git")
 
 
 def github_repo(address: str) -> Optional[str]:
     if "://" in address:
         parts = urlsplit(address)
         host, path = parts.hostname or "", parts.path
+        over_ssh = parts.scheme in SSH_SCHEMES
     else:
         # scp form: [user@]host:path
         host_part, separator, path = address.partition(":")
         if not separator:
             return None
         host = host_part.rpartition("@")[2]
-    if host.lower() != GITHUB_HOST:
+        over_ssh = True
+    if host.lower() != GITHUB_HOST and not (over_ssh and ssh_hostname(host) == GITHUB_HOST):
         return None
     path = path.strip("/")
     if path.endswith(".git"):
@@ -117,3 +125,22 @@ def github_repo(address: str) -> Optional[str]:
     if len(owner_and_name) != 2 or not all(owner_and_name):
         return None
     return path
+
+
+def ssh_hostname(alias: str) -> Optional[str]:
+    """The host ssh connects to for alias, from the `hostname` line of `ssh -G`, lowercased;
+    None without ssh on the PATH, or when ssh fails."""
+    ssh = shutil.which("ssh")
+    if ssh is None:
+        return None
+    try:
+        result = subprocess.run([ssh, "-G", alias], capture_output=True, text=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key.lower() == "hostname":
+            return value.strip().lower()
+    return None
