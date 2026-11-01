@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,10 +27,16 @@ HURT_UNRESOLVED_FILE = STATE_DIR / "hurt_unresolved.json"
 HURT_PENDING_LOCK_FILE = STATE_DIR / "hurt_pending.lock"
 # How long /hurt, and the hook when it places notes, wait for that lock.
 HURT_LOCK_TIMEOUT_S = 60.0
+# How long a save of a /hurt queue file waits while another program has it open.
+HURT_SAVE_TIMEOUT_S = 0.5
 
 
 class StateFileError(Exception):
     """The state file exists but cannot be read or is not valid JSON."""
+
+
+class FileInUseError(Exception):
+    """Another program kept a file open for longer than a save waits."""
 
 
 def retry_until(attempt: Callable[[], bool], timeout_s: float) -> bool:
@@ -40,6 +47,30 @@ def retry_until(attempt: Callable[[], bool], timeout_s: float) -> bool:
             return False
         time.sleep(0.05)
     return True
+
+
+def replace_file(path: Path, content: str, timeout_s: float) -> None:
+    """Replaces path with content as a whole, through a .tmp file beside it, and
+    creates path's folder when missing.
+
+    Tries again for up to timeout_s seconds while another program, such as a virus
+    scanner, has either file open. Raises FileInUseError, naming path, when it stays
+    open longer; path is then unchanged.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+
+    def write_and_replace() -> bool:
+        # Windows refuses to write or replace a file another process has open.
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, path)
+        except PermissionError:
+            return False
+        return True
+
+    if not retry_until(write_and_replace, timeout_s):
+        raise FileInUseError(f"could not save {path}: another program kept it open for {timeout_s:g} s")
 
 
 if sys.platform == "win32":
