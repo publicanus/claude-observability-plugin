@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from conftest import write_settings
+from conftest import git, write_settings
 
 
 REPO_FILE = ".claude/settings.local.json"
@@ -505,3 +505,23 @@ def test_main_stays_silent_with_nothing_new_and_no_verdict_yet(
     _, system_message = run_main(hook_module, monkeypatch, capsys, fake_langfuse, "sess-fresh-empty", transcript)
 
     assert system_message is None
+
+
+def test_refused_keys_in_a_repo_that_gets_them_from_github_name_only_setup(
+    hook_module, isolated_hook_state, fake_langfuse, monkeypatch, capsys, tmp_path
+):
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(401))
+    transcript = write_one_turn_transcript(tmp_path, "sess-github-keys")
+    for args in (
+        ["init", "-q"],
+        ["commit", "-q", "--allow-empty", "-m", "first"],
+        ["remote", "add", "origin", "https://github.com/acme/widgets.git"],
+        ["update-ref", "refs/remotes/origin/mate-record-keys", "HEAD"],
+    ):
+        git(Path.cwd(), *args)
+
+    _, system_message = run_main(hook_module, monkeypatch, capsys, fake_langfuse, "sess-github-keys", transcript)
+
+    assert system_message == {
+        "systemMessage": "Langfuse: this session is no longer traced. To trace this repo again, run /mate-record:langfuse-setup."
+    }

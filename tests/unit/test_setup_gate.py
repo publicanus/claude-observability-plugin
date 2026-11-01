@@ -1,6 +1,14 @@
-"""Pins the hook's answer to the setup skill's check (a UserPromptExpansion input):
-a block when the repo's own .claude/settings.local.json holds both keys or the
-address is refused, `{}` otherwise, whatever keys are set elsewhere.
+"""Pins the hook's answer to the setup skill's check (a UserPromptExpansion input), in
+the order the hook decides it:
+
+1. Words after the command, such as `help` or `people`: always `{}`, so the skill
+   picks its own step.
+2. Without words, a refused address in the repo's own .claude/settings.local.json:
+   a block with the refusal, on every repo.
+3. Then a GitHub repo: the hookSpecificOutput that sends the skill to sharing the
+   keys through the repo.
+4. Elsewhere: a block with "already configured" when that file holds both keys, and
+   `{}` otherwise, whatever keys are set elsewhere.
 """
 
 from __future__ import annotations
@@ -142,3 +150,37 @@ def test_a_repo_on_github_sends_setup_to_sharing_the_keys_through_the_repo(
     assert answer["hookSpecificOutput"]["hookEventName"] == "UserPromptExpansion"
     assert "on GitHub" in answer["hookSpecificOutput"]["additionalContext"]
     assert "decision" not in answer
+
+
+@pytest.mark.parametrize(
+    "env",
+    [BOTH_KEYS, {"LANGFUSE_BASE_URL": "https://us.cloud.langfuse.com"}],
+    ids=["keys-set", "refused-address"],
+)
+@pytest.mark.parametrize("words", ["help", "people", "peple"])
+def test_words_after_the_command_are_let_through_so_the_skill_picks_the_step(
+    hook_module, monkeypatch, capsys, repo, env, words
+):
+    write_settings(repo, env)
+    monkeypatch.setattr(
+        hook_module,
+        "read_hook_payload",
+        lambda: {
+            "hook_event_name": "UserPromptExpansion",
+            "command_name": "mate-record:langfuse-setup",
+            "command_args": words,
+        },
+    )
+
+    assert hook_module.main() == 0
+    assert json.loads(capsys.readouterr().out) == {}
+
+
+def test_a_refused_address_blocks_also_on_a_github_repo(hook_module, monkeypatch, capsys, repo):
+    write_settings(repo, {"LANGFUSE_BASE_URL": "https://us.cloud.langfuse.com"})
+    git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+
+    answer = run_setup_check(hook_module, monkeypatch, capsys)
+
+    assert answer["decision"] == "block"
+    assert answer["reason"].startswith("Langfuse: https://us.cloud.langfuse.com is Langfuse Cloud's US region.")

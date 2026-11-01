@@ -8,10 +8,14 @@ that only the laptops let in, and the repo's CI job, can open them.
 
     sh hooks/run_hook.sh repo_keys.py setup --project-dir <dir>
     sh hooks/run_hook.sh repo_keys.py wait --project-dir <dir>
+    sh hooks/run_hook.sh repo_keys.py admin --project-dir <dir>
+    sh hooks/run_hook.sh repo_keys.py remove --project-dir <dir> (--person P | --laptop P/L)
+    sh hooks/run_hook.sh repo_keys.py new-pair --project-dir <dir>
 
     --project-dir  the folder the Claude Code session started in
     needs          uv (for pyrage) and git; gh 2.81.0 or later, logged in, only for the
-                   first person on a repo; on Windows, run it with
+                   first person on a repo and for admin, remove and new-pair; on
+                   Windows, run it with
                    UV_PYTHON=cpython-3.13-windows-x86_64-none
     reads          the repo's .claude/settings.local.json, git's settings, and this
                    laptop's key in <home>/.config/mate-record/laptop-key.txt
@@ -29,6 +33,19 @@ that only the laptops let in, and the repo's CI job, can open them.
                    locked               the keys in the settings file are on GitHub now
     wait stdout    one line, after at most about 9 minutes: READY once this laptop was
                    let in and the settings file holds the repo's values, else NOT_READY
+    admin, remove, new-pair stdout
+                   {"result": R}, with R not-github, no-keys-on-github, not-admin (gh
+                   missing, logged out, or not ADMIN) or not-let-in (this laptop cannot
+                   open the newest copy of the keys), else:
+                   admin     "people": [{"person": P, "laptops": [L, ...]}, ...], R people
+                   remove    takes off every laptop of person P, or the laptop P/L, by
+                             pushing a commit that deletes their files and holds the keys
+                             locked for the laptops left; "laptops": ["P/L", ...], R removed
+                   new-pair  the values in the settings file: R same-pair when they are
+                             the repo's, else locked for every laptop and pushed, R new-pair-in
+                   P is a person's git e-mail folder and L a laptop's file name without
+                   .pub; admin and remove stop with exit 1 on a laptop file under any
+                   other name or at any other depth
     exit           0 done; 1 a step failed: stderr says which in one plain sentence
                    (with the tool's own message on the first person's path), and the
                    hook's log gets the details; wait prints NOT_READY instead and
@@ -49,9 +66,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from time import monotonic, sleep
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
-from pyrage import DecryptError, decrypt, x25519
+from pyrage import DecryptError, RecipientError, decrypt, x25519
 
 HERE = Path(__file__).resolve().parent
 # The plugin's hooks folder and this folder, so the shared modules import however this script is run.
@@ -103,6 +120,16 @@ READ_SETTINGS = "Setup could not read the settings file."
 SECRET = "Setup could not store the GitHub secret."
 GH_CHECK = "Setup could not check your rights on GitHub with gh (it needs gh 2.81.0 or later)."
 FIRST_PUSH = "Setup could not push the new branch to GitHub."
+TAKE_OFF = "Setup could not take that off on GitHub."
+NEW_PAIR_PUSH = "Setup could not put the new pair in on GitHub."
+NO_KEYS_IN_SETTINGS = "The settings file holds no Langfuse keys. Paste the new pair into it, save it, and say done."
+REFUSED_FILE = (
+    "Setup does not accept the file {path} on the branch mate-record-keys. "
+    "Delete that file from the branch on GitHub, then ask again."
+)
+# The characters setup writes in a laptop file's folder and name, for a [...] set: the
+# "-" comes last, where it stands for itself.
+NAME_CHARACTERS = "A-Za-z0-9.@-"
 GH_NOT_LOGGED_IN = 4
 
 
@@ -198,14 +225,27 @@ def read_lock_file(root: Path, remote: Remote) -> Optional[bytes]:
     """The branch's lock file, freshly fetched; None when the remote has no branch."""
     if not fetch_keys_branch(root, remote):
         return None
+    return fetched_lock_file(root, remote)
+
+
+def fetched_lock_file(root: Path, remote: Remote) -> bytes:
+    """The lock file in the branch as last fetched; raises StepFailed when it cannot be read."""
     spec = f"{tracking_ref(remote)}:{LOCK_PATH}"
     if git(root, "cat-file", "-e", spec).returncode != 0:
         raise StepFailed(READ, f"{spec} does not exist")
-    return git(root, "cat-file", "blob", spec).stdout
+    read = git(root, "cat-file", "blob", spec)
+    if read.returncode != 0:
+        raise StepFailed(READ, f"git cat-file exited {read.returncode}: {read.stderr.decode(errors='replace').strip()}")
+    return read.stdout
 
 
-def build_commit(root: Path, files: Dict[str, bytes], message: str, parent: Optional[str], sentence: str) -> str:
-    """A commit of parent's files with files added or replaced, made without touching the checkout."""
+Change = Tuple[Dict[str, bytes], List[str]]
+
+
+def build_commit(root: Path, change: Change, message: str, parent: Optional[str], sentence: str) -> str:
+    """A commit of parent's files with change's files added or replaced and its paths
+    deleted, made without touching the checkout."""
+    files, deleted = change
     with tempfile.TemporaryDirectory() as folder:
         index = {"GIT_INDEX_FILE": str(Path(folder) / "index")}
         if parent is not None:
@@ -213,6 +253,8 @@ def build_commit(root: Path, files: Dict[str, bytes], message: str, parent: Opti
         for path, data in files.items():
             blob = git_checked(root, sentence, "hash-object", "-w", "--stdin", input=data)
             git_checked(root, sentence, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", env=index)
+        for path in deleted:
+            git_checked(root, sentence, "update-index", "--force-remove", path, env=index)
         tree = git_checked(root, sentence, "write-tree", env=index)
     parents = ["-p", parent] if parent is not None else []
     return git_checked(root, sentence, "commit-tree", tree, *parents, "-m", message)
@@ -221,7 +263,7 @@ def build_commit(root: Path, files: Dict[str, bytes], message: str, parent: Opti
 def push_commit(
     root: Path,
     remote: Remote,
-    files: Dict[str, bytes],
+    make_change: Callable[[], Change],
     message: str,
     *,
     target: str,
@@ -230,14 +272,15 @@ def push_commit(
     config: Sequence[str] = (),
     show_detail: bool = False,
 ) -> None:
-    """Pushes one commit adding files to the branch: on top of its newest commit when
-    on_branch, else as its first commit. A refused push is tried again, fetching first."""
+    """Pushes one commit with make_change()'s files and deletions: on top of the branch's
+    newest commit when on_branch, else as its first commit. A refused push is tried
+    again, fetching first and calling make_change again, so it can read the new tree."""
     detail = ""
     for attempt in range(PUSH_TRIES):
         if on_branch and attempt > 0:
             fetch_keys_branch(root, remote)
         parent = tracking_ref(remote) if on_branch else None
-        commit = build_commit(root, files, message, parent, sentence)
+        commit = build_commit(root, make_change(), message, parent, sentence)
         pushed = git(root, *config, "push", "--quiet", target, f"{commit}:refs/heads/{KEYS_BRANCH}")
         if pushed.returncode == 0:
             return
@@ -268,6 +311,17 @@ def make_laptop_key() -> x25519.Identity:
     return identity
 
 
+def lock_values(values: Dict[str, str], recipients: List[x25519.Recipient]) -> bytes:
+    return relock.lock(json.dumps(values).encode("utf-8"), recipients)
+
+
+def open_with(lock_file: Optional[bytes], identity: Optional[x25519.Identity]) -> Optional[Dict[str, str]]:
+    """The values in lock_file, or None when there is no lock file, no key, or the key cannot open it."""
+    if lock_file is None or identity is None:
+        return None
+    return unlock(lock_file, identity)
+
+
 def unlock(data: bytes, identity: x25519.Identity) -> Optional[Dict[str, str]]:
     """The values in data, or None when identity cannot open it."""
     try:
@@ -281,7 +335,7 @@ def unlock(data: bytes, identity: x25519.Identity) -> Optional[Dict[str, str]]:
 
 
 def file_name_part(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9.@-]", "-", text)
+    return re.sub(f"[^{NAME_CHARACTERS}]", "-", text)
 
 
 def laptop_file(root: Path, identity: x25519.Identity) -> str:
@@ -318,36 +372,44 @@ def github_remote(project_dir: Path):
 
 def join(project_dir: Path, root: Path, remote: Remote, lock_file: bytes) -> Dict[str, object]:
     identity = read_laptop_key()
-    values = unlock(lock_file, identity) if identity is not None else None
+    values = open_with(lock_file, identity)
     if values is not None:
         write_settings(project_dir, values)
         return {"result": "ready"}
     identity = identity or make_laptop_key()
     path = laptop_file(root, identity)
     files = {path: f"{identity.to_public()}\n".encode("ascii")}
-    push_commit(root, remote, files, f"Let in {path}", target=remote.name, on_branch=True, sentence=SEND)
+    push_commit(root, remote, lambda: (files, []), f"Let in {path}", target=remote.name, on_branch=True, sentence=SEND)
     return {"result": "joining"}
 
 
-def lock_in(project_dir: Path, root: Path, remote: Remote, repo: str) -> Dict[str, object]:
+def settings_values(project_dir: Path) -> Optional[Dict[str, str]]:
+    """The three values in the repo's settings file, the address defaulting to EU cloud;
+    None when it holds no keys."""
     try:
         env = repo_settings_env(find_checkout(project_dir))
     except SettingsFileError as e:
         raise StepFailed(READ_SETTINGS, str(e), show_detail=True) from e
-    holds_keys = env_holds_keys(env)
+    if not env_holds_keys(env):
+        return None
+    public_key, secret_key = read_env_keys(env)
+    return dict(zip(VALUE_NAMES, (public_key, secret_key, read_env_host(env))))
+
+
+def lock_in(project_dir: Path, root: Path, remote: Remote, repo: str) -> Dict[str, object]:
+    values = settings_values(project_dir)
+    holds_keys = values is not None
     if not is_admin(repo):
         return {"result": "not-admin", "settings_hold_keys": holds_keys}
     if not has_workflow_scope():
         return {"result": "need-workflow-scope"}
-    if not holds_keys:
+    if values is None:
         return {"result": "need-keys"}
 
-    public_key, secret_key = read_env_keys(env)
-    values = dict(zip(VALUE_NAMES, (public_key, secret_key, read_env_host(env))))
     laptop = read_laptop_key() or make_laptop_key()
     ci = x25519.Identity.generate()
     files = {path: template.read_bytes() for path, template in BRANCH_TEMPLATES.items()}
-    files[LOCK_PATH] = relock.lock(json.dumps(values).encode("utf-8"), [laptop.to_public(), ci.to_public()])
+    files[LOCK_PATH] = lock_values(values, [laptop.to_public(), ci.to_public()])
     files[CI_PUB_PATH] = f"{ci.to_public()}\n".encode("ascii")
     files[laptop_file(root, laptop)] = f"{laptop.to_public()}\n".encode("ascii")
     # The secret comes first: the first push starts the CI job, which needs it.
@@ -355,7 +417,7 @@ def lock_in(project_dir: Path, root: Path, remote: Remote, repo: str) -> Dict[st
     push_commit(
         root,
         remote,
-        files,
+        lambda: (files, []),
         "Share the repo's Langfuse keys with the laptops let in",
         target=f"https://github.com/{repo}.git",
         on_branch=False,
@@ -391,7 +453,7 @@ def wait(project_dir: Path) -> None:
         except StepFailed as e:
             log_failure(e)
             lock_file = None
-        values = unlock(lock_file, identity) if lock_file is not None else None
+        values = open_with(lock_file, identity)
         if values is not None:
             write_settings(project_dir, values)
             print(READY)
@@ -400,6 +462,134 @@ def wait(project_dir: Path) -> None:
             print(NOT_READY)
             return
         sleep(POLL_SECONDS)
+
+
+# ----------------- The admin -----------------
+class AdminContext(NamedTuple):
+    root: Path
+    remote: Remote
+    identity: x25519.Identity
+    values: Dict[str, str]
+
+
+def admin_gate(project_dir: Path) -> Union[Dict[str, object], AdminContext]:
+    """The answer for someone who may not act as admin here, else what the admin commands need."""
+    found = github_remote(project_dir)
+    if found is None:
+        return {"result": "not-github"}
+    root, remote, repo = found
+    lock_file = read_lock_file(root, remote)
+    if lock_file is None:
+        return {"result": "no-keys-on-github"}
+    if not is_admin(repo):
+        return {"result": "not-admin"}
+    identity = read_laptop_key()
+    values = open_with(lock_file, identity)
+    if identity is None or values is None:
+        return {"result": "not-let-in"}
+    return AdminContext(root, remote, identity, values)
+
+
+def refused(path: str) -> StepFailed:
+    shown = re.sub(f"[^/{NAME_CHARACTERS}]", "?", path)
+    return StepFailed(REFUSED_FILE.format(path=shown), "a file setup never writes")
+
+
+def branch_paths(root: Path, remote: Remote) -> List[str]:
+    listed = git_checked(root, READ, "ls-tree", "-r", "-z", "--name-only", tracking_ref(remote))
+    return [path for path in listed.split("\0") if path]
+
+
+def picked_files(paths: List[str]) -> List[str]:
+    try:
+        return relock.recipient_files(paths)
+    except ValueError as e:
+        raise StepFailed(READ, str(e)) from e
+
+
+def laptop_entries(paths: List[str]) -> List[Tuple[str, str]]:
+    """(person, laptop) for every laptop file the lock is made for; raises StepFailed on a
+    file setup never writes."""
+    entries = []
+    for path in picked_files(paths):
+        if path == CI_PUB_PATH:
+            continue
+        parts = path[len(LAPTOPS_DIR) + 1:].split("/")
+        names_ok = all(re.fullmatch(f"[{NAME_CHARACTERS}]+", part) for part in parts)
+        if len(parts) != 2 or not names_ok:
+            raise refused(path)
+        entries.append((parts[0], parts[1][: -len(".pub")]))
+    return entries
+
+
+def recipients_of(root: Path, remote: Remote, paths: List[str]) -> List[x25519.Recipient]:
+    recipients = []
+    for path in picked_files(paths):
+        text = git_checked(root, READ, "cat-file", "blob", f"{tracking_ref(remote)}:{path}")
+        try:
+            recipients.append(x25519.Recipient.from_str(text.strip()))
+        except RecipientError as e:
+            raise refused(path) from e
+    return recipients
+
+
+def people(project_dir: Path) -> Dict[str, object]:
+    context = admin_gate(project_dir)
+    if not isinstance(context, AdminContext):
+        return context
+    listed: Dict[str, List[str]] = {}
+    for person, laptop in laptop_entries(branch_paths(context.root, context.remote)):
+        listed.setdefault(person, []).append(laptop)
+    return {
+        "result": "people",
+        "people": [{"person": person, "laptops": sorted(listed[person])} for person in sorted(listed)],
+    }
+
+
+def remove(project_dir: Path, person: Optional[str], laptop: Optional[str]) -> Dict[str, object]:
+    context = admin_gate(project_dir)
+    if not isinstance(context, AdminContext):
+        return context
+    root, remote, identity = context.root, context.remote, context.identity
+    entries = laptop_entries(branch_paths(root, remote))
+    targets = [
+        f"{owner}/{name}" for owner, name in entries if owner == person or f"{owner}/{name}" == laptop
+    ]
+    if not targets:
+        raise StepFailed(f"Setup found no {person or laptop} on the list.", "nothing to take off")
+    removed_paths = [f"{LAPTOPS_DIR}/{target}.pub" for target in targets]
+
+    def take_off() -> Change:
+        # The newest values on each try, so a new pair pushed meanwhile is kept.
+        values = open_with(fetched_lock_file(root, remote), identity)
+        if values is None:
+            raise StepFailed(TAKE_OFF, "this laptop can no longer open the newest copy of the keys")
+        remaining = [path for path in branch_paths(root, remote) if path not in removed_paths]
+        return {LOCK_PATH: lock_values(values, recipients_of(root, remote, remaining))}, removed_paths
+
+    push_commit(root, remote, take_off, f"Take off {', '.join(targets)}", target=remote.name, on_branch=True, sentence=TAKE_OFF)
+    return {"result": "removed", "laptops": targets}
+
+
+def new_pair(project_dir: Path) -> Dict[str, object]:
+    context = admin_gate(project_dir)
+    if not isinstance(context, AdminContext):
+        return context
+    root, remote = context.root, context.remote
+    values = settings_values(project_dir)
+    if values is None:
+        raise StepFailed(NO_KEYS_IN_SETTINGS, "the settings file holds no keys")
+    if values == context.values:
+        return {"result": "same-pair"}
+
+    def lock_new_pair() -> Change:
+        recipients = recipients_of(root, remote, branch_paths(root, remote))
+        return {LOCK_PATH: lock_values(values, recipients)}, []
+
+    push_commit(
+        root, remote, lock_new_pair, "Put in a new Langfuse key pair", target=remote.name, on_branch=True, sentence=NEW_PAIR_PUSH
+    )
+    return {"result": "new-pair-in"}
 
 
 def log_failure(error: StepFailed) -> None:
@@ -411,15 +601,26 @@ def log_failure(error: StepFailed) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Share this GitHub repo's Langfuse keys with the laptops let in.")
-    parser.add_argument("command", choices=["setup", "wait"])
+    parser.add_argument("command", choices=["setup", "wait", "admin", "remove", "new-pair"])
     parser.add_argument("--project-dir", required=True, type=Path)
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--person", help="a person's git e-mail folder, for remove")
+    target.add_argument("--laptop", help="<person>/<laptop file name without .pub>, for remove")
     args = parser.parse_args(argv)
+    if (args.command == "remove") != bool(args.person or args.laptop):
+        parser.error("--person or --laptop goes with remove, and only with remove")
     project_dir = args.project_dir.resolve()
+    answers = {
+        "setup": lambda: setup(project_dir),
+        "admin": lambda: people(project_dir),
+        "remove": lambda: remove(project_dir, args.person, args.laptop),
+        "new-pair": lambda: new_pair(project_dir),
+    }
     try:
-        if args.command == "setup":
-            print(json.dumps(setup(project_dir)))
-        else:
+        if args.command == "wait":
             wait(project_dir)
+        else:
+            print(json.dumps(answers[args.command]()))
     except StepFailed as e:
         log_failure(e)
         if args.command == "wait":

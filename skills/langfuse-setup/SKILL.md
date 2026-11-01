@@ -1,15 +1,25 @@
 ---
-description: Set up Langfuse tracing for this repo. On a GitHub repo, gets the repo's Langfuse keys from the repo itself, or puts them there once; elsewhere, prepares .claude/settings.local.json for the keys, kept out of git, and opens it so the developer can paste them.
+description: Set up Langfuse tracing for this repo. On a GitHub repo, gets the repo's Langfuse keys from the repo itself, or puts them there once; elsewhere, prepares .claude/settings.local.json for the keys, kept out of git, and opens it so the developer can paste them. Whoever manages a GitHub repo also uses it to take people or laptops off and to put in a new key pair.
+argument-hint: "[people | new pair | help]"
 disable-model-invocation: true
 ---
 
-Set up Langfuse tracing for the repo of this session. Follow the steps in order, and stop where a step says so.
+Set up Langfuse tracing for the repo of this session, or, for whoever manages a GitHub repo, change who can get its keys. Follow the steps in order, and stop where a step says so.
+
+The words the developer typed after the command: $ARGUMENTS
+
+Pick the first step from those words:
+
+- No words: start at step 1.
+- Words that ask to see who can get this repo's keys, or to take a person or a laptop off: start at step 8.
+- Words that ask for a new key pair: start at step 9.
+- `help`, or any other words: start at step 10. Show the help rather than guess what the words mean, because a wrong guess could take someone off.
 
 Never ask the developer for a Langfuse key or a Langfuse address in the chat, and never write a key yourself: anything typed in this chat is sent to Langfuse with the session once tracing starts. The developer pastes the keys into the file you open in step 5.
 
 Never read, print or show the settings file, because once the developer has pasted the keys it holds them. To check the setup, tell the developer to start a new session and look for the "not traced" line.
 
-Run the commands in steps 1, 2, 4 and 7 with the Bash tool, also on Windows.
+Run the commands in steps 1, 2, 4, 7, 8 and 9 with the Bash tool, also on Windows.
 
 ## 1. Ask the hook
 
@@ -90,3 +100,44 @@ On a GitHub repo, the repo carries its own Langfuse keys, locked so that only la
      - `need-keys`: do steps 4 and 5. Then say "This repo is not set up for tracing yet. Paste its Langfuse keys into the file that just opened (Langfuse → project → Settings → API keys), save it, and say done. Never paste them in this chat." When the developer says done, do this step 7 again.
      - `need-workflow-scope`: say "Run `gh auth refresh -h github.com -s workflow` in a terminal, then run /mate-record:langfuse-setup again." Stop.
    - **Anything else** (a non-zero exit, or no JSON on stdout): say "Tracing is not ready yet. Run /mate-record:langfuse-setup again later, or ask whoever manages this repo.", then the last line of its stderr. Stop.
+
+## 8. People
+
+1. Run `uv --version`. If it fails, go to step 3.
+2. Run the command below, with `UV_PYTHON=cpython-3.13-windows-x86_64-none ` in front of it on Windows, as in step 7:
+
+   ```
+   sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" --fail-if-cannot-run "${CLAUDE_SKILL_DIR}/repo_keys.py" admin --project-dir "${CLAUDE_PROJECT_DIR}"
+   ```
+
+3. When its `result` is `people`, show the list as plain lines: each `person`, and under it each of their `laptops`. For any other answer, go to step 11.
+4. When the developer names whom to take off, here or in the words after the command, run the command of step 2 with `remove` in place of `admin`, followed by either `--person '<person>'` for a person, or `--laptop '<person>/<laptop>'` for one laptop. Use only a person and a laptop exactly as the list shows them, each in single quotes as step 5 quotes a path, and write each `'` inside as `'\''`. When the developer names someone not on the list, say so and run nothing.
+5. When its `result` is `removed`, say "Taken off: <laptops>. The keys already on those laptops keep working until you put in a new key pair and delete the old one in Langfuse. To put in a new pair, run /mate-record:langfuse-setup new pair.", with the `laptops` it names. For any other answer, go to step 11.
+
+## 9. New pair
+
+1. Run `uv --version`. If it fails, go to step 3.
+2. Run the `admin` command of step 8. When its `result` is not `people`, go to step 11.
+3. Do steps 4 and 5. Then say "Replace the two Langfuse keys in the file that just opened with the new pair (Langfuse → project → Settings → API keys), save it, and say done. Never paste them in this chat."
+4. When the developer says done, run the command of step 8 with `new-pair` in place of `admin`.
+   - `new-pair-in`: say "The new key pair is in. Your next session in this repo is traced with it. Now delete the old key pair in Langfuse (project → Settings → API keys). Everyone else on the list gets the new pair when they run /mate-record:langfuse-setup." Stop.
+   - `same-pair`: say "The file still holds the repo's current keys. Paste the new pair into it, save it, and say done." When the developer says done, do this step 4 again.
+   - Any other answer: go to step 11.
+
+## 10. Help
+
+Say only this text, word for word, and stop:
+
+```
+/mate-record:langfuse-setup: set up tracing for this repo.
+For whoever manages this repo:
+/mate-record:langfuse-setup people: see who can get this repo's Langfuse keys, and take a person or a laptop off.
+/mate-record:langfuse-setup new pair: put in new Langfuse keys after you made them in Langfuse.
+```
+
+## 11. Other answers in steps 8 and 9
+
+- `not-admin`: say "Only someone with admin rights on this repo can do that. Ask whoever manages this repo. If you manage it, install the GitHub CLI, version 2.81 or later, from https://cli.github.com, run `gh auth login` in a terminal, and run /mate-record:langfuse-setup again." Stop.
+- `not-let-in`: say "Run /mate-record:langfuse-setup first, so this laptop gets the repo's keys, then ask again." Stop.
+- `not-github` or `no-keys-on-github`: say "This repo does not get its Langfuse keys from GitHub, so there is no one to take off and no pair to replace here." Stop.
+- A non-zero exit, or no JSON on stdout: say the last line of its stderr. Stop.

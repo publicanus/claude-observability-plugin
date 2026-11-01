@@ -565,3 +565,233 @@ def test_relock_locks_the_file_for_ci_and_every_laptop_only(relock, tmp_path, mo
     for identity in (ci, laptop_a, laptop_b):
         assert opens(data, str(identity)) == KEYS
     assert opens(data, str(outsider)) is None
+
+
+# ----------------- The admin: who can get the keys, taking off, a new pair -----------------
+
+NEW_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-FAKE-2", "LANGFUSE_SECRET_KEY": "sk-lf-FAKE-2"}
+
+
+def run_command(repo_keys: Any, capsys: Any, checkout: Path, *args: str) -> tuple:
+    code = repo_keys.main([args[0], "--project-dir", str(checkout), *args[1:]])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def answer(repo_keys: Any, capsys: Any, checkout: Path, *args: str) -> Dict[str, Any]:
+    code, out, err = run_command(repo_keys, capsys, checkout, *args)
+    assert (code, err) == (0, "")
+    return json.loads(out)
+
+
+def laptop_name(home: Path) -> str:
+    public_half = str(x25519.Identity.from_str(laptop_key(home).strip()).to_public())
+    return f"{host_name()}-{public_half[4:12]}"
+
+
+class Team:
+    """Anna, the admin, on laptop-1 and laptop-3; Bob on laptop-2; all let in by the CI job."""
+
+    def __init__(self, world: World, repo_keys: Any, gh: FakeGh, capsys: Any) -> None:
+        self.world = world
+        self.admin_checkout = first_person_locks(world, repo_keys, gh, capsys)
+        self.homes = {}
+        self.homes["laptop-1"] = world.use_laptop("laptop-1")
+        for laptop, email in (("laptop-2", "bob@example.com"), ("laptop-3", "anna@example.com")):
+            self.homes[laptop] = world.use_laptop(laptop)
+            checkout = world.checkout(f"{laptop}-checkout")
+            git(checkout, "config", "user.email", email)
+            assert setup(repo_keys, capsys, checkout) == {"result": "joining"}
+            world.run_ci(gh.secrets["MATE_RECORD_CI_KEY"])
+        world.use_laptop("laptop-1")
+
+    def opens_newest(self, laptop: str) -> Optional[Dict[str, str]]:
+        return opens(self.world.lock_file(), laptop_key(self.homes[laptop]))
+
+
+@pytest.fixture
+def team(world, repo_keys, gh, capsys) -> Team:
+    return Team(world, repo_keys, gh, capsys)
+
+
+def test_the_admin_sees_each_person_with_their_laptops(team, repo_keys, capsys):
+    result = answer(repo_keys, capsys, team.admin_checkout, "admin")
+
+    assert result == {
+        "result": "people",
+        "people": [
+            {
+                "person": "anna@example.com",
+                "laptops": sorted([laptop_name(team.homes["laptop-1"]), laptop_name(team.homes["laptop-3"])]),
+            },
+            {"person": "bob@example.com", "laptops": [laptop_name(team.homes["laptop-2"])]},
+        ],
+    }
+
+
+def test_taking_one_laptop_off_leaves_the_persons_other_laptops_on(team, repo_keys, capsys, gh):
+    name = f"anna@example.com/{laptop_name(team.homes['laptop-3'])}"
+    main_before = git(team.world.bare, "rev-parse", "main")
+
+    assert answer(repo_keys, capsys, team.admin_checkout, "remove", "--laptop", name) == {
+        "result": "removed",
+        "laptops": [name],
+    }
+
+    assert team.opens_newest("laptop-3") is None
+    assert team.opens_newest("laptop-1") == dict(KEYS, LANGFUSE_BASE_URL=EU_CLOUD)
+    assert team.opens_newest("laptop-2") is not None
+    assert f"mate-record/laptops/{name}.pub" not in team.world.branch_files()
+    assert git(team.world.bare, "rev-parse", "main") == main_before
+    team.world.run_ci(gh.secrets["MATE_RECORD_CI_KEY"])
+    assert team.opens_newest("laptop-3") is None
+
+
+def test_taking_a_person_off_takes_off_every_laptop_of_theirs(team, repo_keys, capsys):
+    result = answer(repo_keys, capsys, team.admin_checkout, "remove", "--person", "bob@example.com")
+
+    assert result == {"result": "removed", "laptops": [f"bob@example.com/{laptop_name(team.homes['laptop-2'])}"]}
+    assert team.opens_newest("laptop-2") is None
+    assert team.opens_newest("laptop-3") is not None
+
+
+def test_a_name_not_on_the_list_is_refused_and_nothing_is_pushed(team, repo_keys, capsys):
+    tip = team.world.tip()
+
+    code, out, err = run_command(repo_keys, capsys, team.admin_checkout, "remove", "--person", "carol@example.com")
+
+    assert (code, out) == (1, "")
+    assert "carol@example.com" in err
+    assert team.world.tip() == tip
+
+
+def test_a_new_pair_reaches_every_laptop_still_on_the_list_without_waiting(team, repo_keys, capsys, gh):
+    answer(repo_keys, capsys, team.admin_checkout, "remove", "--person", "bob@example.com")
+    write_settings(team.admin_checkout, NEW_KEYS)
+
+    assert answer(repo_keys, capsys, team.admin_checkout, "new-pair") == {"result": "new-pair-in"}
+
+    expected = dict(NEW_KEYS, LANGFUSE_BASE_URL=EU_CLOUD)
+    assert team.opens_newest("laptop-1") == expected
+    assert team.opens_newest("laptop-2") is None
+    team.world.use_laptop("laptop-3")
+    fresh = team.world.checkout("laptop-3-again")
+    assert setup(repo_keys, capsys, fresh) == {"result": "ready"}
+    assert read_env(fresh) == expected
+    team.world.run_ci(gh.secrets["MATE_RECORD_CI_KEY"])
+    assert team.opens_newest("laptop-2") is None
+
+
+def test_the_same_pair_is_not_pushed_again(team, repo_keys, capsys):
+    team.world.use_laptop("laptop-1")
+    assert setup(repo_keys, capsys, team.admin_checkout) == {"result": "ready"}
+    tip = team.world.tip()
+
+    assert answer(repo_keys, capsys, team.admin_checkout, "new-pair") == {"result": "same-pair"}
+
+    assert team.world.tip() == tip
+
+
+@pytest.mark.parametrize("command", [["admin"], ["remove", "--person", "bob@example.com"], ["new-pair"]])
+@pytest.mark.parametrize("gh_state", ["missing", "WRITE"])
+def test_someone_who_does_not_manage_the_repo_gets_not_admin_and_nothing_changes(
+    team, repo_keys, capsys, gh, command, gh_state
+):
+    gh.installed = gh_state != "missing"
+    gh.permission = gh_state
+    write_settings(team.admin_checkout, NEW_KEYS)
+    tip = team.world.tip()
+
+    assert answer(repo_keys, capsys, team.admin_checkout, *command) == {"result": "not-admin"}
+
+    assert team.world.tip() == tip
+
+
+@pytest.mark.parametrize("command", [["admin"], ["remove", "--person", "bob@example.com"], ["new-pair"]])
+def test_an_admin_on_a_laptop_not_let_in_is_sent_to_setup_first(team, repo_keys, capsys, command):
+    team.world.use_laptop("laptop-4")
+    checkout = team.world.checkout("laptop-4-checkout")
+    write_settings(checkout, NEW_KEYS)
+    tip = team.world.tip()
+
+    assert answer(repo_keys, capsys, checkout, *command) == {"result": "not-let-in"}
+
+    assert team.world.tip() == tip
+
+
+def test_before_any_keys_are_on_github_the_admin_gets_no_keys_on_github(world, repo_keys, gh, capsys):
+    assert answer(repo_keys, capsys, world.checkout("first"), "admin") == {"result": "no-keys-on-github"}
+
+
+@pytest.mark.parametrize(
+    "path, shown",
+    [
+        ("mate-record/laptops/eve$(touch x)@example.com/mac-1.pub", "mate-record/laptops/eve??touch?x?@example.com/mac-1.pub"),
+        ("mate-record/laptops/stray.pub", "mate-record/laptops/stray.pub"),
+        ("mate-record/laptops/eve@example.com/deep/mac-1.pub", "mate-record/laptops/eve@example.com/deep/mac-1.pub"),
+    ],
+    ids=["shell-characters", "too-shallow", "too-deep"],
+)
+@pytest.mark.parametrize("command", [["admin"], ["remove", "--person", "bob@example.com"]])
+def test_a_file_name_setup_never_writes_stops_the_admin_and_is_named_safely(
+    team, repo_keys, capsys, path, shown, command
+):
+    work = team.world.checkout("intruder")
+    git(work, "fetch", "-q", "origin", BRANCH)
+    git(work, "checkout", "-q", "-B", BRANCH, f"origin/{BRANCH}")
+    target = work / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{x25519.Identity.generate().to_public()}\n", encoding="utf-8")
+    git(work, "add", path)
+    git(work, "commit", "-q", "-m", "a stray file")
+    git(work, "push", "-q", "origin", f"HEAD:refs/heads/{BRANCH}")
+    tip = team.world.tip()
+
+    code, out, err = run_command(repo_keys, capsys, team.admin_checkout, *command)
+
+    assert (code, out) == (1, "")
+    assert err.strip() == (
+        f"Setup does not accept the file {shown} on the branch mate-record-keys. "
+        "Delete that file from the branch on GitHub, then ask again."
+    )
+    assert team.world.tip() == tip
+
+
+def test_a_removal_that_races_a_new_pair_keeps_the_new_pair(team, repo_keys, capsys, monkeypatch):
+    other_admin = team.world.checkout("anna-other-checkout")
+    write_settings(other_admin, NEW_KEYS)
+    real_build_commit = repo_keys.build_commit
+    raced = []
+
+    def a_new_pair_lands_first(*args: Any, **kwargs: Any) -> str:
+        if not raced:
+            raced.append(True)
+            assert answer(repo_keys, capsys, other_admin, "new-pair") == {"result": "new-pair-in"}
+        return real_build_commit(*args, **kwargs)
+
+    monkeypatch.setattr(repo_keys, "build_commit", a_new_pair_lands_first)
+
+    result = answer(repo_keys, capsys, team.admin_checkout, "remove", "--person", "bob@example.com")
+
+    assert result["result"] == "removed"
+    assert team.opens_newest("laptop-1") == dict(NEW_KEYS, LANGFUSE_BASE_URL=EU_CLOUD)
+    assert team.opens_newest("laptop-2") is None
+
+
+def test_recipient_files_picks_the_ci_file_and_every_laptop_file(relock):
+    paths = [
+        ".github/workflows/mate-record-keys.yml",
+        "mate-record/ci.pub",
+        "mate-record/langfuse-keys.age",
+        "mate-record/relock.py",
+        "mate-record/laptops/anna@example.com/mac-1.pub",
+        "mate-record/laptops/bob@example.com/deep/pc-2.pub",
+        "mate-record/laptops/notes.txt",
+        "elsewhere/x.pub",
+    ]
+
+    assert relock.recipient_files(paths) == [
+        "mate-record/ci.pub",
+        "mate-record/laptops/anna@example.com/mac-1.pub",
+        "mate-record/laptops/bob@example.com/deep/pc-2.pub",
+    ]
