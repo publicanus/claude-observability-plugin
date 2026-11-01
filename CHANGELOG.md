@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.1.1](https://github.com/publicanus/claude-observability-plugin/compare/v3.1.0...v3.1.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **hook:** an agent's message after the turn ended starts a turn, so the session's reply reaches Langfuse ([#106](https://github.com/publicanus/claude-observability-plugin/issues/106)) ([#112](https://github.com/publicanus/claude-observability-plugin/issues/112)) ([fc1355d](https://github.com/publicanus/claude-observability-plugin/commit/fc1355d033ce73b3e98357512b52dd26ba92236e))
+* **hurt:** a /hurt note that starts with '/' reaches the trace as typed on Windows ([#84](https://github.com/publicanus/claude-observability-plugin/issues/84)) ([#115](https://github.com/publicanus/claude-observability-plugin/issues/115)) ([fe723ed](https://github.com/publicanus/claude-observability-plugin/commit/fe723ed41cc24c3555ccfef2da7829469032e144))
+
 ## [3.1.0](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.5...v3.1.0) (2026-11-01)
 
 
