@@ -227,13 +227,14 @@ class StopPoint:
 
 
 def stop_points(main: Transcript) -> List[StopPoint]:
-    """Each row where the session ran its Stop hooks: the rows before it, and the moment
-    the hooks started."""
+    """Each row where the session ran its Stop hooks: the moment the hooks started, and
+    the rows before it that were written by that moment."""
     points = []
     for index, row in enumerate(main.rows):
         if row.get("type") == "system" and row.get("subtype") == STOP_SUBTYPE:
             durations = [info.get("durationMs") or 0 for info in row.get("hookInfos") or []]
-            points.append(StopPoint(index, timestamp_ms(row["timestamp"]) - max(durations, default=0)))
+            moment_ms = timestamp_ms(row["timestamp"]) - max(durations, default=0)
+            points.append(StopPoint(min(index, rows_written_by(main, moment_ms)), moment_ms))
     return points
 
 

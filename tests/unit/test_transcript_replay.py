@@ -74,3 +74,17 @@ def test_each_stop_sees_the_agent_rows_written_before_its_stop_hooks_started() -
     assert point.main_rows == 1
     assert point.moment_ms == timestamp_ms("2026-01-01T00:00:08.000Z")
     assert rows_written_by(agent, point.moment_ms) == 2
+
+
+def test_a_main_row_written_after_the_stop_hooks_started_is_not_seen_at_that_stop() -> None:
+    main = transcript(SESSION, [
+        {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "assistant", "timestamp": "2026-01-01T00:00:07.000Z"},
+        {"type": "queue-operation", "timestamp": "2026-01-01T00:00:09.000Z"},
+        {"type": "system", "subtype": "stop_hook_summary", "timestamp": "2026-01-01T00:00:10.000Z",
+         "hookInfos": [{"durationMs": 2000}]},
+    ])
+
+    [point] = stop_points(main)
+
+    assert point.main_rows == 2
