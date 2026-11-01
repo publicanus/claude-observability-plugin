@@ -116,7 +116,7 @@ def test_completed_async_agent_turn_is_ready_to_emit(
     state = hook_module.SessionState()
     subagents = hook_module.get_subagent_transcripts_by_tool_use_id(transcript)
 
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state, subagents)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state, subagents)
     turns_to_emit = hook_module.get_turns_to_emit(turns, state)
 
     assert len(turns) == 2
@@ -134,14 +134,14 @@ def test_uncompleted_async_agent_turn_is_deferred_until_flush(
     state = hook_module.SessionState()
     subagents = hook_module.get_subagent_transcripts_by_tool_use_id(transcript)
 
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state, subagents)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state, subagents)
     turns_to_emit = hook_module.get_turns_to_emit(turns, state)
 
     assert turns_to_emit == []
     assert len(state.pending_agent_turns) == 1
     assert state.pending_agent_turns[0]["pending_tool_use_ids"] == ["toolu_agent_deferred"]
 
-    flushed_turns, state = hook_module.get_new_turns_from_transcript(
+    flushed_turns, state, _ = hook_module.get_new_turns_from_transcript(
         transcript,
         state,
         subagents,
@@ -305,7 +305,7 @@ def test_mid_turn_notification_does_not_corrupt_the_surrounding_turn(hook_module
 
     # Hook run 1: turn 1 launches an async agent and ends -> deferred.
     append_jsonl(transcript, launch_turn_rows("toolu_bg"))
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state)
     assert hook_module.get_turns_to_emit(turns, state) == []
     assert len(state.pending_agent_turns) == 1
 
@@ -325,7 +325,7 @@ def test_mid_turn_notification_does_not_corrupt_the_surrounding_turn(hook_module
             "2026-01-01T00:05:03.000Z",
         ),
     ])
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state)
     turns_to_emit = hook_module.get_turns_to_emit(turns, state)
 
     assert state.pending_agent_turns == []
@@ -349,7 +349,7 @@ def test_notification_before_first_assistant_row_does_not_drop_the_turn(hook_mod
     state = hook_module.SessionState()
 
     append_jsonl(transcript, launch_turn_rows("toolu_bg"))
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state)
     assert hook_module.get_turns_to_emit(turns, state) == []
 
     append_jsonl(transcript, [
@@ -361,7 +361,7 @@ def test_notification_before_first_assistant_row_does_not_drop_the_turn(hook_mod
             "2026-01-01T00:05:02.000Z",
         ),
     ])
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state)
     turns_to_emit = hook_module.get_turns_to_emit(turns, state)
 
     assert len(turns_to_emit) == 2
@@ -506,7 +506,7 @@ def test_unresolvable_notification_is_stashed_and_resolved_when_meta_appears(hoo
 
     def run(flush=False):
         sub_map = hook_module.get_subagent_transcripts_by_tool_use_id(transcript)
-        turns, new_state = hook_module.get_new_turns_from_transcript(
+        turns, new_state, _ = hook_module.get_new_turns_from_transcript(
             transcript, state, sub_map, flush_deferred_agent_turns=flush)
         return hook_module.get_turns_to_emit(turns, new_state, flush_deferred_agent_turns=flush)
 
@@ -559,11 +559,11 @@ def test_unresolved_notifications_are_dropped_at_session_end_flush(hook_module, 
     append_jsonl(transcript, [
         make_task_id_notification_row("n1", "agent-unknown", "Result.", "2026-01-01T00:01:00.000Z"),
     ])
-    turns, state = hook_module.get_new_turns_from_transcript(transcript, state)
+    turns, state, _ = hook_module.get_new_turns_from_transcript(transcript, state)
     assert hook_module.get_turns_to_emit(turns, state) == []
     assert len(state.pending_task_notifications) == 1
 
-    flushed_turns, state = hook_module.get_new_turns_from_transcript(
+    flushed_turns, state, _ = hook_module.get_new_turns_from_transcript(
         transcript, state, flush_deferred_agent_turns=True)
     flushed = hook_module.get_turns_to_emit(flushed_turns, state, flush_deferred_agent_turns=True)
 

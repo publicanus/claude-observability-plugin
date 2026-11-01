@@ -21,11 +21,12 @@ import threading
 import time
 import hashlib
 import importlib.metadata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 
@@ -449,13 +450,19 @@ def debug(msg: str) -> None:
         except Exception:
             pass
 
-def info(msg: str) -> None:
+def _log(level: int, msg: str) -> None:
     lg = _get_logger()
     if lg is not None:
         try:
-            lg.info(msg)
+            lg.log(level, msg)
         except Exception:
             pass
+
+def info(msg: str) -> None:
+    _log(logging.INFO, msg)
+
+def warning(msg: str) -> None:
+    _log(logging.WARNING, msg)
 
 
 # ----------------- Hook payload -----------------
@@ -658,6 +665,10 @@ class SessionState:
     # Task-notification rows whose tool_use_id could not be resolved yet
     # (task-id-only and the subagent meta.json not on disk); retried each run.
     pending_task_notifications: List[Dict[str, Any]] = field(default_factory=list)
+    # The wakes already sent, and those reported whose send failed, each as wake_key
+    # gives it.
+    sent_wakes: List[str] = field(default_factory=list)
+    waiting_wakes: List[str] = field(default_factory=list)
 
 def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     s = global_state.get(key, {})
@@ -668,6 +679,12 @@ def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     if not isinstance(pending_task_notifications, list):
         pending_task_notifications = []
     latest_trace_id = s.get("latest_trace_id")
+    sent_wakes = s.get("sent_wakes")
+    if not isinstance(sent_wakes, list):
+        sent_wakes = []
+    waiting_wakes = s.get("waiting_wakes")
+    if not isinstance(waiting_wakes, list):
+        waiting_wakes = []
     return SessionState(
         offset=int(s.get("offset", 0)),
         buffer=str(s.get("buffer", "")),
@@ -675,6 +692,8 @@ def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
         latest_trace_id=latest_trace_id if isinstance(latest_trace_id, str) else None,
         pending_agent_turns=pending_agent_turns,
         pending_task_notifications=pending_task_notifications,
+        sent_wakes=sent_wakes,
+        waiting_wakes=waiting_wakes,
     )
 
 def update_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
@@ -685,6 +704,8 @@ def update_session_state(global_state: Dict[str, Any], key: str, session_state: 
         "latest_trace_id": session_state.latest_trace_id,
         "pending_agent_turns": session_state.pending_agent_turns or [],
         "pending_task_notifications": session_state.pending_task_notifications or [],
+        "sent_wakes": session_state.sent_wakes,
+        "waiting_wakes": session_state.waiting_wakes,
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1057,7 +1078,7 @@ def calls_ended_by_hand_back(row: Dict[str, Any], agent_calls: Dict[str, AgentCa
         )
         call_time = parse_timestamp(agent_row)
         if handed_back and call_time is not None and call_time <= hand_back_time:
-            ended_round = sum(1 for start in round_starts if start <= index)
+            ended_round = round_at(round_starts, index)
     return [call_id for call_id, round_number in calls.rounds_by_call_id.items() if round_number <= ended_round]
 
 def _find_pending_agent_turn(
@@ -1646,7 +1667,9 @@ def get_new_turns_from_transcript(
     continued_rounds: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     flush_deferred_agent_turns: bool = False,
-) -> Tuple[List[Turn], SessionState]:
+) -> Tuple[List[Turn], SessionState, List[Dict[str, Any]]]:
+    """The turns built from the transcript rows this run reads, and from the held-back
+    turns those rows complete; the session state; and the rows read."""
     rows, session_state = read_new_jsonl(transcript_path, session_state)
     task_id_to_tool_use_id = get_task_id_to_tool_use_id(subagent_transcripts_by_tool_use_id)
     agent_calls = get_agent_calls(subagent_transcripts_by_tool_use_id or {}, continued_rounds or {})
@@ -1679,7 +1702,7 @@ def get_new_turns_from_transcript(
     if rows:
         turns.extend(build_turns(rows, task_id_to_tool_use_id, agent_calls, keep_prompts_stopped_before_reply=True))
 
-    return turns, session_state
+    return turns, session_state, rows
 
 def get_subagent_transcripts_by_tool_use_id(transcript_path: Path) -> Dict[str, Dict[str, Any]]:
     """Map launching Agent/Task tool_use ids to their subagent transcripts."""
@@ -1754,6 +1777,11 @@ def is_later_round_start_row(row: Dict[str, Any]) -> bool:
         and is_coordinator_origin(attachment.get("origin"))
     )
 
+def round_at(round_starts: List[int], index: int) -> int:
+    """The number, from 1, of the round that holds the agent transcript row at index,
+    given agent_round_starts of that transcript."""
+    return sum(1 for start in round_starts if start <= index)
+
 def agent_round_starts(rows: List[Dict[str, Any]]) -> List[int]:
     """The position in rows where each round starts; round 1 starts at the first row."""
     if not rows:
@@ -1773,14 +1801,41 @@ def round_prompt_row(row: Dict[str, Any]) -> Dict[str, Any]:
     prompt.pop("isMeta", None)
     return prompt
 
+def is_wake_row(row: Dict[str, Any]) -> bool:
+    """Whether the agent wakes up at this agent transcript row: the user row of a
+    notification of its own, which reaches the agent only once it has finished."""
+    return row.get("type") == "user" and has_task_notification_origin(row)
+
+@dataclass
+class Wake:
+    """An agent's work after it had finished, started by a notification of its own:
+    its rows' positions start to end (not included), and the round it follows."""
+    start: int
+    end: int
+    round_number: int
+
+def agent_wakes(rows: List[Dict[str, Any]]) -> List[Wake]:
+    """The wakes in an agent transcript's rows. A wake runs up to the next wake or the
+    next round start."""
+    round_starts = agent_round_starts(rows)
+    wake_starts = [index for index in range(1, len(rows)) if is_wake_row(rows[index])]
+    wakes = []
+    for start in wake_starts:
+        later_starts = [index for index in round_starts + wake_starts if index > start]
+        round_number = round_at(round_starts, start)
+        wakes.append(Wake(start, min(later_starts, default=len(rows)), round_number))
+    return wakes
+
 def agent_round_rows(rows: List[Dict[str, Any]], round_number: int) -> Optional[List[Dict[str, Any]]]:
     """The rows of round round_number (from 1) of an agent transcript's rows, up to the
-    next round's start; None when that round has not started in rows."""
+    next round's start or the first wake in the round; None when that round has not
+    started in rows."""
     starts = agent_round_starts(rows)
     if round_number < 1 or round_number > len(starts):
         return None
     start = starts[round_number - 1]
     end = starts[round_number] if round_number < len(starts) else len(rows)
+    end = next((index for index in range(start + 1, end) if is_wake_row(rows[index])), end)
     first_row = rows[start] if round_number == 1 else round_prompt_row(rows[start])
     return [first_row] + rows[start + 1:end]
 
@@ -1793,6 +1848,16 @@ def sent_to_agent_id(row: Dict[str, Any]) -> Optional[str]:
     agent_id = pin.get("id") if isinstance(pin, dict) else None
     return agent_id if isinstance(agent_id, str) and agent_id else None
 
+def subagents_by_agent_id(
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Each launched agent's entry of subagent_transcripts_by_tool_use_id, by its id."""
+    return {
+        subagent["agent_id"]: subagent
+        for subagent in subagent_transcripts_by_tool_use_id.values()
+        if isinstance(subagent.get("agent_id"), str)
+    }
+
 def get_continued_rounds_by_tool_use_id(
     transcript_path: Path,
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
@@ -1803,11 +1868,7 @@ def get_continued_rounds_by_tool_use_id(
 
     Reads the whole main transcript; returns {} when no agent was launched or the
     transcript cannot be read."""
-    agents_by_id = {
-        subagent["agent_id"]: subagent
-        for subagent in subagent_transcripts_by_tool_use_id.values()
-        if isinstance(subagent.get("agent_id"), str)
-    }
+    agents_by_id = subagents_by_agent_id(subagent_transcripts_by_tool_use_id)
     if not agents_by_id:
         return {}
 
@@ -1854,11 +1915,81 @@ def get_agent_calls(
 
 @dataclass
 class AgentRun:
-    """One round of an agent: its entry of subagent_transcripts_by_tool_use_id, its
-    number from 1, and its rows of the agent transcript."""
+    """One round of an agent, or a wake that followed it: its entry of
+    subagent_transcripts_by_tool_use_id, the round's number from 1, and its rows of the
+    agent transcript."""
     subagent: Dict[str, Any]
     round_number: int
     rows: List[Dict[str, Any]]
+    woken: bool = False
+
+def reporting_agent_id(
+    row: Dict[str, Any],
+    task_id_to_tool_use_id: Dict[str, str],
+    agent_calls: Dict[str, AgentCalls],
+) -> Optional[str]:
+    """The id of the agent the row reports from: a hand-back from it, or a task
+    notification for one of its calls. None for any other row.
+    agent_calls maps an agent's id to its AgentCalls."""
+    agent_id = hand_back_agent_id(row)
+    if agent_id is not None:
+        return agent_id
+    call_id = get_tool_use_id_for_task_notification(row, task_id_to_tool_use_id)
+    if call_id is None:
+        return None
+    return next((agent_id for agent_id, calls in agent_calls.items() if call_id in calls.rounds_by_call_id), None)
+
+def wake_key(agent_id: str, wake_start_row: Dict[str, Any]) -> str:
+    return f"{agent_id}:{wake_start_row.get('uuid')}"
+
+@dataclass
+class WakeRun:
+    """A wake as wake_key names it, the time of its first row, and its run."""
+    key: str
+    start_time: Optional[datetime]
+    run: AgentRun
+
+def agent_wake_runs(subagent: Dict[str, Any]) -> List[WakeRun]:
+    """The wakes in the agent's transcript, read now; [] when it cannot be read."""
+    path = subagent.get("path")
+    rows = (read_jsonl_rows(path) or []) if isinstance(path, Path) else []
+    return [
+        WakeRun(
+            wake_key(subagent["agent_id"], rows[wake.start]),
+            parse_timestamp(rows[wake.start]),
+            AgentRun(subagent, wake.round_number, rows[wake.start:wake.end], woken=True),
+        )
+        for wake in agent_wakes(rows)
+    ]
+
+def wakes_to_send(
+    rows: List[Dict[str, Any]],
+    session_state: SessionState,
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
+    continued_rounds: Dict[str, Dict[str, Any]],
+) -> List[WakeRun]:
+    """The wakes not sent yet that wait from an earlier run (session_state.waiting_wakes)
+    or that rows report: each wake of an agent that starts at or before a row reporting
+    from that agent. Each wake once."""
+    task_id_to_tool_use_id = get_task_id_to_tool_use_id(subagent_transcripts_by_tool_use_id)
+    agent_calls = get_agent_calls(subagent_transcripts_by_tool_use_id, continued_rounds)
+    agents_by_id = subagents_by_agent_id(subagent_transcripts_by_tool_use_id)
+    found: Dict[str, WakeRun] = {}
+    for key in session_state.waiting_wakes:
+        subagent = agents_by_id.get(key.split(":", 1)[0])
+        for wake in agent_wake_runs(subagent) if subagent else []:
+            if wake.key == key:
+                found[key] = wake
+    for row in rows:
+        agent_id = reporting_agent_id(row, task_id_to_tool_use_id, agent_calls)
+        subagent = agents_by_id.get(agent_id) if agent_id else None
+        report_time = parse_timestamp(row)
+        if subagent is None or report_time is None:
+            continue
+        for wake in agent_wake_runs(subagent):
+            if wake.start_time is not None and wake.start_time <= report_time:
+                found.setdefault(wake.key, wake)
+    return [wake for key, wake in found.items() if key not in session_state.sent_wakes]
 
 def agent_run_of_call(
     tool_use_id: str,
@@ -2172,6 +2303,53 @@ def _start_backdated(langfuse: Langfuse, *, name: str, as_type: str,
         **obs_kwargs,
     )
 
+# ---- A trace's root span ----
+BASE_TRACE_TAG = "claude-code"
+
+def seeded_turn_trace_id(trace_seed: Optional[str], turn_num: int) -> Optional[str]:
+    """The trace id CC_LANGFUSE_TRACE_SEED gives the session's turn turn_num; None
+    without a seed, or when the id cannot be derived (logged)."""
+    if not trace_seed:
+        return None
+    try:
+        return derive_turn_trace_id(trace_seed, turn_num)
+    except Exception as e:
+        debug(f"trace id derivation failed for turn {turn_num}: {e}")
+        return None
+
+@contextmanager
+def open_root_span(langfuse: Langfuse, *, session_id: str, user_id: Optional[str], trace_name: str,
+                   tags: List[str], repo_name: str, name: str, start_time: Optional[datetime],
+                   forced_trace_id: Optional[str], input_text: str, metadata: Dict[str, Any]) -> Iterator[Any]:
+    """Opens a trace: yields its root span, named name and started at start_time, with
+    input_text masked and truncated as its input. The trace carries the session id,
+    user id, trace name, tags and repo; forced_trace_id None lets the SDK pick the id.
+    The caller ends the span with close_root_span inside the with block."""
+    masked_input, _ = mask_and_truncate(input_text)
+    with propagate_attributes(
+        session_id=session_id,
+        user_id=user_id,
+        trace_name=trace_name,
+        tags=tags,
+        metadata={REPO_METADATA_KEY: repo_name},
+    ):
+        yield _start_backdated(
+            langfuse,
+            name=name,
+            as_type="span",
+            start_time=start_time,
+            forced_trace_id=forced_trace_id,
+            input={"role": "user", "content": masked_input},
+            metadata=metadata,
+        )
+
+def close_root_span(span: Any, output_text: str, *end_times: Optional[datetime]) -> None:
+    """Gives the root span output_text, masked and truncated, as its output, and ends it
+    at the latest of end_times."""
+    masked_output, _ = mask_and_truncate(output_text)
+    span.update(output={"role": "assistant", "content": masked_output})
+    span.end(end_time=to_otel_nanoseconds(_get_latest_timestamp(*end_times)))
+
 # ---- Trace naming and tags ----
 def skills_in_rows(rows: List[Dict[str, Any]]) -> List[str]:
     """The names of the skills the rows ran, each once, in the order first seen.
@@ -2378,7 +2556,7 @@ def get_trace_tags(
     subagent_transcripts_by_tool_use_id: Optional[Dict[str, Dict[str, Any]]] = None,
     continued_rounds: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[str]:
-    tags = ["claude-code"]
+    tags = [BASE_TRACE_TAG]
     if SKILL_TAGS:
         tags += collect_skill_tags(turn)
         tags += collect_subagent_skill_tags(turn, subagent_transcripts_by_tool_use_id, continued_rounds)
@@ -2928,6 +3106,10 @@ def emit_agent_run_of_call(langfuse: Langfuse, parent_otel_span: Any,
         )
     return start_timestamp
 
+def last_reply_text(turns: List[Turn]) -> str:
+    """The text of the last reply of the last of turns, which build_turns built with replies."""
+    return extract_text_from_content(get_content_from_row(turns[-1].assistant_msgs[-1]))
+
 def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
                                run: AgentRun,
                                start_timestamp: Optional[datetime],
@@ -2942,15 +3124,15 @@ def emit_subagent_observations(langfuse: Langfuse, parent_otel_span: Any,
     subagent_start_timestamp = start_timestamp or parse_timestamp(first_turn.user_msg)
     subagent_input_text, subagent_input_meta = mask_and_truncate(extract_text_from_content(get_content_from_row(first_turn.user_msg)))
 
-    last_turn = turns[-1]
-    last_assistant = last_turn.assistant_msgs[-1]
-    subagent_output_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
+    subagent_output_text, _ = mask_and_truncate(last_reply_text(turns))
 
     component = component_of(subagent.get("agent_type"), plugin_versions)
     description = subagent.get("description")
     subagent_name = f"Subagent: {description}" if isinstance(description, str) and description else "Subagent"
     if run.round_number > 1:
         subagent_name += f" - round {run.round_number}"
+    if run.woken:
+        subagent_name += " - woken up"
     subagent_span = _start_backdated(
         langfuse,
         name=subagent_name,
@@ -3062,14 +3244,14 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
               work_items: work_item.WorkItems,
               continued_rounds: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[str]:
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
-    user_text, user_text_meta = mask_and_truncate(user_text_raw)
+    _, user_text_meta = mask_and_truncate(user_text_raw)
 
     # A prompt stopped before any reply is sent with an empty output.
     final_assistant_text = ""
     last_assistant_ts: Optional[datetime] = None
     if turn.assistant_msgs:
         last_assistant = turn.assistant_msgs[-1]
-        final_assistant_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
+        final_assistant_text = extract_text_from_content(get_content_from_row(last_assistant))
         last_assistant_ts = parse_timestamp(last_assistant)
 
     user_ts = parse_timestamp(turn.user_msg)
@@ -3081,35 +3263,24 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
     tags = get_trace_tags(turn, subagent_transcripts_by_tool_use_id, continued_rounds) + [repo_tag(repo_name)]
     tags += work_item_tags(turn, work_items)
 
-    trace_name = trace_display_name(session_id, turn_num)
     session = component_of(SESSION_COMPONENT, plugin_versions)
-    root_observation_name = "Conversational Turn"
 
-    # A held-back turn brings the trace id it was given; otherwise opt-in
-    # deterministic trace ids, failing open to the auto-generated id.
-    forced_trace_id: Optional[str] = turn.trace_id
-    if forced_trace_id is None and trace_seed:
-        try:
-            forced_trace_id = derive_turn_trace_id(trace_seed, turn_num)
-        except Exception as e:
-            debug(f"trace id derivation failed for turn {turn_num}: {e}")
+    # A held-back turn brings the trace id it was given.
+    forced_trace_id = turn.trace_id or seeded_turn_trace_id(trace_seed, turn_num)
 
-    with propagate_attributes(
+    with open_root_span(
+        langfuse,
         session_id=session_id,
         user_id=user_id,
-        trace_name=trace_name,
+        trace_name=trace_display_name(session_id, turn_num),
         tags=tags,
-        metadata={REPO_METADATA_KEY: repo_name},
-    ):
-        trace_span = _start_backdated(
-            langfuse,
-            name=root_observation_name,
-            as_type="span",
-            start_time=user_ts,
-            forced_trace_id=forced_trace_id,
-            input={"role": "user", "content": user_text},
-            metadata=component_metadata(session, trace_metadata),
-        )
+        repo_name=repo_name,
+        name="Conversational Turn",
+        start_time=user_ts,
+        forced_trace_id=forced_trace_id,
+        input_text=user_text_raw,
+        metadata=component_metadata(session, trace_metadata),
+    ) as trace_span:
         obs_end_ts = emit_turn_observations(
             langfuse,
             trace_span._otel_span,
@@ -3120,12 +3291,68 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
             subagent_transcripts_by_tool_use_id=subagent_transcripts_by_tool_use_id,
             continued_rounds=continued_rounds,
         )
-        trace_span.update(output={"role": "assistant", "content": final_assistant_text})
-        trace_span.end(end_time=to_otel_nanoseconds(_get_latest_timestamp(turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)))
+        close_root_span(trace_span, final_assistant_text, turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)
         # trace_span.trace_id reads the id actually attached to the root span's
         # otel context — the forced id when trace_seed produced one, otherwise
         # whatever the SDK auto-generated. Same attribute, either path.
         return trace_span.trace_id
+
+
+def emit_wake(langfuse: Langfuse, session_id: str, turn_num: int, run: AgentRun, *,
+              repo_name: str, plugin_versions: Dict[str, Optional[str]], user_id: Optional[str],
+              trace_seed: Optional[str], work_items: work_item.WorkItems) -> None:
+    """Sends a wake, run, as a trace of its own, numbered as the session's turn
+    turn_num: an "Agent woken up" root holding the wake's run. Sends nothing for a wake
+    without a reply."""
+    turns = build_turns(run.rows)
+    if not turns:
+        return
+    start_ts = parse_timestamp(turns[0].user_msg)
+    agent_type = run.subagent.get("agent_type")
+    plugins = [plugin for turn in turns for plugin in plugins_used_in_turn(turn, None)] + [plugin_of(agent_type)]
+    with open_root_span(
+        langfuse,
+        session_id=session_id,
+        user_id=user_id,
+        trace_name=trace_display_name(session_id, turn_num),
+        tags=[BASE_TRACE_TAG, repo_tag(repo_name)] + work_item_tags(turns[-1], work_items),
+        repo_name=repo_name,
+        name="Agent woken up",
+        start_time=start_ts,
+        forced_trace_id=seeded_turn_trace_id(trace_seed, turn_num),
+        input_text=extract_text_from_content(get_content_from_row(turns[0].user_msg)),
+        metadata=component_metadata(component_of(agent_type, plugin_versions), {
+            "session_id": session_id,
+            "turn_number": turn_num,
+            "agent_id": run.subagent.get("agent_id"),
+            PLUGINS_METADATA_KEY: describe_plugins(plugins, plugin_versions),
+        }),
+    ) as trace_span:
+        end_ts = emit_subagent_observations(langfuse, trace_span._otel_span, run, start_ts, plugin_versions)
+        close_root_span(trace_span, last_reply_text(turns), end_ts, start_ts)
+
+def emit_wakes(langfuse: Langfuse, session_id: str, session_state: SessionState, wakes: List[WakeRun],
+               config: LangfuseConfig, work_items: work_item.WorkItems) -> int:
+    """Sends each wake with emit_wake, numbered as the session's next turn, and returns
+    how many it tried. A sent wake goes on session_state.sent_wakes. A wake that fails
+    to send is logged as a warning and goes on session_state.waiting_wakes, so the next
+    run tries it again."""
+    for wake in wakes:
+        session_state.turn_count += 1
+        try:
+            emit_wake(langfuse, session_id, session_state.turn_count, wake.run, repo_name=config.repo_name,
+                      plugin_versions=config.plugin_versions, user_id=config.user_id,
+                      trace_seed=config.trace_seed, work_items=work_items)
+        except Exception as e:
+            warning(f"wake {wake.key} (agent id:first row uuid) not sent, tried again next run: "
+                    f"{type(e).__name__}: {e}")
+            if wake.key not in session_state.waiting_wakes:
+                session_state.waiting_wakes.append(wake.key)
+            continue
+        session_state.sent_wakes.append(wake.key)
+        if wake.key in session_state.waiting_wakes:
+            session_state.waiting_wakes.remove(wake.key)
+    return len(wakes)
 
 
 # ---- Named teammate (agent-team) emission ----
@@ -3197,10 +3424,10 @@ def emit_teammate_turn(
     name = teammate.get("name") or "teammate"
     agent_id = teammate.get("agent_id") or name
     user_text_raw = extract_text_from_content(get_content_from_row(turn.user_msg))
-    user_text, user_text_meta = mask_and_truncate(user_text_raw)
+    _, user_text_meta = mask_and_truncate(user_text_raw)
 
     last_assistant = turn.assistant_msgs[-1]
-    final_assistant_text, _ = mask_and_truncate(extract_text_from_content(get_content_from_row(last_assistant)))
+    final_assistant_text = extract_text_from_content(get_content_from_row(last_assistant))
 
     user_ts = parse_timestamp(turn.user_msg)
     last_assistant_ts = parse_timestamp(last_assistant)
@@ -3220,7 +3447,7 @@ def emit_teammate_turn(
         ),
     })
 
-    tags = ["claude-code", f"teammate:{name}", repo_tag(repo_name)]
+    tags = [BASE_TRACE_TAG, f"teammate:{name}", repo_tag(repo_name)]
     if launching_tool_use_id is None:
         tags.append("teammate-unattributed")
     if ambiguous_name:
@@ -3229,7 +3456,6 @@ def emit_teammate_turn(
         tags += collect_skill_tags(turn)
     tags += work_item_tags(turn, work_items)
 
-    trace_name = teammate_trace_display_name(name, teammate_turn_num, session_id)
     teammate_component = component_of(teammate.get("agent_type"), plugin_versions)
 
     forced_trace_id: Optional[str] = None
@@ -3239,22 +3465,19 @@ def emit_teammate_turn(
         except Exception as e:
             debug(f"teammate trace id derivation failed for {agent_id} turn {teammate_turn_num}: {e}")
 
-    with propagate_attributes(
+    with open_root_span(
+        langfuse,
         session_id=session_id,
         user_id=user_id,
-        trace_name=trace_name,
+        trace_name=teammate_trace_display_name(name, teammate_turn_num, session_id),
         tags=tags,
-        metadata={REPO_METADATA_KEY: repo_name},
-    ):
-        trace_span = _start_backdated(
-            langfuse,
-            name="Teammate Turn",
-            as_type="span",
-            start_time=user_ts,
-            forced_trace_id=forced_trace_id,
-            input={"role": "user", "content": user_text},
-            metadata=component_metadata(teammate_component, trace_metadata),
-        )
+        repo_name=repo_name,
+        name="Teammate Turn",
+        start_time=user_ts,
+        forced_trace_id=forced_trace_id,
+        input_text=user_text_raw,
+        metadata=component_metadata(teammate_component, trace_metadata),
+    ) as trace_span:
         obs_end_ts = emit_turn_observations(
             langfuse,
             trace_span._otel_span,
@@ -3267,8 +3490,7 @@ def emit_teammate_turn(
             # Claude Code writes their transcripts is not checked.
             subagent_transcripts_by_tool_use_id=None,
         )
-        trace_span.update(output={"role": "assistant", "content": final_assistant_text})
-        trace_span.end(end_time=to_otel_nanoseconds(_get_latest_timestamp(turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)))
+        close_root_span(trace_span, final_assistant_text, turn_end_ts, last_assistant_ts, obs_end_ts, user_ts)
 
 
 def emit_teammate_transcripts(
@@ -3508,7 +3730,7 @@ def emit_new_turns_from_transcript(
         continued_rounds = get_continued_rounds_by_tool_use_id(transcript_path, subagent_transcripts_by_tool_use_id)
         work_items = read_work_items(session_id, config.work_item_branch_pattern)
 
-        turns, session_state = get_new_turns_from_transcript(
+        turns, session_state, rows_read = get_new_turns_from_transcript(
             transcript_path,
             session_state,
             subagent_transcripts_by_tool_use_id,
@@ -3543,6 +3765,8 @@ def emit_new_turns_from_transcript(
             )
             if new_turns and new_turns[-1].trace_id:
                 session_state.latest_trace_id = new_turns[-1].trace_id
+        wakes = wakes_to_send(rows_read, session_state, subagent_transcripts_by_tool_use_id, continued_rounds)
+        emitted += emit_wakes(langfuse, session_id, session_state, wakes, config, work_items)
 
         # Persist classic progress immediately: the teammate pass below shares the
         # same state dict, and a failure there must never discard the classic
