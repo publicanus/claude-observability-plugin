@@ -1,10 +1,14 @@
-"""Pins the hook's answer to the setup skill's check (a UserPromptExpansion input).
+"""Pins the hook's answer to the setup skill's check (a UserPromptExpansion input), in
+the order the hook decides it:
 
-With words after the command, such as `help` or `people`, the answer is always `{}`,
-so the skill picks its own step. Without words: on a GitHub repo, the hookSpecificOutput
-that sends the skill to sharing the keys through the repo; elsewhere, a block when the
-repo's own .claude/settings.local.json holds both keys or the address is refused, and
-`{}` otherwise, whatever keys are set elsewhere.
+1. Words after the command, such as `help` or `people`: always `{}`, so the skill
+   picks its own step.
+2. Without words, a refused address in the repo's own .claude/settings.local.json:
+   a block with the refusal, on every repo.
+3. Then a GitHub repo: the hookSpecificOutput that sends the skill to sharing the
+   keys through the repo.
+4. Elsewhere: a block with "already configured" when that file holds both keys, and
+   `{}` otherwise, whatever keys are set elsewhere.
 """
 
 from __future__ import annotations
@@ -170,3 +174,13 @@ def test_words_after_the_command_are_let_through_so_the_skill_picks_the_step(
 
     assert hook_module.main() == 0
     assert json.loads(capsys.readouterr().out) == {}
+
+
+def test_a_refused_address_blocks_also_on_a_github_repo(hook_module, monkeypatch, capsys, repo):
+    write_settings(repo, {"LANGFUSE_BASE_URL": "https://us.cloud.langfuse.com"})
+    git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+
+    answer = run_setup_check(hook_module, monkeypatch, capsys)
+
+    assert answer["decision"] == "block"
+    assert answer["reason"].startswith("Langfuse: https://us.cloud.langfuse.com is Langfuse Cloud's US region.")
