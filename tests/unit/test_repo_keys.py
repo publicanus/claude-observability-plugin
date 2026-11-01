@@ -530,6 +530,19 @@ def test_the_wait_says_not_ready_at_its_limit_and_leaves_the_settings(world, rep
     assert not (checkout / SETTINGS).exists()
 
 
+def test_the_wait_says_not_ready_before_a_ten_minute_watch_ends(world, repo_keys, gh, capsys, monkeypatch):
+    """The skill watches the wait for 10 minutes, the most a headless session allows, so the
+    wait's own "not ready" line must come before that: 9 minutes and a few seconds in."""
+    checkout = joining_laptop(world, repo_keys, gh, capsys)
+    clock = iter([0, 9 * 60 + 5])
+    monkeypatch.setattr(repo_keys, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(repo_keys, "sleep", lambda seconds: None)
+
+    code, out, err = run(repo_keys, capsys, "wait", checkout)
+
+    assert (code, out, err) == (0, NOT_READY + "\n", "")
+
+
 # ----------------- The CI job -----------------
 
 

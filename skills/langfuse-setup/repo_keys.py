@@ -27,7 +27,7 @@ that only the laptops let in, and the repo's CI job, can open them.
                    need-workflow-scope  gh's login lacks the workflow scope
                    need-keys            the settings file holds no keys to share
                    locked               the keys in the settings file are on GitHub now
-    wait stdout    one line, after at most about 10 minutes: READY once this laptop was
+    wait stdout    one line, after at most about 9 minutes: READY once this laptop was
                    let in and the settings file holds the repo's values, else NOT_READY
     exit           0 done; 1 a step failed: stderr says which in one plain sentence
                    (with the tool's own message on the first person's path), and the
@@ -85,7 +85,8 @@ CI_SECRET = "MATE_RECORD_CI_KEY"
 VALUE_NAMES = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL")
 
 POLL_SECONDS = 5
-LIMIT_SECONDS = 600
+# Below the skill's 10-minute watch, so the watch hears the NOT_READY line before it ends.
+LIMIT_SECONDS = 9 * 60
 PUSH_TRIES = 3
 LS_REMOTE_NO_MATCH = 2
 # Only gh's login, so the first push is made with the login whose workflow scope was checked.
