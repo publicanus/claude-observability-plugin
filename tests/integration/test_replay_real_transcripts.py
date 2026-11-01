@@ -17,18 +17,18 @@ from transcript_replay import fault_lines, replay_session
 
 SESSIONS = sorted(path for path in FIXTURES.glob("*/*.jsonl"))
 
-LATE_AGENT_ROWS = (
-    "An agent's rows written after its run was sent are never sent: here its reply to a task "
-    "notification that reached it after it had reported back."
+AGENT_WOKEN_AGAIN = (
+    "An agent's reply after it has finished and woken up again without a new message from "
+    "the main session is lost."
 )
-PEER_MESSAGE = (
-    "A message from another session (origin peer, not a hand-back) that arrives after the turn "
-    "ended starts no turn, so the session's replies to it are lost, and so is the agent round a "
-    "SendMessage in those replies continued."
+AGENT_MESSAGE_AFTER_TURN = (
+    "When an agent sends the session a message that is not its final report after the turn has "
+    "ended, the session's replies to it are lost, and so is the agent round a SendMessage in "
+    "those replies continued."
 )
-QUEUED_NOTIFICATION = (
-    "A queue-operation row that holds a queued copy of a task notification is read as the "
-    "notification itself, and the agent round the notified SendMessage continued is lost."
+NOTIFICATION_QUEUED_BEFORE_TURN_END = (
+    "When a task notification is queued before the turn ends and delivered after it, the agent "
+    "round the notified SendMessage continued is lost."
 )
 
 LATE = "late-hand-back"
@@ -41,9 +41,9 @@ WORK_AGENT_A8 = "2e2b4ad6-fcba-4119-b37d-46420423f45c/subagents/agent-a8d0c87bba
 # Replies the hook loses or sends twice today: (fixture folder, transcript file, message id)
 # to the fault, "lost" or "doubled", and the cause it shows.
 KNOWN_FAULTS: Dict[Tuple[str, str, str], Tuple[str, str]] = {
-    (LATE, LATE_AGENT, "msg_011CgXwbLyiyXvauv9zuNHr2"): ("lost", LATE_AGENT_ROWS),
+    (LATE, LATE_AGENT, "msg_011CgXwbLyiyXvauv9zuNHr2"): ("lost", AGENT_WOKEN_AGAIN),
     **{
-        (WORK, WORK_MAIN, message_id): ("lost", PEER_MESSAGE)
+        (WORK, WORK_MAIN, message_id): ("lost", AGENT_MESSAGE_AFTER_TURN)
         for message_id in (
             "msg_011CfoCjLjQagjVYb17336o6",
             "msg_011CfoCjyyGoMPpeBbMUJcg3",
@@ -52,7 +52,7 @@ KNOWN_FAULTS: Dict[Tuple[str, str, str], Tuple[str, str]] = {
         )
     },
     **{
-        (WORK, WORK_AGENT_A0, message_id): ("lost", PEER_MESSAGE)
+        (WORK, WORK_AGENT_A0, message_id): ("lost", AGENT_MESSAGE_AFTER_TURN)
         for message_id in (
             "msg_011CfoCjyM4zpspa4rxVZjVt",
             "msg_011CfoCkTHL9oTVXBSR6iik1",
@@ -67,7 +67,7 @@ KNOWN_FAULTS: Dict[Tuple[str, str, str], Tuple[str, str]] = {
             "msg_011CfoD1NBB4i9zMCruTWMsn",
         )
     },
-    (WORK, WORK_AGENT_A8, "msg_011CfnvS5igHF5fgcku2xKSE"): ("lost", QUEUED_NOTIFICATION),
+    (WORK, WORK_AGENT_A8, "msg_011CfnvS5igHF5fgcku2xKSE"): ("lost", NOTIFICATION_QUEUED_BEFORE_TURN_END),
 }
 
 

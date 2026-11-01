@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from langfuse_standin import KEYS_A, FakeLangfuse, Machine, free_port, spans_in, wait_until
+from transcript_files import agent_folder, transcript_lines
 
 
 STOP_SUBTYPE = "stop_hook_summary"
@@ -78,7 +79,7 @@ def timestamp_ms(value: str) -> int:
 
 def read_transcript(path: Path, folder: Path) -> Transcript:
     name = path.relative_to(folder).as_posix()
-    lines = [line for line in path.read_bytes().split(b"\n") if line.strip()]
+    lines = transcript_lines(path)
     rows = []
     for number, line in enumerate(lines, start=1):
         try:
@@ -89,8 +90,8 @@ def read_transcript(path: Path, folder: Path) -> Transcript:
 
 
 def agent_transcript_paths(session: Path) -> List[Path]:
-    subagents = session.with_suffix("") / "subagents"
-    return sorted(subagents.glob("*.jsonl")) if subagents.is_dir() else []
+    folder = agent_folder(session)
+    return sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
 
 
 def meta_path(agent_transcript: Path) -> Path:

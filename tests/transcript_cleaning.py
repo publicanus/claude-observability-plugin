@@ -9,14 +9,16 @@ hold no personal text.
     stdout            the session's number of replies, and whether the replay gives the
                       same result for the original and the cleaned copy
     stderr            what failed
-    exit              0 when the cleaned copy is written and passes every check; 1 when a
-                      check fails, and the cleaned copy is deleted; 2 for a bad argument
+    exit              0 when the cleaned copy passes every check and is written; 1 when a
+                      check fails; 2 for a bad argument. A run that fails or stops with
+                      an error writes nothing under tests/fixtures/replay/.
     needs             git on the PATH; the dev packages of uv.lock
 
 Every string in the copy is replaced by a replacement text `text-<n>`, except blank
 strings, the fixed texts in hooks/claude_code_texts.py, the token-shaped values at
-KEPT_POSITIONS, and the tags, ids and status of a task notification. Dict keys that are
-not name-shaped are replaced too.
+KEPT_POSITIONS, and the tags, ids and status of a task notification. A task notification
+with attributes, or with a tag Claude Code does not write, stops the cleaning. Dict keys
+that are not name-shaped are replaced too.
 
 personal_text_findings(folder) is the check the tests run on the committed fixtures.
 """
@@ -31,12 +33,13 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterator, List, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "hooks"))
 from claude_code_texts import INTERRUPTED_TEXT, LEGACY_USER_REJECTED_TOOL_USE_RESULT  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
+from transcript_files import agent_folder, transcript_lines  # noqa: E402
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "replay"
 FIXED_TEXTS = frozenset({INTERRUPTED_TEXT, LEGACY_USER_REJECTED_TOOL_USE_RESULT})
@@ -62,6 +65,11 @@ KEPT_POSITIONS: Dict[Tuple[str, ...], FrozenSet[str]] = {
 NOTIFICATION_OPEN = "<task-notification>"
 NOTIFICATION_CLOSE = "</task-notification>"
 NOTIFICATION_KEPT_TAGS = frozenset({"task-id", "tool-use-id", "status"})
+# Every tag Claude Code writes in a task notification; any other tag stops the cleaning.
+NOTIFICATION_TAGS = NOTIFICATION_KEPT_TAGS | frozenset(
+    {"task-notification", "output-file", "summary", "note", "result", "usage", "event",
+     "duration_ms", "subagent_tokens", "tool_uses"}
+)
 
 TOKEN = re.compile(r"^[A-Za-z0-9_.:<>-]{1,100}$")
 NAME_SHAPED_KEY = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$-]*$")
@@ -82,6 +90,18 @@ def is_kept_free(text: str) -> bool:
 
 def is_kept_at(path: Tuple[str, ...], key: Any, value: str) -> bool:
     return key in KEPT_POSITIONS.get(path, frozenset()) and bool(TOKEN.match(value))
+
+
+def notification_element(text: str, start: int, end: int) -> Optional[ET.Element]:
+    """The task notification in text[start:end], parsed; None when it does not parse, an
+    element has attributes, or a tag is not one Claude Code writes."""
+    try:
+        element = ET.fromstring(text[start:end])
+    except ET.ParseError:
+        return None
+    if any(child.attrib or child.tag not in NOTIFICATION_TAGS for child in element.iter()):
+        return None
+    return element
 
 
 def notification_bounds(text: str) -> Tuple[int, int]:
@@ -106,13 +126,13 @@ class Cleaner:
         return self.replacements.setdefault(text, f"text-{len(self.replacements) + 1}")
 
     def notification(self, text: str, start: int, end: int) -> str:
-        element = ET.fromstring(text[start:end])
+        element = notification_element(text, start, end)
+        if element is None:
+            raise CleaningError("a task notification that does not parse, or has attributes or an unknown tag")
         for child in element.iter():
-            if child is element:
-                continue
             if child.text and child.tag not in NOTIFICATION_KEPT_TAGS:
                 child.text = self.replace(child.text)
-            if child.tail:
+            if child.tail and child is not element:
                 child.tail = self.replace(child.tail)
         return self.replace(text[:start]) + ET.tostring(element, encoding="unicode") + self.replace(text[end:])
 
@@ -136,22 +156,22 @@ class Cleaner:
     def document(self, document: Any, root: Tuple[str, ...], where: str) -> Any:
         try:
             return self.value(document, root, None)
-        except ET.ParseError as error:
-            raise CleaningError(f"{where}: a task notification does not parse: {error}") from error
+        except CleaningError as error:
+            raise CleaningError(f"{where}: {error}") from error
 
 
 def clean_session(session: Path, out: Path) -> None:
     """Writes the cleaned copy of session and its agents' transcripts into out, in Claude
     Code's layout."""
     cleaner = Cleaner()
-    subagents = session.with_suffix("") / "subagents"
-    files = [session] + (sorted(subagents.iterdir()) if subagents.is_dir() else [])
+    agents = agent_folder(session)
+    files = [session] + (sorted(agents.iterdir()) if agents.is_dir() else [])
     for path in files:
         name = path.relative_to(session.parent).as_posix()
         target = out / name
         target.parent.mkdir(parents=True, exist_ok=True)
         if path.suffix == ".jsonl":
-            lines = [line for line in path.read_bytes().split(b"\n") if line.strip()]
+            lines = transcript_lines(path)
             rows = [
                 cleaner.document(json.loads(line), ROW, f"{name} line {number}")
                 for number, line in enumerate(lines, start=1)
@@ -170,20 +190,18 @@ def notification_is_clean(text: str) -> bool:
     start, end = notification_bounds(text)
     if start < 0:
         return False
-    try:
-        element = ET.fromstring(text[start:end])
-    except ET.ParseError:
+    element = notification_element(text, start, end)
+    if element is None:
         return False
     parts = [text[:start], text[end:]]
     for child in element.iter():
-        if child is element:
-            continue
         if child.tag in NOTIFICATION_KEPT_TAGS:
             if child.text and not TOKEN.match(child.text) and not is_kept_free(child.text):
                 return False
         else:
             parts.append(child.text or "")
-        parts.append(child.tail or "")
+        if child is not element:
+            parts.append(child.tail or "")
     return all(is_kept_free(part) or REPLACEMENT.match(part) for part in parts)
 
 
@@ -296,17 +314,18 @@ def main(argv: List[str]) -> int:
         print(f"the fixture folder already exists: {out}", file=sys.stderr)
         return 2
 
-    clean_session(session, out)
-    cleaned = out / session.name
-    problems = personal_text_findings(out) + owner_name_findings(out)
-    replies, differences = (0, []) if problems else replay_differences(session, cleaned)
-    problems += differences
-    if problems:
-        shutil.rmtree(out)
-        print(f"{name}: not kept", file=sys.stderr)
-        for problem in problems:
-            print(f"  {problem}", file=sys.stderr)
-        return 1
+    with tempfile.TemporaryDirectory() as scratch:
+        candidate = Path(scratch) / name
+        clean_session(session, candidate)
+        problems = personal_text_findings(candidate) + owner_name_findings(candidate)
+        replies, differences = (0, []) if problems else replay_differences(session, candidate / session.name)
+        problems += differences
+        if problems:
+            print(f"{name}: not kept", file=sys.stderr)
+            for problem in problems:
+                print(f"  {problem}", file=sys.stderr)
+            return 1
+        shutil.copytree(candidate, out)
     print(f"{name}: {session.stem}, {replies} replies, same replay result: yes")
     return 0
 
