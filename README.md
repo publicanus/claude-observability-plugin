@@ -86,7 +86,7 @@ A fork and its source with the same name, such as `jaap/shop` and `acme/shop`, s
 
 ### Work item
 
-Each trace can name the work item its turn served, as the tag `work-item:<id>`, so a plugin's maintainer can see how each work item went. The tag goes on main-session traces and teammate traces alike, and an agent's work is inside its turn's trace.
+Each trace can name the work item its turn served, as the tag `work-item:<id>`, so a plugin's maintainer can see how each work item went. The tag goes on main-session traces, teammate traces and wake traces alike (see [Agent runs](#agent-runs)). An agent's other work is inside its turn's trace.
 
 A tool names the item with the command `langfuse-work-item`, run in a Bash tool call of the session. Claude Code puts it on the PATH while this plugin is enabled. It needs uv, or `python3` as in [Requirements](#requirements).
 
@@ -107,7 +107,7 @@ A pattern that is not a valid regular expression, or has no group, is refused: t
 
 Each trace lists the plugins its turn used, with their versions, so a plugin's maintainer can compare plugins version against version. The list is in the trace's metadata key `plugins`, sorted by name, for example `[{"name": "mate-core", "version": "8.9.0"}, {"name": "document-skills"}]`.
 
-A plugin counts as used when an agent, skill or command from it ran in the turn or in one of the agent rounds the turn started, at any depth (see [Agent runs](#agent-runs)). A teammate's trace lists the plugins of its own turn, its own agent's plugin included. A plugin used only through its hooks is not listed, because the transcript does not say which plugin a hook came from.
+A plugin counts as used when an agent, skill or command from it ran in the turn or in one of the agent rounds the turn started, at any depth (see [Agent runs](#agent-runs)). A teammate's trace lists the plugins of its own turn, its own agent's plugin included. A wake trace lists the plugins of the wake, its agent's plugin included. A plugin used only through its hooks is not listed, because the transcript does not say which plugin a hook came from.
 
 The version comes from Claude Code's `~/.claude/plugins/installed_plugins.json`. The plugin's install for this repo counts, a local install before a project install; else its machine-wide install counts. A session in a worktree uses the installs of the repo's main checkout. The version is cut at its first dash, so `8.9.0-0ae331d8a58b` shows as `8.9.0`. Only a version made of digits and dots up to that dash counts; anything else, such as a bare commit hash or `unknown`, is no version, and the plugin is listed without one.
 
@@ -126,6 +126,8 @@ Each round of an agent is a run of its own, in the trace of the turn that starte
 A run is the observation `Subagent: <description>`, with the metadata key `round` holding its number from 1. A round after the first is named `Subagent: <description> - round <n>`. A turn that continues an agent waits for the round before its trace is sent: until a task notification for its `SendMessage` call, or until the agent hands back its report, whichever comes first. At session end the trace is sent anyway, with the round's work up to then.
 
 When an agent's task notification, its hand-back, or a message it sends the session arrives after the session's turn has ended, the session's reply to it is a trace of its own, with that notification, hand-back or message as its input. That reply counts as a turn, numbered where it comes in the session, also for the turn number in a [deterministic trace ID](#deterministic-trace-ids).
+
+An agent that has finished can wake up again on a notification of its own, such as a background job it started finishing, with no message from the main session. That work is a wake, and it is a trace of its own: the root `Agent woken up`, holding the run `Subagent: <description> - woken up`, whose `round` is the round the wake follows. The wake trace is sent in the hook run that first reads a hand-back or task notification from that agent after the wake started, and takes the session's next turn number then. It carries the tags `claude-code`, `repo:<name>` and, when there is one, `work-item:<id>`. A wake that fails to send is tried again on the next hook run, and the hook log holds a warning naming it.
 
 When the agent's transcript holds no start of the round that a `SendMessage` call started, at or after the call, the trace is sent without that run, and the hook log `~/.claude/state/langfuse_hook.log` holds a line `No run for SendMessage call <id>: agent <agent id> has no round <n> that starts at or after the call`. An agent that another agent continues gets no runs of its own for those rounds.
 
@@ -176,7 +178,9 @@ turn **before** the trace exists.
 The seed also keeps a turn from showing up twice in Langfuse when the hook could not save its progress and sends that turn again on a later run.
 
 With the seed set, the trace ID for turn `N` (1-based, counted per session across hook
-runs, in the order the turns happened) is derived as:
+runs, in the order the turns happened) is derived as below. A wake trace (see
+[Agent runs](#agent-runs)) takes the next turn number when it is sent, after the turns of
+the same hook run.
 
 ```python
 from langfuse import Langfuse

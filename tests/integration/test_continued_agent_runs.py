@@ -986,3 +986,45 @@ def test_a_wake_reported_by_a_hand_back_and_later_a_notification_is_sent_once(
     run_hook(hook_module, fake_langfuse, continued_agent)
 
     assert [run_summary(trace) for trace in wake_traces(fake_langfuse)] == [[WAKE_RUN]]
+
+
+def test_a_wake_trace_carries_the_work_item_tag_and_the_plugins_it_used(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    config = {"plugin_versions": {"mate-core": "8.9.0"}, "work_item_branch_pattern": re.compile(r"issue-(\d+)")}
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn(), round_1_notification())
+    run_hook(hook_module, fake_langfuse, continued_agent, **config)
+    note, report = wake()
+    note["gitBranch"] = "issue-60"
+    continued_agent.add_agent(note, report)
+    continued_agent.add_main(turn_end(31), notification("main-note-w", LAUNCH, "Woken.", 46))
+
+    run_hook(hook_module, fake_langfuse, continued_agent, **config)
+
+    [wake_trace] = wake_traces(fake_langfuse)
+    root = wake_trace[0]
+    assert "work-item:60" in root.propagated["tags"]
+    assert root.kwargs["metadata"]["plugins"] == [{"name": "mate-core", "version": "8.9.0"}]
+
+
+def test_a_wake_that_fails_to_send_is_sent_on_the_next_run_and_logged_as_a_warning(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent, monkeypatch
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn(), round_1_notification())
+    run_hook(hook_module, fake_langfuse, continued_agent)
+    continued_agent.add_agent(*wake())
+    continued_agent.add_main(turn_end(31), notification("main-note-w", LAUNCH, "Woken.", 46))
+    send_wake = hook_module.emit_wake
+
+    def fails(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Langfuse is down")
+
+    monkeypatch.setattr(hook_module, "emit_wake", fails)
+    run_hook(hook_module, fake_langfuse, continued_agent)
+    monkeypatch.setattr(hook_module, "emit_wake", send_wake)
+    run_hook(hook_module, fake_langfuse, continued_agent)
+
+    assert [run_summary(trace) for trace in wake_traces(fake_langfuse)] == [[WAKE_RUN]]
+    assert f"WARNING] wake {AGENT_ID}:agent-job-note-40" in hook_log(hook_module)

@@ -450,13 +450,19 @@ def debug(msg: str) -> None:
         except Exception:
             pass
 
-def info(msg: str) -> None:
+def _log(level: int, msg: str) -> None:
     lg = _get_logger()
     if lg is not None:
         try:
-            lg.info(msg)
+            lg.log(level, msg)
         except Exception:
             pass
+
+def info(msg: str) -> None:
+    _log(logging.INFO, msg)
+
+def warning(msg: str) -> None:
+    _log(logging.WARNING, msg)
 
 
 # ----------------- Hook payload -----------------
@@ -659,8 +665,10 @@ class SessionState:
     # Task-notification rows whose tool_use_id could not be resolved yet
     # (task-id-only and the subagent meta.json not on disk); retried each run.
     pending_task_notifications: List[Dict[str, Any]] = field(default_factory=list)
-    # The wakes already sent, each as wake_key gives it.
+    # The wakes already sent, and those reported whose send failed, each as wake_key
+    # gives it.
     sent_wakes: List[str] = field(default_factory=list)
+    waiting_wakes: List[str] = field(default_factory=list)
 
 def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     s = global_state.get(key, {})
@@ -674,6 +682,9 @@ def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     sent_wakes = s.get("sent_wakes")
     if not isinstance(sent_wakes, list):
         sent_wakes = []
+    waiting_wakes = s.get("waiting_wakes")
+    if not isinstance(waiting_wakes, list):
+        waiting_wakes = []
     return SessionState(
         offset=int(s.get("offset", 0)),
         buffer=str(s.get("buffer", "")),
@@ -682,6 +693,7 @@ def get_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
         pending_agent_turns=pending_agent_turns,
         pending_task_notifications=pending_task_notifications,
         sent_wakes=sent_wakes,
+        waiting_wakes=waiting_wakes,
     )
 
 def update_session_state(global_state: Dict[str, Any], key: str, session_state: SessionState) -> None:
@@ -693,6 +705,7 @@ def update_session_state(global_state: Dict[str, Any], key: str, session_state: 
         "pending_agent_turns": session_state.pending_agent_turns or [],
         "pending_task_notifications": session_state.pending_task_notifications or [],
         "sent_wakes": session_state.sent_wakes,
+        "waiting_wakes": session_state.waiting_wakes,
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1065,7 +1078,7 @@ def calls_ended_by_hand_back(row: Dict[str, Any], agent_calls: Dict[str, AgentCa
         )
         call_time = parse_timestamp(agent_row)
         if handed_back and call_time is not None and call_time <= hand_back_time:
-            ended_round = sum(1 for start in round_starts if start <= index)
+            ended_round = round_at(round_starts, index)
     return [call_id for call_id, round_number in calls.rounds_by_call_id.items() if round_number <= ended_round]
 
 def _find_pending_agent_turn(
@@ -1764,6 +1777,11 @@ def is_later_round_start_row(row: Dict[str, Any]) -> bool:
         and is_coordinator_origin(attachment.get("origin"))
     )
 
+def round_at(round_starts: List[int], index: int) -> int:
+    """The number, from 1, of the round that holds the agent transcript row at index,
+    given agent_round_starts of that transcript."""
+    return sum(1 for start in round_starts if start <= index)
+
 def agent_round_starts(rows: List[Dict[str, Any]]) -> List[int]:
     """The position in rows where each round starts; round 1 starts at the first row."""
     if not rows:
@@ -1804,7 +1822,7 @@ def agent_wakes(rows: List[Dict[str, Any]]) -> List[Wake]:
     wakes = []
     for start in wake_starts:
         later_starts = [index for index in round_starts + wake_starts if index > start]
-        round_number = sum(1 for round_start in round_starts if round_start < start)
+        round_number = round_at(round_starts, start)
         wakes.append(Wake(start, min(later_starts, default=len(rows)), round_number))
     return wakes
 
@@ -1830,6 +1848,16 @@ def sent_to_agent_id(row: Dict[str, Any]) -> Optional[str]:
     agent_id = pin.get("id") if isinstance(pin, dict) else None
     return agent_id if isinstance(agent_id, str) and agent_id else None
 
+def subagents_by_agent_id(
+    subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Each launched agent's entry of subagent_transcripts_by_tool_use_id, by its id."""
+    return {
+        subagent["agent_id"]: subagent
+        for subagent in subagent_transcripts_by_tool_use_id.values()
+        if isinstance(subagent.get("agent_id"), str)
+    }
+
 def get_continued_rounds_by_tool_use_id(
     transcript_path: Path,
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
@@ -1840,11 +1868,7 @@ def get_continued_rounds_by_tool_use_id(
 
     Reads the whole main transcript; returns {} when no agent was launched or the
     transcript cannot be read."""
-    agents_by_id = {
-        subagent["agent_id"]: subagent
-        for subagent in subagent_transcripts_by_tool_use_id.values()
-        if isinstance(subagent.get("agent_id"), str)
-    }
+    agents_by_id = subagents_by_agent_id(subagent_transcripts_by_tool_use_id)
     if not agents_by_id:
         return {}
 
@@ -1918,39 +1942,54 @@ def reporting_agent_id(
 def wake_key(agent_id: str, wake_start_row: Dict[str, Any]) -> str:
     return f"{agent_id}:{wake_start_row.get('uuid')}"
 
+@dataclass
+class WakeRun:
+    """A wake as wake_key names it, the time of its first row, and its run."""
+    key: str
+    start_time: Optional[datetime]
+    run: AgentRun
+
+def agent_wake_runs(subagent: Dict[str, Any]) -> List[WakeRun]:
+    """The wakes in the agent's transcript, read now; [] when it cannot be read."""
+    path = subagent.get("path")
+    rows = (read_jsonl_rows(path) or []) if isinstance(path, Path) else []
+    return [
+        WakeRun(
+            wake_key(subagent["agent_id"], rows[wake.start]),
+            parse_timestamp(rows[wake.start]),
+            AgentRun(subagent, wake.round_number, rows[wake.start:wake.end], woken=True),
+        )
+        for wake in agent_wakes(rows)
+    ]
+
 def wakes_to_send(
     rows: List[Dict[str, Any]],
     session_state: SessionState,
     subagent_transcripts_by_tool_use_id: Dict[str, Dict[str, Any]],
     continued_rounds: Dict[str, Dict[str, Any]],
-) -> List[AgentRun]:
-    """The wakes that rows report and that were not sent before: each wake of an agent
-    that starts at or before a row reporting from that agent. Adds each to
-    session_state.sent_wakes."""
+) -> List[WakeRun]:
+    """The wakes not sent yet that wait from an earlier run (session_state.waiting_wakes)
+    or that rows report: each wake of an agent that starts at or before a row reporting
+    from that agent. Each wake once."""
     task_id_to_tool_use_id = get_task_id_to_tool_use_id(subagent_transcripts_by_tool_use_id)
     agent_calls = get_agent_calls(subagent_transcripts_by_tool_use_id, continued_rounds)
-    subagents_by_agent_id = {
-        subagent["agent_id"]: subagent
-        for subagent in subagent_transcripts_by_tool_use_id.values()
-        if isinstance(subagent.get("agent_id"), str)
-    }
-    runs: List[AgentRun] = []
+    agents_by_id = subagents_by_agent_id(subagent_transcripts_by_tool_use_id)
+    found: Dict[str, WakeRun] = {}
+    for key in session_state.waiting_wakes:
+        subagent = agents_by_id.get(key.split(":", 1)[0])
+        for wake in agent_wake_runs(subagent) if subagent else []:
+            if wake.key == key:
+                found[key] = wake
     for row in rows:
         agent_id = reporting_agent_id(row, task_id_to_tool_use_id, agent_calls)
-        subagent = subagents_by_agent_id.get(agent_id) if agent_id else None
+        subagent = agents_by_id.get(agent_id) if agent_id else None
         report_time = parse_timestamp(row)
-        if subagent is None or report_time is None or not isinstance(subagent.get("path"), Path):
+        if subagent is None or report_time is None:
             continue
-        agent_rows = read_jsonl_rows(subagent["path"]) or []
-        for wake in agent_wakes(agent_rows):
-            start_row = agent_rows[wake.start]
-            key = wake_key(subagent["agent_id"], start_row)
-            wake_time = parse_timestamp(start_row)
-            if key in session_state.sent_wakes or wake_time is None or wake_time > report_time:
-                continue
-            session_state.sent_wakes.append(key)
-            runs.append(AgentRun(subagent, wake.round_number, agent_rows[wake.start:wake.end], woken=True))
-    return runs
+        for wake in agent_wake_runs(subagent):
+            if wake.start_time is not None and wake.start_time <= report_time:
+                found.setdefault(wake.key, wake)
+    return [wake for key, wake in found.items() if key not in session_state.sent_wakes]
 
 def agent_run_of_call(
     tool_use_id: str,
@@ -3261,45 +3300,59 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
 
 def emit_wake(langfuse: Langfuse, session_id: str, turn_num: int, run: AgentRun, *,
               repo_name: str, plugin_versions: Dict[str, Optional[str]], user_id: Optional[str],
-              trace_seed: Optional[str]) -> None:
+              trace_seed: Optional[str], work_items: work_item.WorkItems) -> None:
     """Sends a wake, run, as a trace of its own, numbered as the session's turn
-    turn_num: an "Agent woken up" root holding the wake's run."""
+    turn_num: an "Agent woken up" root holding the wake's run. Sends nothing for a wake
+    without a reply."""
     turns = build_turns(run.rows)
     if not turns:
         return
     start_ts = parse_timestamp(turns[0].user_msg)
+    agent_type = run.subagent.get("agent_type")
+    plugins = [plugin for turn in turns for plugin in plugins_used_in_turn(turn, None)] + [plugin_of(agent_type)]
     with open_root_span(
         langfuse,
         session_id=session_id,
         user_id=user_id,
         trace_name=trace_display_name(session_id, turn_num),
-        tags=[BASE_TRACE_TAG, repo_tag(repo_name)],
+        tags=[BASE_TRACE_TAG, repo_tag(repo_name)] + work_item_tags(turns[-1], work_items),
         repo_name=repo_name,
         name="Agent woken up",
         start_time=start_ts,
         forced_trace_id=seeded_turn_trace_id(trace_seed, turn_num),
         input_text=extract_text_from_content(get_content_from_row(turns[0].user_msg)),
-        metadata=component_metadata(component_of(run.subagent.get("agent_type"), plugin_versions), {
+        metadata=component_metadata(component_of(agent_type, plugin_versions), {
             "session_id": session_id,
             "turn_number": turn_num,
             "agent_id": run.subagent.get("agent_id"),
+            PLUGINS_METADATA_KEY: describe_plugins(plugins, plugin_versions),
         }),
     ) as trace_span:
         end_ts = emit_subagent_observations(langfuse, trace_span._otel_span, run, start_ts, plugin_versions)
         close_root_span(trace_span, last_reply_text(turns), end_ts, start_ts)
 
-def emit_wakes(langfuse: Langfuse, session_id: str, session_state: SessionState, runs: List[AgentRun],
-               config: LangfuseConfig) -> int:
-    """Sends each wake in runs with emit_wake, numbered as the session's next turn;
-    returns how many it tried. A wake that fails to send is logged."""
-    for run in runs:
+def emit_wakes(langfuse: Langfuse, session_id: str, session_state: SessionState, wakes: List[WakeRun],
+               config: LangfuseConfig, work_items: work_item.WorkItems) -> int:
+    """Sends each wake with emit_wake, numbered as the session's next turn, and returns
+    how many it tried. A sent wake goes on session_state.sent_wakes. A wake that fails
+    to send is logged as a warning and goes on session_state.waiting_wakes, so the next
+    run tries it again."""
+    for wake in wakes:
         session_state.turn_count += 1
         try:
-            emit_wake(langfuse, session_id, session_state.turn_count, run, repo_name=config.repo_name,
-                      plugin_versions=config.plugin_versions, user_id=config.user_id, trace_seed=config.trace_seed)
+            emit_wake(langfuse, session_id, session_state.turn_count, wake.run, repo_name=config.repo_name,
+                      plugin_versions=config.plugin_versions, user_id=config.user_id,
+                      trace_seed=config.trace_seed, work_items=work_items)
         except Exception as e:
-            info(f"emit_wake failed: {type(e).__name__}: {e}")
-    return len(runs)
+            warning(f"wake {wake.key} (agent id:first row uuid) not sent, tried again next run: "
+                    f"{type(e).__name__}: {e}")
+            if wake.key not in session_state.waiting_wakes:
+                session_state.waiting_wakes.append(wake.key)
+            continue
+        session_state.sent_wakes.append(wake.key)
+        if wake.key in session_state.waiting_wakes:
+            session_state.waiting_wakes.remove(wake.key)
+    return len(wakes)
 
 
 # ---- Named teammate (agent-team) emission ----
@@ -3713,7 +3766,7 @@ def emit_new_turns_from_transcript(
             if new_turns and new_turns[-1].trace_id:
                 session_state.latest_trace_id = new_turns[-1].trace_id
         wakes = wakes_to_send(rows_read, session_state, subagent_transcripts_by_tool_use_id, continued_rounds)
-        emitted += emit_wakes(langfuse, session_id, session_state, wakes, config)
+        emitted += emit_wakes(langfuse, session_id, session_state, wakes, config, work_items)
 
         # Persist classic progress immediately: the teammate pass below shares the
         # same state dict, and a failure there must never discard the classic
