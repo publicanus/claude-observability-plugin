@@ -9,6 +9,7 @@ does, against a fake Langfuse.
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,8 @@ def test_a_hurt_typed_while_the_sessions_turn_waits_for_a_running_agent_lands_on
 
     session.add_main(*hurt_turn(10))
     exit_code = hurt.run(
-        ["--category", "stalled-loop", "--comment", "the agent went in circles"],
+        ["--category", "stalled-loop"],
+        stdin=io.BytesIO(b"the agent went in circles"),
         env={"CLAUDE_CODE_SESSION_ID": SESSION_ID},
     )
     assert exit_code == 0, capsys.readouterr().out

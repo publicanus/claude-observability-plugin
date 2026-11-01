@@ -3,8 +3,11 @@ hook to place, and what it says when it queues nothing."""
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,8 @@ import pytest
 
 import hurt
 import hurt_annotations
-from conftest import write_settings
+from conftest import REPO_ROOT, write_settings
+from test_run_hook import LAUNCHER, real_python3
 
 SETUP_COMMAND = "/mate-record:langfuse-setup"
 OWN_KEYS = {"LANGFUSE_PUBLIC_KEY": "pk-lf-a", "LANGFUSE_SECRET_KEY": "sk-lf-a", "LANGFUSE_BASE_URL": "https://a.example"}
@@ -42,7 +46,7 @@ def keyed_repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def run_hurt(comment: str = "went in circles", category: str = "stalled-loop", session_id: Any = "sess-1") -> int:
     env = {"CLAUDE_CODE_SESSION_ID": session_id} if session_id else {}
-    return hurt.run(["--category", category, "--comment", comment], env=env)
+    return hurt.run(["--category", category], stdin=io.BytesIO(comment.encode("utf-8")), env=env)
 
 
 def read_queue(path: Path) -> list:
@@ -80,6 +84,39 @@ def test_a_note_is_appended_after_earlier_notes(queue_file: Path, keyed_repo: Pa
     assert len({r["id"] for r in records}) == 2
 
 
+@pytest.mark.parametrize(
+    "note", ["/review ignored the rule", "/review a ignoré la règle"], ids=["starts with a slash", "non-ASCII"]
+)
+def test_a_note_run_as_the_skill_runs_it_is_queued_as_typed(tmp_path: Path, note: str) -> None:
+    # Through the launcher's sh, as the skill runs it: on Windows, the sh of Git for
+    # Windows, which rewrites an argument that starts with '/' when it starts Python.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    write_settings(project, OWN_KEYS)
+    sh = shutil.which("sh")
+    assert sh is not None, "no sh on the PATH; on Windows, install Git for Windows"
+
+    result = subprocess.run(
+        [sh, str(LAUNCHER), str(REPO_ROOT / "hooks" / "hurt.py"), "--category", "missed-trigger"],
+        input=f"{note}\n".encode("utf-8"),
+        env={
+            **real_python3(bin_dir),
+            "PATH": str(bin_dir),
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "CLAUDE_PROJECT_DIR": str(project),
+            "CLAUDE_CODE_SESSION_ID": "sess-1",
+        },
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result
+    [record] = read_queue(home / ".claude" / "state" / "hurt_unresolved.json")
+    assert record["comment"] == note
+
+
 def test_a_missing_state_folder_is_created(queue_file: Path, keyed_repo: Path) -> None:
     assert not queue_file.parent.exists()
 
@@ -89,6 +126,15 @@ def test_a_missing_state_folder_is_created(queue_file: Path, keyed_repo: Path) -
 
 
 # ----------------- When nothing is queued -----------------
+
+def test_without_a_note_nothing_is_queued(
+    queue_file: Path, keyed_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_hurt(comment="") == 2
+
+    assert capsys.readouterr().out == "/hurt: no note was given. Nothing queued.\n"
+    assert not queue_file.exists()
+
 
 def test_without_a_session_id_nothing_is_queued(
     queue_file: Path, keyed_repo: Path, capsys: pytest.CaptureFixture[str]
@@ -192,10 +238,10 @@ def test_a_queue_file_held_too_long_queues_nothing_and_says_so_in_one_line(
 
 def test_out_of_taxonomy_category_rejected() -> None:
     with pytest.raises(SystemExit):
-        hurt.parse_args(["--category", "vibes-off", "--comment", "x"])
+        hurt.parse_args(["--category", "vibes-off"])
 
 
 @pytest.mark.parametrize("category", hurt.CATEGORIES)
 def test_every_taxonomy_category_accepted(category: str) -> None:
-    args = hurt.parse_args(["--category", category, "--comment", "x"])
+    args = hurt.parse_args(["--category", category])
     assert args.category == category

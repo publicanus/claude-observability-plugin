@@ -3,6 +3,7 @@ typed while the hook works on the queue waits for it and is not lost."""
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import time
@@ -36,7 +37,7 @@ def queue(tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, no_langfu
 
 
 def run_hurt(comment: str) -> int:
-    return hurt.run(["--category", "other", "--comment", comment], env={"CLAUDE_CODE_SESSION_ID": "s"})
+    return hurt.run(["--category", "other"], stdin=io.BytesIO(comment.encode("utf-8")), env={"CLAUDE_CODE_SESSION_ID": "s"})
 
 
 def test_a_hurt_typed_while_the_hook_holds_the_queue_is_kept(queue: tuple[Path, Path]) -> None:

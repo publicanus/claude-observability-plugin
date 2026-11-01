@@ -8,6 +8,7 @@ reads which trace the note was given in the /hurt queue.
 
 from __future__ import annotations
 
+import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +67,7 @@ class Session:
         self.hook_module.emit_new_turns_from_transcript(self.fake_langfuse, config, SESSION_ID, self.transcript)
 
     def run_hurt(self) -> int:
-        return hurt.run(["--category", "stalled-loop", "--comment", "it kept looping"],
+        return hurt.run(["--category", "stalled-loop"], stdin=io.BytesIO(b"it kept looping"),
                         env={"CLAUDE_CODE_SESSION_ID": SESSION_ID})
 
     def trace_of(self, prompt: str) -> str:
