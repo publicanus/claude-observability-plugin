@@ -1,6 +1,10 @@
-"""Pins the hook's answer to the setup skill's check (a UserPromptExpansion input):
-a block when the repo's own .claude/settings.local.json holds both keys or the
-address is refused, `{}` otherwise, whatever keys are set elsewhere.
+"""Pins the hook's answer to the setup skill's check (a UserPromptExpansion input).
+
+With words after the command, such as `help` or `people`, the answer is always `{}`,
+so the skill picks its own step. Without words: on a GitHub repo, the hookSpecificOutput
+that sends the skill to sharing the keys through the repo; elsewhere, a block when the
+repo's own .claude/settings.local.json holds both keys or the address is refused, and
+`{}` otherwise, whatever keys are set elsewhere.
 """
 
 from __future__ import annotations
