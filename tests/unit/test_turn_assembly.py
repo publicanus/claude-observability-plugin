@@ -134,3 +134,16 @@ def test_without_the_main_session_switch_a_prompt_with_no_reply_is_no_turn(hook_
     turns = hook_module.build_turns(rows)
 
     assert _prompts(hook_module, turns) == ["Next."]
+
+
+def test_an_agent_message_after_the_turn_ended_starts_a_turn(hook_module):
+    message = {"type": "user", "timestamp": "2026-01-01T00:00:01.000Z", "isMeta": True,
+               "origin": {"kind": "peer", "from": "a-agent", "senderTaskId": "a-agent"},
+               "message": {"role": "user", "content": "A finding for you."}}
+    rows = [{"type": "system", "subtype": "stop_hook_summary", "timestamp": "2026-01-01T00:00:00.000Z", "isMeta": True},
+            message, _reply("m", 2)]
+
+    turns = hook_module.build_turns(rows)
+
+    assert len(turns) == 1
+    assert turns[0].user_msg is message

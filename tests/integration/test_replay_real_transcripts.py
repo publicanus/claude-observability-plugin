@@ -21,11 +21,6 @@ AGENT_WOKEN_AGAIN = (
     "An agent's reply after it has finished and woken up again without a new message from "
     "the main session is lost."
 )
-AGENT_MESSAGE_AFTER_TURN = (
-    "When an agent sends the session a message that is not its final report after the turn has "
-    "ended, the session's replies to it are lost, and so is the agent round a SendMessage in "
-    "those replies continued."
-)
 NOTIFICATION_QUEUED_BEFORE_TURN_END = (
     "When a task notification is queued before the turn ends and delivered after it, the agent "
     "round the notified SendMessage continued is lost."
@@ -34,39 +29,12 @@ NOTIFICATION_QUEUED_BEFORE_TURN_END = (
 LATE = "late-hand-back"
 LATE_AGENT = "2f26c36b-4b64-48a5-9de8-b721448fe6f6/subagents/agent-af9f988dac6d29ad4.jsonl"
 WORK = "work-session"
-WORK_MAIN = "2e2b4ad6-fcba-4119-b37d-46420423f45c.jsonl"
-WORK_AGENT_A0 = "2e2b4ad6-fcba-4119-b37d-46420423f45c/subagents/agent-a0efc5da91dc20730.jsonl"
 WORK_AGENT_A8 = "2e2b4ad6-fcba-4119-b37d-46420423f45c/subagents/agent-a8d0c87bbace661c5.jsonl"
 
 # Replies the hook loses or sends twice today: (fixture folder, transcript file, message id)
 # to the fault, "lost" or "doubled", and the cause it shows.
 KNOWN_FAULTS: Dict[Tuple[str, str, str], Tuple[str, str]] = {
     (LATE, LATE_AGENT, "msg_011CgXwbLyiyXvauv9zuNHr2"): ("lost", AGENT_WOKEN_AGAIN),
-    **{
-        (WORK, WORK_MAIN, message_id): ("lost", AGENT_MESSAGE_AFTER_TURN)
-        for message_id in (
-            "msg_011CfoCjLjQagjVYb17336o6",
-            "msg_011CfoCjyyGoMPpeBbMUJcg3",
-            "msg_011CfoDHDYhEXhd7yNhoYM4J",
-            "msg_011CfoDb9uRmMrdoZg1boMTG",
-        )
-    },
-    **{
-        (WORK, WORK_AGENT_A0, message_id): ("lost", AGENT_MESSAGE_AFTER_TURN)
-        for message_id in (
-            "msg_011CfoCjyM4zpspa4rxVZjVt",
-            "msg_011CfoCkTHL9oTVXBSR6iik1",
-            "msg_011CfoCm799EdXakhsmeUCni",
-            "msg_011CfoCnairaNfrYk873tCwS",
-            "msg_011CfoCnueQQzkbm9CuQLHCC",
-            "msg_011CfoCp3f8NqjiYWBCxhXki",
-            "msg_011CfoCpicSMHGF4YRFYSLoE",
-            "msg_011CfoCqWxV4cK3NBNUNqL21",
-            "msg_011CfoCrc9J3JDMShCjeK8W9",
-            "msg_011CfoCzUsUNmTVoUYdyeoMX",
-            "msg_011CfoD1NBB4i9zMCruTWMsn",
-        )
-    },
     (WORK, WORK_AGENT_A8, "msg_011CfnvS5igHF5fgcku2xKSE"): ("lost", NOTIFICATION_QUEUED_BEFORE_TURN_END),
 }
 

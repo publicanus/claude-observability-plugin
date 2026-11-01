@@ -125,7 +125,7 @@ Each round of an agent is a run of its own, in the trace of the turn that starte
 
 A run is the observation `Subagent: <description>`, with the metadata key `round` holding its number from 1. A round after the first is named `Subagent: <description> - round <n>`. A turn that continues an agent waits for the round before its trace is sent: until a task notification for its `SendMessage` call, or until the agent hands back its report, whichever comes first. At session end the trace is sent anyway, with the round's work up to then.
 
-When an agent's task notification or hand-back arrives after the turn that started the agent has ended, the session's reply to it is a trace of its own, with the notification or hand-back as its input. That reply counts as a turn, numbered where it comes in the session, also for the turn number in a [deterministic trace ID](#deterministic-trace-ids).
+When an agent's task notification, its hand-back, or a message it sends the session arrives after the session's turn has ended, the session's reply to it is a trace of its own, with that notification, hand-back or message as its input. That reply counts as a turn, numbered where it comes in the session, also for the turn number in a [deterministic trace ID](#deterministic-trace-ids).
 
 When the agent's transcript holds no start of the round that a `SendMessage` call started, at or after the call, the trace is sent without that run, and the hook log `~/.claude/state/langfuse_hook.log` holds a line `No run for SendMessage call <id>: agent <agent id> has no round <n> that starts at or after the call`. An agent that another agent continues gets no runs of its own for those rounds.
 

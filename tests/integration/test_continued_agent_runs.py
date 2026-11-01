@@ -1,8 +1,8 @@
 """Pins how an agent's rounds reach Langfuse: the launch prompt and each message the
 main session sends it with SendMessage start a round, and each round is a run (a
 "Subagent: ..." observation) in the trace of the turn that started it. Also pins how
-the session's reply to an agent's notification or hand-back, after its turn has ended,
-reaches Langfuse as a trace of its own.
+the session's reply to an agent's notification, message or hand-back, after its turn
+has ended, reaches Langfuse as a trace of its own.
 
 Each test writes a main transcript and one agent transcript in a temp folder (the
 `continued_agent` fixture), runs the hook over them one or more times, and reads what
@@ -121,15 +121,22 @@ def notification(uuid: str, tool_use_id: str, result: str, seconds: float) -> Di
     }
 
 
-def hand_back(uuid: str, report: str, seconds: float) -> Dict[str, Any]:
+def peer_message(uuid: str, message: str, seconds: float, sender: str = AGENT_ID) -> Dict[str, Any]:
+    """A message an agent sends the session with SendMessage."""
     return {
         "type": "user",
         "timestamp": at(seconds),
         "uuid": uuid,
         "isMeta": True,
-        "origin": {"kind": "peer", "from": AGENT_ID, "senderTaskId": AGENT_ID, "handback": True},
-        "message": {"role": "user", "content": f"<agent-message from=\"{AGENT_ID}\">{report}</agent-message>"},
+        "origin": {"kind": "peer", "from": sender, "senderTaskId": sender},
+        "message": {"role": "user", "content": f"<agent-message from=\"{sender}\">{message}</agent-message>"},
     }
+
+
+def hand_back(uuid: str, report: str, seconds: float) -> Dict[str, Any]:
+    row = peer_message(uuid, report, seconds)
+    row["origin"]["handback"] = True
+    return row
 
 
 def agent_prompt(text_value: str, seconds: float) -> Dict[str, Any]:
@@ -853,3 +860,32 @@ def test_a_result_that_arrives_during_the_next_prompt_still_reaches_the_launch_t
     assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
 
     assert [root_input(trace) for trace in traces(fake_langfuse)] == ["Launch the researcher.", "Next question."]
+
+
+def test_the_reply_to_an_agent_message_after_the_turn_ended_is_a_trace_with_the_round_it_started(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn(), round_1_notification(), turn_end(31))
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+
+    message = peer_message("main-peer", "A finding for you.", 40, sender="a-other")
+    continued_agent.add_agent(
+        coordinator_row("agent-coord-2", "Message for round 2.", 42.5),
+        agent_says("agent-2a", "Round 2, first.", 45),
+        agent_reports("agent-2b", "Round 2, report.", 50),
+    )
+    continued_agent.add_main(
+        message,
+        send_call("main-send-2", SEND_2, "Message for round 2.", 42),
+        send_result("main-send-result-2", SEND_2, 43),
+        agent_says("main-sent-2", "Passed it on.", 44),
+        hand_back("main-hand-back-2", "Round 2 report.", 51),
+    )
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+    reply_trace = traces(fake_langfuse)[1]
+    assert root_input(reply_trace) == message["message"]["content"]
+    assert run_summary(reply_trace) == [
+        (f"Subagent: {DESCRIPTION} - round 2", 2, ["Round 2, first.", "Round 2, report."]),
+    ]

@@ -956,8 +956,9 @@ class TurnAssemblyState:
     tool_use_timestamps_by_id: Dict[str, Any] = field(default_factory=dict)
     injected_by_tool_id: Dict[str, str] = field(default_factory=dict)
     current_rows: List[Dict[str, Any]] = field(default_factory=list)
-    # Set at a turn-end row (is_turn_end_row); a later notification or hand-back then
-    # starts a new turn instead of joining this one.
+    # Set at a turn-end row (is_turn_end_row); a later row that
+    # starts_turn_when_none_is_open accepts then starts a new turn instead of joining
+    # this one.
     turn_ended: bool = False
     # Each turn closed earlier in the batch, by each call it made, so a result that
     # arrives in a later turn still reaches the call's own turn.
@@ -978,6 +979,11 @@ def _extract_xml_tag_value(text: str, tag: str) -> Optional[str]:
 def has_task_notification_origin(row: Dict[str, Any]) -> bool:
     origin = row.get("origin")
     return isinstance(origin, dict) and origin.get("kind") == "task-notification"
+
+def has_peer_origin(row: Dict[str, Any]) -> bool:
+    """True for a row an agent sent the session: a message or a hand-back."""
+    origin = row.get("origin")
+    return isinstance(origin, dict) and origin.get("kind") == "peer"
 
 def is_task_notification_row(row: Dict[str, Any]) -> bool:
     if has_task_notification_origin(row):
@@ -1020,10 +1026,9 @@ def get_result_from_task_notification(row: Dict[str, Any]) -> str:
 def hand_back_agent_id(row: Dict[str, Any]) -> Optional[str]:
     """The id of the agent whose report the row hands back to the session, or None
     when the row is no hand-back."""
-    origin = row.get("origin")
-    if not isinstance(origin, dict) or origin.get("kind") != "peer" or origin.get("handback") is not True:
+    if not has_peer_origin(row) or row["origin"].get("handback") is not True:
         return None
-    agent_id = origin.get("senderTaskId")
+    agent_id = row["origin"].get("senderTaskId")
     return agent_id if isinstance(agent_id, str) and agent_id else None
 
 @dataclass
@@ -1535,9 +1540,9 @@ def is_turn_end_row(row: Dict[str, Any]) -> bool:
 
 def starts_turn_when_none_is_open(row: Dict[str, Any]) -> bool:
     """True for a row that starts a turn when no turn is open or the open one has
-    ended: the user row of a task notification, or a hand-back row."""
-    is_notification = row.get("type") == "user" and has_task_notification_origin(row)
-    return is_notification or hand_back_agent_id(row) is not None
+    ended: the user row of a task notification, or a message or hand-back from an
+    agent."""
+    return row.get("type") == "user" and (has_task_notification_origin(row) or has_peer_origin(row))
 
 def is_interrupt_row(row: Optional[Dict[str, Any]]) -> bool:
     """True for the user row Claude Code writes when Esc stops a turn."""
@@ -1575,9 +1580,9 @@ def build_turns(
     """
     Groups incremental transcript rows into turns:
     user (non-tool-result) -> assistant messages -> (tool_result rows, possibly interleaved)
-    A task notification or hand-back also starts a turn when no turn is open or the
-    open one has ended (starts_turn_when_none_is_open); the open turn first gets its
-    result.
+    A task notification, or a message or hand-back from an agent, also starts a turn
+    when no turn is open or the open one has ended (starts_turn_when_none_is_open);
+    the open turn first gets its result.
     Uses:
     - assistant rows merged by message.id (all content blocks concatenated)
     - tool results dedupe by tool_use_id (latest wins)
