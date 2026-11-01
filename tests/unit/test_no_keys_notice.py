@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import pytest
 
-from conftest import run_main, write_settings
+from conftest import git, run_main, write_settings
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -148,3 +148,14 @@ def test_later_firings_without_keys_stay_silent(
 ):
     # The notice comes once, at SessionStart — not again on every turn.
     assert run_main(hook_module, monkeypatch, capsys, {"hook_event_name": event}) == ""
+
+
+def test_a_repo_whose_keys_branch_was_fetched_names_only_setup(
+    hook_module, isolated_hook_state, no_langfuse_env, monkeypatch, capsys, repo
+):
+    git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    git(repo, "update-ref", "refs/remotes/origin/mate-record-keys", "HEAD")
+
+    message = session_start_message(hook_module, monkeypatch, capsys, "linux", repo)
+
+    assert message == "Langfuse: this session is not traced. To trace this repo, run /mate-record:langfuse-setup."

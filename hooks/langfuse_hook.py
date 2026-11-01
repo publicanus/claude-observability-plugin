@@ -48,6 +48,7 @@ from state_files import (  # noqa: E402
     HURT_PENDING_FILE,
     HURT_PENDING_LOCK_FILE,
     HURT_UNRESOLVED_FILE,
+    LOG_FILE,
     STATE_DIR,
     STATE_FILE,
     FileLock,
@@ -58,7 +59,6 @@ from state_files import (  # noqa: E402
 
 
 # ----------------- Paths -----------------
-LOG_FILE = STATE_DIR / "langfuse_hook.log"
 LOCK_FILE = STATE_DIR / "langfuse_state.lock"
 
 # Claude Code's own account file; its oauthAccount.emailAddress is the login email.
@@ -84,10 +84,11 @@ STATE_MAX_AGE = timedelta(days=30)
 from hurt_annotations import load_pending_hurts, place_unresolved_hurts, process_pending_hurts  # noqa: E402
 from langfuse_client import LangfuseClient, keys_rejected  # noqa: E402
 from secret_masking import mask_secrets  # noqa: E402
-from repo_checkout import Checkout, find_checkout, project_folder  # noqa: E402
+from repo_checkout import Checkout, find_checkout, find_remote, github_repo, project_folder  # noqa: E402
 from settings_file import (  # noqa: E402
     EU_CLOUD_HOST,
     KEY_NAMES,
+    KEYS_BRANCH,
     SETUP_COMMAND,
     SettingsFileError,
     env_holds_keys,
@@ -144,6 +145,16 @@ OUTSIDE_KEYS_NOT_USED = (
 # Ends every text that tells the user to fix the repo's settings file.
 SETTINGS_REREAD = "The hook reads that file again at the end of each turn."
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
+# At SessionStart without keys, in a repo whose keys branch was fetched: setup is the one step.
+NOT_TRACED_RUN_SETUP = f"Langfuse: this session is not traced. To trace this repo, run {SETUP_COMMAND}."
+# The setup check's answer on a GitHub repo, which sends the setup skill to sharing the keys
+# through the repo. additionalContext is the field this event's output takes for added text.
+SETUP_ON_GITHUB = {
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptExpansion",
+        "additionalContext": "Langfuse: this repo is on GitHub, so setup shares its keys through the repo.",
+    }
+}
 
 # The manual steps shown at SessionStart without keys: one text per system. A repo's
 # own text, at the root of its git checkout, wins over the plugin's for that system.
@@ -223,30 +234,20 @@ def read_git_email(cwd: Optional[str]) -> Optional[str]:
 def read_repo_name(checkout: Checkout) -> str:
     """The name of the repo of checkout.
 
-    With a git remote: the last part of the address of `origin`, else of the first
-    remote `git remote` lists, without a `.git` ending. Without a remote: the name of
+    With a git remote: the last part of the address of repo_checkout.find_remote,
+    without a `.git` ending. Without a remote: the name of
     the main checkout's folder, the same for all its worktrees. Outside a git checkout,
     or without git installed: the name of checkout.root.
     Raises subprocess.CalledProcessError when git fails inside a checkout.
     """
-    base = checkout.root
     main_checkout = checkout.main
     if main_checkout is None:
-        return base.name
-
-    def git(*args: str) -> str:
-        # stderr is not captured, so git's own error reaches the hook's error output.
-        return subprocess.run(
-            ["git", *args], cwd=base, stdout=subprocess.PIPE, text=True, check=True
-        ).stdout.strip()
-
-    remotes = git("remote").split()
-    if not remotes:
+        return checkout.root.name
+    remote = find_remote(checkout.root)
+    if remote is None:
         return main_checkout.name
-    remote = "origin" if "origin" in remotes else remotes[0]
-    address = git("remote", "get-url", remote)
     # Covers both `host:owner/name` and URL forms; a user or token sits before the last part.
-    last_part = address.rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
+    last_part = remote.address.rstrip("/").replace(":", "/").rsplit("/", 1)[-1]
     return last_part.removesuffix(".git")
 
 class PluginsFileError(Exception):
@@ -558,7 +559,30 @@ def keys_set_outside(checkout: Checkout) -> bool:
                 return True
     return False
 
+def is_on_github(checkout: Checkout) -> bool:
+    """True when checkout's repo is reached through a github.com remote (repo_checkout.find_remote)."""
+    if checkout.main is None:
+        return False
+    remote = find_remote(checkout.root)
+    return remote is not None and github_repo(remote.address) is not None
+
+def keys_branch_fetched(checkout: Checkout) -> bool:
+    """True when the repo's remote-tracking ref for KEYS_BRANCH exists here; asks no remote."""
+    if checkout.main is None:
+        return False
+    remote = find_remote(checkout.root)
+    if remote is None:
+        return False
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote.name}/{KEYS_BRANCH}"],
+        cwd=checkout.root,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
 def format_no_keys_message(checkout: Checkout) -> str:
+    if keys_branch_fetched(checkout):
+        return NOT_TRACED_RUN_SETUP
     lines = [NO_KEYS_WARNING]
     if keys_set_outside(checkout):
         lines.append(OUTSIDE_KEYS_NOT_USED)
@@ -3846,7 +3870,10 @@ def main() -> int:
 
     # The setup skill reads "no output" as "the hook cannot run", so this always answers.
     if is_setup_check:
-        if config is not None:
+        # On GitHub, setup shares the keys through the repo, also keys that are already set.
+        if is_on_github(checkout):
+            print(json.dumps(SETUP_ON_GITHUB))
+        elif config is not None:
             print(json.dumps({"decision": "block", "reason": ALREADY_CONFIGURED}))
         else:
             print(json.dumps({}))

@@ -1,5 +1,5 @@
 ---
-description: Set up Langfuse tracing for this repo. Prepares .claude/settings.local.json for the Langfuse keys, kept out of git, and opens it so the developer can paste the keys.
+description: Set up Langfuse tracing for this repo. On a GitHub repo, gets the repo's Langfuse keys from the repo itself, or puts them there once; elsewhere, prepares .claude/settings.local.json for the keys, kept out of git, and opens it so the developer can paste them.
 disable-model-invocation: true
 ---
 
@@ -9,7 +9,7 @@ Never ask the developer for a Langfuse key or a Langfuse address in the chat, an
 
 Never read, print or show the settings file, because once the developer has pasted the keys it holds them. To check the setup, tell the developer to start a new session and look for the "not traced" line.
 
-Run the commands in steps 1, 2 and 4 with the Bash tool, also on Windows.
+Run the commands in steps 1, 2, 4 and 7 with the Bash tool, also on Windows.
 
 ## 1. Ask the hook
 
@@ -24,6 +24,7 @@ Note its exit code, its stdout and its stderr.
 ## 2. Act on the answer
 
 - **Exit 0, nothing on stderr, and stdout is a JSON object with `"decision": "block"`:** say only the text of its `reason`, and stop. Change no file.
+- **Exit 0, nothing on stderr, and stdout is a JSON object with `hookSpecificOutput`:** the repo is on GitHub. Go on to step 7.
 - **Exit 0, nothing on stderr, and stdout is exactly `{}`:** the repo's own `.claude/settings.local.json` has no keys. Go on to step 4.
 - **`sh` was not found:** say that the Langfuse hook needs a POSIX `sh`, which on Windows comes with Git for Windows. Stop, and change no file.
 - **Anything else** (no output at all, a non-zero exit, text on stderr, or other stdout): run `uv --version`.
@@ -67,3 +68,25 @@ If that command fails, give the developer the path and ask them to open the file
 - New sessions in this repo are then traced.
 - Commit `.worktreeinclude`, so that worktrees Claude Code creates get a copy of the file.
 - Name the files from `changed`.
+
+## 7. Share the keys through GitHub
+
+On a GitHub repo, the repo carries its own Langfuse keys, locked so that only laptops let in can open them.
+
+1. Run `uv --version`. If it fails, go to step 3: the sharing needs uv to load its locking library.
+2. Run the command below. On Windows, put `UV_PYTHON=cpython-3.13-windows-x86_64-none ` in front of it, because Windows on ARM can load the locking library only into that Python.
+
+   ```
+   sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" --fail-if-cannot-run "${CLAUDE_SKILL_DIR}/repo_keys.py" setup --project-dir "${CLAUDE_PROJECT_DIR}"
+   ```
+
+3. Act on its answer. Say each quoted text word for word: a developer who joins a repo must never see the words key, lock or CI, and these texts are written without them.
+
+   - **Exit 0, and stdout is a JSON object; act on its `result`:**
+     - `not-github`: go on to step 4.
+     - `ready` or `locked`: say "Tracing is ready. Your next session in this repo is traced." Stop.
+     - `joining`: start the command of step 2 again, with `wait` in place of `setup`, with the Monitor tool and a 10-minute deadline. The command prints its one line within 9 minutes, and 10 minutes is the longest watch a session started with `claude -p` allows. Then say "Setting up tracing for this repo. This takes a minute or two. I'll tell you when it's ready." and end your turn, so the developer can go on working. When the watch reports a line, say that line word for word. When the watch ends without a line, say "Tracing is not ready yet. Run /mate-record:langfuse-setup again later, or ask whoever manages this repo." and nothing else. Never start a second watch: the command would start its 9 minutes again, and the developer would wait twice as long for the same answer.
+     - `not-admin`: say "This repo is not set up for tracing yet. Ask whoever manages this repo to run /mate-record:langfuse-setup first. If you manage it, install the GitHub CLI, version 2.81 or later, from https://cli.github.com, run `gh auth login` in a terminal, and run /mate-record:langfuse-setup again." Then, when `settings_hold_keys` is false, go on to step 4; when it is true, stop.
+     - `need-keys`: do steps 4 and 5. Then say "This repo is not set up for tracing yet. Paste its Langfuse keys into the file that just opened (Langfuse → project → Settings → API keys), save it, and say done. Never paste them in this chat." When the developer says done, do this step 7 again.
+     - `need-workflow-scope`: say "Run `gh auth refresh -h github.com -s workflow` in a terminal, then run /mate-record:langfuse-setup again." Stop.
+   - **Anything else** (a non-zero exit, or no JSON on stdout): say "Tracing is not ready yet. Run /mate-record:langfuse-setup again later, or ask whoever manages this repo.", then the last line of its stderr. Stop.

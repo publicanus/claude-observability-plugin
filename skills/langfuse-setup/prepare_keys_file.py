@@ -21,6 +21,10 @@
     stdout         {"settings": <target path>, "changed": [<paths written>]}
     exit           0 done; 1 a git or file problem, named on stderr, with the target left
                    as it was; 2 bad arguments
+
+write_keys(project_dir, values) sets each of values in the same target's env block,
+replacing what is there, and keeps the target out of git as above; it does not touch
+.worktreeinclude. Returns the paths it wrote. Raises SetupError or SettingsFileError.
 """
 
 import argparse
@@ -30,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # The plugin's hooks folder, so its shared modules import however this script is run.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hooks"))
@@ -136,16 +140,33 @@ def lists_settings_file(path: Path) -> bool:
     return any(line.strip() == WORKTREEINCLUDE_LINE for line in lines)
 
 
-def prepare(project_dir: Path) -> Dict[str, Any]:
-    checkout_root = Path(git_output(project_dir, "rev-parse", "--show-toplevel").strip())
+def edit_settings(project_dir: Path, edit: Callable[[Dict[str, Any]], bool]) -> Tuple[Path, List[Path]]:
+    """Applies edit to the main checkout's settings, kept out of git, and writes them when
+    edit returns True or the file is missing. Returns the target and the paths written."""
     root = main_checkout(project_dir)
     target = root / SETTINGS
     settings = load_settings(target)
 
     changed = ensure_ignored(root) if in_work_tree(root) else []
-    if add_placeholders(settings) or not target.exists():
+    if edit(settings) or not target.exists():
         write_json(target, settings)
         changed.append(target)
+    return target, changed
+
+
+def write_keys(project_dir: Path, values: Dict[str, str]) -> List[Path]:
+    def set_values(settings: Dict[str, Any]) -> bool:
+        env = settings.setdefault("env", {})
+        before = dict(env)
+        env.update(values)
+        return env != before
+
+    return edit_settings(project_dir, set_values)[1]
+
+
+def prepare(project_dir: Path) -> Dict[str, Any]:
+    checkout_root = Path(git_output(project_dir, "rev-parse", "--show-toplevel").strip())
+    target, changed = edit_settings(project_dir, add_placeholders)
 
     worktreeinclude = checkout_root / ".worktreeinclude"
     if not lists_settings_file(worktreeinclude):
