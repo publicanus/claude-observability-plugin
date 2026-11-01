@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.1.0](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.5...v3.1.0) (2026-11-01)
+
+
+### Features
+
+* **setup:** consultants on a GitHub repo get its Langfuse keys from the repo ([#89](https://github.com/publicanus/claude-observability-plugin/issues/89)) ([#103](https://github.com/publicanus/claude-observability-plugin/issues/103)) ([36cd7c1](https://github.com/publicanus/claude-observability-plugin/commit/36cd7c1f7f87bcb53b8984f05184e60c86bdccc3))
+* **setup:** whoever manages a GitHub repo can take people or laptops off and put in a new key pair ([#90](https://github.com/publicanus/claude-observability-plugin/issues/90)) ([#109](https://github.com/publicanus/claude-observability-plugin/issues/109)) ([d8455c0](https://github.com/publicanus/claude-observability-plugin/commit/d8455c08f5034fc6f55ee7042886b4d6d8c78e48))
+
+
+### Bug Fixes
+
+* **hook:** a 403 answer warns that Langfuse cannot be reached ([#110](https://github.com/publicanus/claude-observability-plugin/issues/110)) ([db35e6a](https://github.com/publicanus/claude-observability-plugin/commit/db35e6ae8ecb180754c6a1d665c2349f3b3f11a9)), closes [#85](https://github.com/publicanus/claude-observability-plugin/issues/85)
+* **hurt:** /hurt outlasts a brief hold on its queue file on Windows ([#83](https://github.com/publicanus/claude-observability-plugin/issues/83)) ([#111](https://github.com/publicanus/claude-observability-plugin/issues/111)) ([3be8413](https://github.com/publicanus/claude-observability-plugin/commit/3be8413c9cfcb6e50cdcd514e1abbd3f658bec5b))
+
 ## [3.0.5](https://github.com/publicanus/claude-observability-plugin/compare/v3.0.4...v3.0.5) (2026-10-31)
 
 
