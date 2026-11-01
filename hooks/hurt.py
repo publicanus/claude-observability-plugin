@@ -5,16 +5,18 @@
 # ///
 """Queues a /hurt note for the trace of the turn before the one it runs in.
 
-    hurt.py --category <category> --comment <text> [--session-id <id>]
+    hurt.py --category <category> [--session-id <id>] < <note>
 
     --category    one of hurt_annotations.CATEGORIES
-    --comment     the developer's own words, stored as given
     --session-id  the session; defaults to CLAUDE_CODE_SESSION_ID
+    stdin         the developer's own words, as UTF-8; stored as given, less one
+                  line end at its end
     reads         the repo's own .claude/settings.local.json, as the hook finds it
                   from CLAUDE_PROJECT_DIR or the working directory: to store which
                   Langfuse project the note is for, or to say why nothing was queued
     stdout        one line: what was queued, or why nothing was
     exit          0 when queued; 1 when nothing was queued; 2 on a wrong argument
+                  or an empty stdin
     writes        appends one entry to ~/.claude/state/hurt_unresolved.json, under
                   the lock the hook holds while it works on the /hurt queues. The
                   hook gives the entry its trace once it has built the turn before
@@ -31,7 +33,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import BinaryIO, Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hurt_annotations import CATEGORIES, load_pending_hurts, queue_target, save_pending_hurts  # noqa: E402
@@ -104,14 +106,19 @@ def read_queue_target() -> Optional[str]:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Queue a /hurt note for the trace of the turn before this one.")
     parser.add_argument("--category", required=True, choices=CATEGORIES)
-    parser.add_argument("--comment", required=True)
     parser.add_argument("--session-id", default=None, help="Override CLAUDE_CODE_SESSION_ID (for testing).")
     return parser.parse_args(argv)
 
 
-def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
+def run(argv: list[str], *, stdin: BinaryIO, env: Optional[Mapping[str, str]] = None) -> int:
+    """stdin: the note, as stdin in this module's header describes it."""
     env = env if env is not None else os.environ
     args = parse_args(argv)
+    # The line end a shell here-document puts after the note.
+    note = stdin.read().decode("utf-8").removesuffix("\n")
+    if not note:
+        print("/hurt: no note was given. Nothing queued.")
+        return 2
 
     session_id = args.session_id or env.get("CLAUDE_CODE_SESSION_ID")
     if not session_id:
@@ -129,7 +136,7 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
     try:
         append_unresolved_hurt(
             category=args.category,
-            comment=args.comment,
+            comment=note,
             session_id=session_id,
             target=target,
             unresolved_file=HURT_UNRESOLVED_FILE,
@@ -154,4 +161,4 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run(sys.argv[1:]))
+    sys.exit(run(sys.argv[1:], stdin=sys.stdin.buffer))

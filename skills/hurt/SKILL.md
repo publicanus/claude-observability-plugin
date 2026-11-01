@@ -28,10 +28,12 @@ If nothing in the text supports any of the first five, use `other` — don't for
 Run, via the Bash tool:
 
 ```
-cd "${CLAUDE_PROJECT_DIR}" && sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/hurt.py" --category "<chosen-category>" --comment '<text>'
+cd "${CLAUDE_PROJECT_DIR}" && sh "${CLAUDE_PLUGIN_ROOT}/hooks/run_hook.sh" "${CLAUDE_PLUGIN_ROOT}/hooks/hurt.py" --category "<chosen-category>" <<'HURT_NOTE_END'
+<text>
+HURT_NOTE_END
 ```
 
-`<text>` is the operator's text with the override token stripped. Put it in single quotes, as above, and write each `'` inside it as `'\''`, so that a `$` or a backtick in the operator's words reaches the queue as typed.
+`<text>` is the operator's text with the override token stripped, written as typed between the two lines above. Pass it this way, never as an argument: the quoted `'HURT_NOTE_END'` keeps a `$` or a backtick in the operator's words as typed, and on Windows an argument that starts with `/` is rewritten into a Windows path.
 
 ## 3. Report the result
 
