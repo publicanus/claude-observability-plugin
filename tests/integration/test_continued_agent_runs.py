@@ -270,7 +270,7 @@ def traces(fake_langfuse: Any) -> List[List[Any]]:
     """The observations of each trace, in the order sent; a trace starts at its root."""
     found: List[List[Any]] = []
     for observation in fake_langfuse.observations:
-        if observation.name == "Conversational Turn":
+        if observation.name in ("Conversational Turn", "Agent woken up"):
             found.append([])
         found[-1].append(observation)
     return found
@@ -889,3 +889,100 @@ def test_the_reply_to_an_agent_message_after_the_turn_ended_is_a_trace_with_the_
     assert run_summary(reply_trace) == [
         (f"Subagent: {DESCRIPTION} - round 2", 2, ["Round 2, first.", "Round 2, report."]),
     ]
+
+
+# ----------------- An agent that wakes up after it has finished -----------------
+# The agent finishes round 1, then a background job it started finishes and its
+# notification wakes the agent, with no message from the main session.
+
+def job_notification(seconds: float) -> Dict[str, Any]:
+    """The agent's own job's notification, which wakes it up."""
+    return {
+        "type": "user",
+        "timestamp": at(seconds),
+        "uuid": f"agent-job-note-{seconds}",
+        "isMeta": True,
+        "origin": {"kind": "task-notification"},
+        "message": {"role": "user", "content": (
+            "<task-notification><task-id>bjob</task-id><tool-use-id>toolu_job</tool-use-id>"
+            "<status>completed</status></task-notification>"
+        )},
+    }
+
+
+def wake() -> List[Dict[str, Any]]:
+    return [job_notification(40), agent_reports("agent-w1", "Woken, report.", 45)]
+
+
+def wake_traces(fake_langfuse: Any) -> List[List[Any]]:
+    return [trace for trace in traces(fake_langfuse) if trace[0].name == "Agent woken up"]
+
+
+WAKE_RUN = (f"Subagent: {DESCRIPTION} - woken up", 1, ["Woken, report."])
+ROUND_1_RUN = (f"Subagent: {DESCRIPTION}", 1, ["Round 1, first.", "Round 1, report."])
+
+
+def test_a_wake_after_the_launch_turn_was_sent_shows_once_in_a_trace_of_its_own(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn(), round_1_notification())
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+
+    continued_agent.add_agent(*wake())
+    continued_agent.add_main(turn_end(31), hand_back("main-hand-back-w", "Woken, report.", 46), *reply(46))
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+    [launch_trace, reply_trace, wake_trace] = traces(fake_langfuse)
+    assert run_summary(launch_trace) == [ROUND_1_RUN]
+    assert run_summary(reply_trace) == []
+    assert run_summary(wake_trace) == [WAKE_RUN]
+    root = wake_trace[0]
+    assert root.propagated["session_id"] == SESSION_ID
+    assert root.propagated["tags"] == ["claude-code", "repo:shop"]
+    assert root.kwargs["input"]["content"] == job_notification(40)["message"]["content"]
+    assert root.output["content"] == "Woken, report."
+
+
+def test_a_wake_whose_only_report_is_a_notification_without_a_reply_is_sent(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn(), round_1_notification())
+    run_hook(hook_module, fake_langfuse, continued_agent)
+
+    continued_agent.add_agent(*wake())
+    continued_agent.add_main(turn_end(31), notification("main-note-w", LAUNCH, "Woken.", 46))
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 1
+    assert [run_summary(trace) for trace in wake_traces(fake_langfuse)] == [[WAKE_RUN]]
+
+
+def test_a_wake_before_the_launch_turn_is_sent_stays_out_of_the_round_run(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn())
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 0
+
+    continued_agent.add_agent(*wake())
+    continued_agent.add_main(round_1_notification(), hand_back("main-hand-back-w", "Woken, report.", 46))
+
+    assert run_hook(hook_module, fake_langfuse, continued_agent) == 2
+    assert [run_summary(trace) for trace in traces(fake_langfuse)] == [[ROUND_1_RUN], [WAKE_RUN]]
+
+
+def test_a_wake_reported_by_a_hand_back_and_later_a_notification_is_sent_once(
+    hook_module, fake_langfuse, isolated_hook_state, continued_agent
+):
+    continued_agent.add_agent(*round_1())
+    continued_agent.add_main(*launch_turn(), round_1_notification())
+    run_hook(hook_module, fake_langfuse, continued_agent)
+    continued_agent.add_agent(*wake())
+    continued_agent.add_main(turn_end(31), hand_back("main-hand-back-w", "Woken, report.", 46))
+    run_hook(hook_module, fake_langfuse, continued_agent)
+
+    continued_agent.add_main(notification("main-note-w", LAUNCH, "Woken.", 47))
+    run_hook(hook_module, fake_langfuse, continued_agent)
+
+    assert [run_summary(trace) for trace in wake_traces(fake_langfuse)] == [[WAKE_RUN]]

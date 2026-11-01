@@ -17,19 +17,9 @@ from transcript_replay import fault_lines, replay_session
 
 SESSIONS = sorted(path for path in FIXTURES.glob("*/*.jsonl"))
 
-AGENT_WOKEN_AGAIN = (
-    "An agent's reply after it has finished and woken up again without a new message from "
-    "the main session is lost."
-)
-
-LATE = "late-hand-back"
-LATE_AGENT = "2f26c36b-4b64-48a5-9de8-b721448fe6f6/subagents/agent-af9f988dac6d29ad4.jsonl"
-
 # Replies the hook loses or sends twice today: (fixture folder, transcript file, message id)
 # to the fault, "lost" or "doubled", and the cause it shows.
-KNOWN_FAULTS: Dict[Tuple[str, str, str], Tuple[str, str]] = {
-    (LATE, LATE_AGENT, "msg_011CgXwbLyiyXvauv9zuNHr2"): ("lost", AGENT_WOKEN_AGAIN),
-}
+KNOWN_FAULTS: Dict[Tuple[str, str, str], Tuple[str, str]] = {}
 
 
 def known_faults_of(fixture: str) -> Dict[Tuple[str, str], str]:
