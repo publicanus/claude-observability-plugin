@@ -142,3 +142,27 @@ def test_a_repo_on_github_sends_setup_to_sharing_the_keys_through_the_repo(
     assert answer["hookSpecificOutput"]["hookEventName"] == "UserPromptExpansion"
     assert "on GitHub" in answer["hookSpecificOutput"]["additionalContext"]
     assert "decision" not in answer
+
+
+@pytest.mark.parametrize(
+    "env",
+    [BOTH_KEYS, {"LANGFUSE_BASE_URL": "https://us.cloud.langfuse.com"}],
+    ids=["keys-set", "refused-address"],
+)
+@pytest.mark.parametrize("words", ["help", "people", "peple"])
+def test_words_after_the_command_are_let_through_so_the_skill_picks_the_step(
+    hook_module, monkeypatch, capsys, repo, env, words
+):
+    write_settings(repo, env)
+    monkeypatch.setattr(
+        hook_module,
+        "read_hook_payload",
+        lambda: {
+            "hook_event_name": "UserPromptExpansion",
+            "command_name": "mate-record:langfuse-setup",
+            "command_args": words,
+        },
+    )
+
+    assert hook_module.main() == 0
+    assert json.loads(capsys.readouterr().out) == {}

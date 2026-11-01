@@ -225,10 +225,18 @@ def read_lock_file(root: Path, remote: Remote) -> Optional[bytes]:
     """The branch's lock file, freshly fetched; None when the remote has no branch."""
     if not fetch_keys_branch(root, remote):
         return None
+    return fetched_lock_file(root, remote)
+
+
+def fetched_lock_file(root: Path, remote: Remote) -> bytes:
+    """The lock file in the branch as last fetched; raises StepFailed when it cannot be read."""
     spec = f"{tracking_ref(remote)}:{LOCK_PATH}"
     if git(root, "cat-file", "-e", spec).returncode != 0:
         raise StepFailed(READ, f"{spec} does not exist")
-    return git(root, "cat-file", "blob", spec).stdout
+    read = git(root, "cat-file", "blob", spec)
+    if read.returncode != 0:
+        raise StepFailed(READ, f"git cat-file exited {read.returncode}: {read.stderr.decode(errors='replace').strip()}")
+    return read.stdout
 
 
 Change = Tuple[Dict[str, bytes], List[str]]
@@ -303,6 +311,17 @@ def make_laptop_key() -> x25519.Identity:
     return identity
 
 
+def lock_values(values: Dict[str, str], recipients: List[x25519.Recipient]) -> bytes:
+    return relock.lock(json.dumps(values).encode("utf-8"), recipients)
+
+
+def open_with(lock_file: Optional[bytes], identity: Optional[x25519.Identity]) -> Optional[Dict[str, str]]:
+    """The values in lock_file, or None when there is no lock file, no key, or the key cannot open it."""
+    if lock_file is None or identity is None:
+        return None
+    return unlock(lock_file, identity)
+
+
 def unlock(data: bytes, identity: x25519.Identity) -> Optional[Dict[str, str]]:
     """The values in data, or None when identity cannot open it."""
     try:
@@ -353,7 +372,7 @@ def github_remote(project_dir: Path):
 
 def join(project_dir: Path, root: Path, remote: Remote, lock_file: bytes) -> Dict[str, object]:
     identity = read_laptop_key()
-    values = unlock(lock_file, identity) if identity is not None else None
+    values = open_with(lock_file, identity)
     if values is not None:
         write_settings(project_dir, values)
         return {"result": "ready"}
@@ -364,25 +383,33 @@ def join(project_dir: Path, root: Path, remote: Remote, lock_file: bytes) -> Dic
     return {"result": "joining"}
 
 
-def lock_in(project_dir: Path, root: Path, remote: Remote, repo: str) -> Dict[str, object]:
+def settings_values(project_dir: Path) -> Optional[Dict[str, str]]:
+    """The three values in the repo's settings file, the address defaulting to EU cloud;
+    None when it holds no keys."""
     try:
         env = repo_settings_env(find_checkout(project_dir))
     except SettingsFileError as e:
         raise StepFailed(READ_SETTINGS, str(e), show_detail=True) from e
-    holds_keys = env_holds_keys(env)
+    if not env_holds_keys(env):
+        return None
+    public_key, secret_key = read_env_keys(env)
+    return dict(zip(VALUE_NAMES, (public_key, secret_key, read_env_host(env))))
+
+
+def lock_in(project_dir: Path, root: Path, remote: Remote, repo: str) -> Dict[str, object]:
+    values = settings_values(project_dir)
+    holds_keys = values is not None
     if not is_admin(repo):
         return {"result": "not-admin", "settings_hold_keys": holds_keys}
     if not has_workflow_scope():
         return {"result": "need-workflow-scope"}
-    if not holds_keys:
+    if values is None:
         return {"result": "need-keys"}
 
-    public_key, secret_key = read_env_keys(env)
-    values = dict(zip(VALUE_NAMES, (public_key, secret_key, read_env_host(env))))
     laptop = read_laptop_key() or make_laptop_key()
     ci = x25519.Identity.generate()
     files = {path: template.read_bytes() for path, template in BRANCH_TEMPLATES.items()}
-    files[LOCK_PATH] = relock.lock(json.dumps(values).encode("utf-8"), [laptop.to_public(), ci.to_public()])
+    files[LOCK_PATH] = lock_values(values, [laptop.to_public(), ci.to_public()])
     files[CI_PUB_PATH] = f"{ci.to_public()}\n".encode("ascii")
     files[laptop_file(root, laptop)] = f"{laptop.to_public()}\n".encode("ascii")
     # The secret comes first: the first push starts the CI job, which needs it.
@@ -426,7 +453,7 @@ def wait(project_dir: Path) -> None:
         except StepFailed as e:
             log_failure(e)
             lock_file = None
-        values = unlock(lock_file, identity) if lock_file is not None else None
+        values = open_with(lock_file, identity)
         if values is not None:
             write_settings(project_dir, values)
             print(READY)
@@ -457,7 +484,7 @@ def admin_gate(project_dir: Path) -> Union[Dict[str, object], AdminContext]:
     if not is_admin(repo):
         return {"result": "not-admin"}
     identity = read_laptop_key()
-    values = unlock(lock_file, identity) if identity is not None else None
+    values = open_with(lock_file, identity)
     if identity is None or values is None:
         return {"result": "not-let-in"}
     return AdminContext(root, remote, identity, values)
@@ -534,12 +561,11 @@ def remove(project_dir: Path, person: Optional[str], laptop: Optional[str]) -> D
 
     def take_off() -> Change:
         # The newest values on each try, so a new pair pushed meanwhile is kept.
-        values = unlock(git(root, "cat-file", "blob", f"{tracking_ref(remote)}:{LOCK_PATH}").stdout, identity)
+        values = open_with(fetched_lock_file(root, remote), identity)
         if values is None:
             raise StepFailed(TAKE_OFF, "this laptop can no longer open the newest copy of the keys")
         remaining = [path for path in branch_paths(root, remote) if path not in removed_paths]
-        locked = relock.lock(json.dumps(values).encode("utf-8"), recipients_of(root, remote, remaining))
-        return {LOCK_PATH: locked}, removed_paths
+        return {LOCK_PATH: lock_values(values, recipients_of(root, remote, remaining))}, removed_paths
 
     push_commit(root, remote, take_off, f"Take off {', '.join(targets)}", target=remote.name, on_branch=True, sentence=TAKE_OFF)
     return {"result": "removed", "laptops": targets}
@@ -550,20 +576,15 @@ def new_pair(project_dir: Path) -> Dict[str, object]:
     if not isinstance(context, AdminContext):
         return context
     root, remote = context.root, context.remote
-    try:
-        env = repo_settings_env(find_checkout(project_dir))
-    except SettingsFileError as e:
-        raise StepFailed(READ_SETTINGS, str(e), show_detail=True) from e
-    if not env_holds_keys(env):
+    values = settings_values(project_dir)
+    if values is None:
         raise StepFailed(NO_KEYS_IN_SETTINGS, "the settings file holds no keys")
-    public_key, secret_key = read_env_keys(env)
-    values = dict(zip(VALUE_NAMES, (public_key, secret_key, read_env_host(env))))
     if values == context.values:
         return {"result": "same-pair"}
 
     def lock_new_pair() -> Change:
         recipients = recipients_of(root, remote, branch_paths(root, remote))
-        return {LOCK_PATH: relock.lock(json.dumps(values).encode("utf-8"), recipients)}, []
+        return {LOCK_PATH: lock_values(values, recipients)}, []
 
     push_commit(
         root, remote, lock_new_pair, "Put in a new Langfuse key pair", target=remote.name, on_branch=True, sentence=NEW_PAIR_PUSH

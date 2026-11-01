@@ -148,10 +148,10 @@ SETTINGS_REREAD = "The hook reads that file again at the end of each turn."
 ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 # At SessionStart without keys, in a repo whose keys branch was fetched: setup is the one step.
 NOT_TRACED_RUN_SETUP = f"Langfuse: this session is not traced. To trace this repo, run {SETUP_COMMAND}."
-# The setup check's answer on a GitHub repo, which sends the setup skill to sharing the keys
-# through the repo. additionalContext is the field this event's output takes for added text.
 # The refused-keys warning in a repo whose keys come from GitHub: setup fetches the new pair.
 NO_LONGER_TRACED = f"Langfuse: this session is no longer traced. To trace this repo again, run {SETUP_COMMAND}."
+# The setup check's answer on a GitHub repo, which sends the setup skill to sharing the keys
+# through the repo. additionalContext is the field this event's output takes for added text.
 SETUP_ON_GITHUB = {
     "hookSpecificOutput": {
         "hookEventName": "UserPromptExpansion",
@@ -532,6 +532,10 @@ def is_setup_check_hook_payload(payload: Dict[str, Any]) -> bool:
     """The setup skill's check: the UserPromptExpansion hook on its command, or the
     skill's own run of this hook with that event."""
     return hook_event_name(payload) == "UserPromptExpansion"
+
+def has_command_words(payload: Dict[str, Any]) -> bool:
+    """True when words were typed after the setup command, such as `help` or `people`."""
+    return bool(str(payload.get("command_args") or "").strip())
 
 
 # ----------------- No-keys message -----------------
@@ -3854,6 +3858,11 @@ def main() -> int:
     payload = read_hook_payload()
     is_session_start = is_session_start_hook_payload(payload)
     is_setup_check = is_setup_check_hook_payload(payload)
+    # Words after the setup command pick the skill's own step, such as the help, so the
+    # check never blocks them.
+    if is_setup_check and has_command_words(payload):
+        print(json.dumps({}))
+        return 0
     checkout = find_checkout(project_folder(payload.get("cwd")), log=debug)
     try:
         config = get_langfuse_config(checkout, payload.get("cwd"))
