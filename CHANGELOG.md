@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.2](https://github.com/publicanus/claude-observability-plugin/compare/v3.1.1...v3.1.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* **hook:** an agent's work after it woke up on its own reaches Langfuse ([#105](https://github.com/publicanus/claude-observability-plugin/issues/105)) ([#116](https://github.com/publicanus/claude-observability-plugin/issues/116)) ([1936758](https://github.com/publicanus/claude-observability-plugin/commit/1936758ff8a3a662e011c60a1c5264a7c6048773))
+
 ## [3.1.1](https://github.com/publicanus/claude-observability-plugin/compare/v3.1.0...v3.1.1) (2026-11-01)
 
 
