@@ -4,6 +4,8 @@ hook to place, and what it says when it queues nothing."""
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +143,49 @@ def test_a_broken_repo_settings_file_queues_nothing_and_names_it(
     assert out.startswith(f"/hurt: cannot read {settings} as JSON: ")
     assert out.rstrip().endswith("Nothing queued.")
     assert not queue_file.exists()
+
+
+# ----------------- Another program holds the queue file open -----------------
+
+def hold_queue_file(monkeypatch: pytest.MonkeyPatch, queue_file: Path, seconds: float) -> None:
+    """Makes replacing queue_file fail as Windows does while another program, such
+    as a virus scanner, has it open, for the given number of seconds from now."""
+    real_replace = os.replace
+    released_at = time.time() + seconds
+
+    def replace(src: Any, dst: Any) -> None:
+        if Path(dst) == queue_file and time.time() < released_at:
+            raise PermissionError(13, "The process cannot access the file", str(dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+
+def test_a_note_is_queued_when_the_queue_file_is_held_for_a_moment(
+    queue_file: Path, keyed_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hold_queue_file(monkeypatch, queue_file, seconds=0.3)
+
+    assert run_hurt() == 0
+
+    assert capsys.readouterr().out.startswith("/hurt: queued 'stalled-loop'")
+    assert [r["comment"] for r in read_queue(queue_file)] == ["went in circles"]
+
+
+def test_a_queue_file_held_too_long_queues_nothing_and_says_so_in_one_line(
+    queue_file: Path, keyed_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_hurt("earlier")
+    capsys.readouterr()
+    hold_queue_file(monkeypatch, queue_file, seconds=60)
+
+    assert run_hurt() == 1
+
+    assert capsys.readouterr().out == (
+        f"/hurt: could not save {queue_file}: another program kept it open for 0.5 s. "
+        "Nothing queued. Run /hurt again.\n"
+    )
+    assert [r["comment"] for r in read_queue(queue_file)] == ["earlier"]
 
 
 # ----------------- Categories -----------------

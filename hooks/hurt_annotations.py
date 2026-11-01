@@ -51,13 +51,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from langfuse_client import HttpResponse, LangfuseClient
+from state_files import HURT_SAVE_TIMEOUT_S, replace_file
 
 CATEGORIES = (
     "correction-repeated",
@@ -245,10 +245,9 @@ def load_pending_hurts(pending_file: Path) -> List[Dict[str, Any]]:
 
 
 def save_pending_hurts(pending_file: Path, records: List[Dict[str, Any]]) -> None:
-    pending_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = pending_file.with_suffix(".tmp")
-    tmp.write_text(json.dumps(records, indent=2), encoding="utf-8")
-    os.replace(tmp, pending_file)
+    """Raises state_files.FileInUseError when another program keeps pending_file
+    open for longer than HURT_SAVE_TIMEOUT_S; pending_file is then unchanged."""
+    replace_file(pending_file, json.dumps(records, indent=2), HURT_SAVE_TIMEOUT_S)
 
 
 def _is_well_formed(record: Any) -> bool:

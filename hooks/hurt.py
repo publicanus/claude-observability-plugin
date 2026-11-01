@@ -49,6 +49,7 @@ from state_files import (  # noqa: E402
     HURT_LOCK_TIMEOUT_S,
     HURT_PENDING_LOCK_FILE,
     HURT_UNRESOLVED_FILE,
+    FileInUseError,
     FileLock,
 )
 
@@ -73,7 +74,8 @@ def append_unresolved_hurt(
 
     target: hurt_annotations.queue_target() of the session's Langfuse project, stored
     so only a hook run with those keys attempts it.
-    Raises TimeoutError when the hook holds the queue for longer than timeout_s.
+    Raises TimeoutError when the hook holds the queue for longer than timeout_s, and
+    FileInUseError when another program keeps unresolved_file open for too long.
     """
     record = {
         "id": str(uuid.uuid4()),
@@ -139,6 +141,9 @@ def run(argv: list[str], *, env: Optional[Mapping[str, str]] = None) -> int:
             f"/hurt: the queue stayed busy for {HURT_LOCK_TIMEOUT_S:g} s while the hook sent "
             "earlier notes to Langfuse. Nothing queued. Run /hurt again."
         )
+        return 1
+    except FileInUseError as e:
+        print(f"/hurt: {e}. Nothing queued. Run /hurt again.")
         return 1
 
     print(

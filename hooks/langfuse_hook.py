@@ -51,10 +51,11 @@ from state_files import (  # noqa: E402
     LOG_FILE,
     STATE_DIR,
     STATE_FILE,
+    FileInUseError,
     FileLock,
     get_session_state_key,
     read_state,
-    retry_until,
+    replace_file,
 )
 
 
@@ -733,24 +734,10 @@ def save_hook_state(state: Dict[str, Any]) -> None:
                 continue
             if ts < cutoff:
                 del state[k]
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_FILE.with_suffix(".tmp")
-        content = json.dumps(state, indent=2, sort_keys=True)
-
-        def write_and_replace() -> bool:
-            # PermissionError: another process, such as a virus scanner, has a file open.
-            try:
-                tmp.write_text(content, encoding="utf-8")
-                os.replace(tmp, STATE_FILE)
-            except PermissionError:
-                return False
-            return True
-
-        if not retry_until(write_and_replace, STATE_SAVE_TIMEOUT_S):
-            info(
-                f"could not save {STATE_FILE}: it stayed in use for {STATE_SAVE_TIMEOUT_S}s; "
-                "this run's turns will be sent again on the next run"
-            )
+        try:
+            replace_file(STATE_FILE, json.dumps(state, indent=2, sort_keys=True), STATE_SAVE_TIMEOUT_S)
+        except FileInUseError as e:
+            info(f"{e}; this run's turns will be sent again on the next run")
     except Exception as e:
         debug(f"save_hook_state failed: {e}")
 
