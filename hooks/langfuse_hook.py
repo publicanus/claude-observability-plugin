@@ -3629,10 +3629,9 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
     credentials. Returns (status, detail):
 
     - "ok": credentials accepted.
-    - "rejected": the host answered but refused the keypair (401/403) —
-      diagnosable and worth naming the credential as the cause.
+    - "rejected": Langfuse refused the keypair, as keys_rejected() decides.
     - "unreachable": no answer (network/DNS/timeout) or any other non-2xx
-      response — the host or route is the more likely cause.
+      response, a 403 included — the host or route is the more likely cause.
 
     Never raises: LangfuseClient._request() catches every exception itself
     and reports it as status 0.
@@ -3641,8 +3640,6 @@ def classify_delivery_health(config: LangfuseConfig) -> Tuple[str, str]:
     if response.status == 200:
         return "ok", ""
     if keys_rejected(response.status):
-        return "rejected", f"HTTP {response.status} from {config.host}"
-    if response.status == 403:
         return "rejected", f"HTTP {response.status} from {config.host}"
     if response.status == 0:
         return "unreachable", f"{config.host} did not respond"
