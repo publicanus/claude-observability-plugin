@@ -956,8 +956,9 @@ class TurnAssemblyState:
     tool_use_timestamps_by_id: Dict[str, Any] = field(default_factory=dict)
     injected_by_tool_id: Dict[str, str] = field(default_factory=dict)
     current_rows: List[Dict[str, Any]] = field(default_factory=list)
-    # Set at a turn-end row (is_turn_end_row); a later notification or hand-back then
-    # starts a new turn instead of joining this one.
+    # Set at a turn-end row (is_turn_end_row); a later row that
+    # starts_turn_when_none_is_open accepts then starts a new turn instead of joining
+    # this one.
     turn_ended: bool = False
     # Each turn closed earlier in the batch, by each call it made, so a result that
     # arrives in a later turn still reaches the call's own turn.
