@@ -77,15 +77,6 @@ def test_classify_delivery_health_rejected_on_401(hook_module, monkeypatch):
     assert "example.test" in detail
 
 
-def test_classify_delivery_health_rejected_on_403(hook_module, monkeypatch):
-    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(403))
-
-    status, detail = hook_module.classify_delivery_health(make_config(hook_module))
-
-    assert status == "rejected"
-    assert "403" in detail
-
-
 def test_classify_delivery_health_unreachable_on_no_response(hook_module, monkeypatch):
     # LangfuseClient._request reports every network-level failure (DNS,
     # connection refused, timeout) as status 0 — it never raises.
@@ -391,6 +382,7 @@ def test_main_logs_rejection_instead_of_processed_on_bad_credentials(
 
     assert system_message is not None
     warning = system_message["systemMessage"]
+    assert "credentials rejected (HTTP 401" in warning
     assert "no traces are being recorded" in warning
     assert "LANGFUSE_PUBLIC_KEY" in warning and "LANGFUSE_SECRET_KEY" in warning
     assert "rotated key" in warning
@@ -434,6 +426,27 @@ def test_main_logs_unreachable_instead_of_processed_on_dead_host(
     assert "wait on this computer and are sent once Langfuse answers again" in warning
     assert "LANGFUSE_BASE_URL" in warning
     assert "https://cloud.langfuse.com" in warning
+    assert_points_at_the_repo_file(warning)
+
+
+def test_a_403_answer_warns_that_langfuse_cannot_be_reached_not_that_the_keys_are_rejected(
+    hook_module, isolated_hook_state, fake_langfuse, monkeypatch, capsys, tmp_path
+):
+    # A network filter between this computer and Langfuse can answer 403 too,
+    # so a 403 must not send the developer off to change keys that work.
+    install_fake_delivery_client(hook_module, monkeypatch, FakeResponse(403))
+    transcript = write_one_turn_transcript(tmp_path, "sess-403")
+
+    log_contents, system_message = run_main(hook_module, monkeypatch, capsys, fake_langfuse, "sess-403", transcript)
+
+    assert "Delivery waiting: HTTP 403 from" in log_contents
+    assert "Delivery rejected" not in log_contents
+
+    warning = system_message["systemMessage"]
+    assert warning.startswith("Langfuse cannot be reached: HTTP 403 from")
+    assert "wait on this computer and are sent once Langfuse answers again" in warning
+    assert "rejected" not in warning
+    assert "LANGFUSE_PUBLIC_KEY" not in warning
     assert_points_at_the_repo_file(warning)
 
 
