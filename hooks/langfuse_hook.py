@@ -150,6 +150,8 @@ ALREADY_CONFIGURED = "Langfuse: tracing is already configured for this repo."
 NOT_TRACED_RUN_SETUP = f"Langfuse: this session is not traced. To trace this repo, run {SETUP_COMMAND}."
 # The setup check's answer on a GitHub repo, which sends the setup skill to sharing the keys
 # through the repo. additionalContext is the field this event's output takes for added text.
+# The refused-keys warning in a repo whose keys come from GitHub: setup fetches the new pair.
+NO_LONGER_TRACED = f"Langfuse: this session is no longer traced. To trace this repo again, run {SETUP_COMMAND}."
 SETUP_ON_GITHUB = {
     "hookSpecificOutput": {
         "hookEventName": "UserPromptExpansion",
@@ -3771,6 +3773,13 @@ def format_processed_log(emitted: int, dur: float, session_id: str, status: str,
     return f"Processed {emitted} turns in {dur:.2f}s (session={session_id})"
 
 
+def delivery_warning(status: str, detail: str, host: str, checkout: Checkout) -> Optional[str]:
+    """format_delivery_warning, except refused keys in a repo whose keys branch was
+    fetched: there setup is the one step, so the warning names no file and no key."""
+    if status == "rejected" and keys_branch_fetched(checkout):
+        return NO_LONGER_TRACED
+    return format_delivery_warning(status, detail, host)
+
 def format_delivery_warning(status: str, detail: str, host: str) -> Optional[str]:
     """The user-visible warning for a known-bad delivery status, surfaced via
     the hook's JSON `systemMessage` field — not the log file nobody opens.
@@ -3883,14 +3892,15 @@ def main() -> int:
         return 0
 
     if config is not None:
-        trace_this_run(config, payload, start)
+        trace_this_run(config, checkout, payload, start)
     start_waiting_turns_sender()
     return 0
 
 
-def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float) -> None:
+def trace_this_run(config: LangfuseConfig, checkout: Checkout, payload: Dict[str, Any], start: float) -> None:
     """Attaches pending /hurt notes, stores this run's new turns to be sent, and
-    reports the delivery status in the log and, when it is bad, to the user."""
+    reports the delivery status in the log and, when it is bad, to the user;
+    checkout is the session's repo, for the wording of a refused-keys warning."""
     # Runs on every firing, independent of this run's hook_context/payload —
     # the pending queue is global to the machine, not scoped to this session,
     # so a run with the same keys can attach hurts left behind by a session
@@ -3942,7 +3952,7 @@ def trace_this_run(config: LangfuseConfig, payload: Dict[str, Any], start: float
         # User-visible, unlike the line above: printed on every firing while the
         # trace user cannot be read or the delivery status is bad (not
         # rate-limited with the probe that produced it), and silent otherwise.
-        warnings = [w for w in (config.user_warning, format_delivery_warning(status, detail, config.host)) if w]
+        warnings = [w for w in (config.user_warning, delivery_warning(status, detail, config.host, checkout)) if w]
         if warnings:
             print(json.dumps({"systemMessage": "\n".join(warnings)}))
 

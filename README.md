@@ -38,6 +38,14 @@ On a repo hosted on GitHub, also one reached through an SSH host alias that `~/.
 
 Each laptop's own key is in `~/.config/mate-record/laptop-key.txt` (on Windows, in the `.config\mate-record` folder of the user's profile). When a laptop is let in, the repo's keys replace any other keys in its settings file. In a repo that holds the keys, a session started without them says only to run `/mate-record:langfuse-setup`. Anyone with push access to the repo can get the keys this way, and with them read the project's traces in Langfuse.
 
+Whoever manages the repo, with admin rights and `gh`, uses the same command to change who can get the keys. Their own laptop must already be let in.
+
+- `/mate-record:langfuse-setup people` lists each person by git e-mail address, with their laptops by computer name, and takes a person or one laptop off. The keys already on a laptop taken off keep working until a new pair is in and the old one is deleted in Langfuse.
+- `/mate-record:langfuse-setup new pair` opens the settings file for the new pair, made by hand in Langfuse, and puts it in. The admin then deletes the old pair in Langfuse. Everyone still on the list gets the new pair the next time they run `/mate-record:langfuse-setup`, without the wait.
+- `/mate-record:langfuse-setup help`, or any other word after the command, lists these forms.
+
+When Langfuse refuses the keys in a repo that gets them from GitHub, a session says only that it is no longer traced and to run `/mate-record:langfuse-setup`.
+
 On any other repo, the skill prepares `.claude/settings.local.json` in the repo's main checkout with empty key fields, keeps that file out of git, lists it in `.worktreeinclude` so worktrees that Claude Code creates get a copy, and opens it in your editor. Paste your keys there and save; new sessions in the repo are then traced. The skill never asks for keys in the chat. When the repo's own `.claude/settings.local.json` already holds both keys, the skill says so and changes nothing, except on GitHub, as above. In a worktree, that is the main checkout's file, or else the worktree's own. The repo is the one the Claude Code session started in, also after the session changes to another folder. Keys set anywhere else, such as for every repo on the machine, do not count. When the hook cannot run on the machine, it offers to install uv.
 
 The keys and the Langfuse address go only in the `env` block of the repo's own `.claude/settings.local.json`: `LANGFUSE_PUBLIC_KEY` (`pk-lf-...`), `LANGFUSE_SECRET_KEY` (`sk-lf-...`) and, for your own Langfuse server, `LANGFUSE_BASE_URL`. Without an address there, traces go to https://cloud.langfuse.com, Langfuse Cloud EU. Keys and addresses set anywhere else, such as in your terminal or in the plugin's settings, are not used. The plugin refuses Langfuse Cloud's US, HIPAA and Japan regions: it sends nothing there and says so when the session starts.
